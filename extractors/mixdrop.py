@@ -43,9 +43,9 @@ class MixdropExtractor:
             url = url.replace("club", "ps").split("/2")[0]
         elif "ag" in url:
             url = url.replace("ag", "ps").split("/2")[0]
-        elif any(domain in url for domain in ["mdy48tn97.com", "mixdrop.to", "mixdrop.co"]):
+        elif any(domain in url for domain in ["mdy48tn97.com", "mixdrop.to", "mixdrop.co", "m1xdrop.net"]):
             # Handle alternative domains
-            for domain in ["mdy48tn97.com", "mixdrop.to", "mixdrop.co"]:
+            for domain in ["mdy48tn97.com", "mixdrop.to", "mixdrop.co", "m1xdrop.net"]:
                 if domain in url:
                     url = url.replace(domain, "mixdrop.ps").split("/2")[0]
                     break
