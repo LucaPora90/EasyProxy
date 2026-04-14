@@ -1,6 +1,7 @@
 import logging
 import random
 import re
+import time
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 
 from aiohttp import ClientSession, ClientTimeout, TCPConnector
@@ -30,6 +31,25 @@ class VixCloudExtractor:
 
     def _get_random_proxy(self):
         return random.choice(self.proxies) if self.proxies else None
+
+    @staticmethod
+    def _raise_if_embed_expired(url: str):
+        parsed = urlparse(url)
+        if "/embed/" not in parsed.path:
+            return
+        expires = parse_qs(parsed.query).get("expires", [None])[0]
+        if not expires:
+            return
+        try:
+            expires_ts = int(expires)
+        except (TypeError, ValueError):
+            return
+        now_ts = int(time.time())
+        if expires_ts <= now_ts:
+            raise ExtractorError(
+                f"Expired VixCloud embed URL (expired at {expires_ts}, current {now_ts}). "
+                "Use a fresh embed URL or the upstream page that generated it."
+            )
 
     def _build_request_headers(self, url: str, request_headers: dict | None = None) -> dict:
         headers = dict(self.base_headers)
@@ -233,6 +253,7 @@ class VixCloudExtractor:
         """Extract VixCloud URL."""
         request_headers = kwargs.get("request_headers") or self.request_headers or {}
         input_query = parse_qs(urlparse(url).query)
+        self._raise_if_embed_expired(url)
 
         if "/playlist/" in url:
             referer = request_headers.get("Referer") or request_headers.get("referer")
