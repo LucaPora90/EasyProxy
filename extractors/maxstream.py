@@ -1,6 +1,7 @@
 import logging
 import random
 import re
+from urllib.parse import urlparse
 from aiohttp import ClientSession, ClientTimeout, TCPConnector
 from aiohttp_socks import ProxyConnector
 from bs4 import BeautifulSoup
