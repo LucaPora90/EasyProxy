@@ -3,7 +3,7 @@ export PYTHONPATH=/app
 
 # Start FlareSolverr in the background
 echo "🚀 Starting FlareSolverr (v3 Python)..."
-cd /app/flaresolverr && python3 src/flaresolverr.py &
+cd /app/flaresolverr && PORT=8191 python3 src/flaresolverr.py &
 
 # Start Byparr in the background
 echo "🛡️ Starting Byparr..."
