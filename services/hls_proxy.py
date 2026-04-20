@@ -2438,6 +2438,10 @@ class HLSProxy:
                         curl_headers["Accept"] = "*/*"
 
                     curl_proxies = None
+                    # ✅ DEBUG: Log final headers for comparison
+                    logger.debug(f"🚀 [curl_cffi] Sending headers for {stream_url[:50]}: {curl_headers}")
+
+                    curl_proxies = None
                     if session_proxy:
                         curl_proxies = {"http": session_proxy, "https": session_proxy}
                     
@@ -2446,9 +2450,12 @@ class HLSProxy:
                     final_curl_url = stream_url
                     if "cccdn.net" in final_curl_url:
                         import urllib.parse
-                        # Unquote first to avoid double encoding if it was already encoded
                         final_curl_url = urllib.parse.unquote(final_curl_url)
 
+                    # ✅ NUOVO: Se è un manifest, proviamo a usare smart_request come fallback
+                    # se curl_cffi diretto dovesse dare ancora 403.
+                    is_manifest = ".m3u8" in final_curl_url.lower() or ".mpd" in final_curl_url.lower()
+                    
                     curl_resp = await curl_s.get(
                         final_curl_url, 
                         headers=curl_headers, 
@@ -2480,8 +2487,35 @@ class HLSProxy:
                         async def __aenter__(self): return self
                         async def __aexit__(self, exc_type, exc_val, exc_tb): pass
 
-                    resp_ctx = MockResp(curl_resp)
-                    goto_manifest_processing = True
+                    # Se curl_cffi fallisce con 403 su un manifest, proviamo FlareSolverr via smart_request
+                    if curl_resp.status_code == 403 and is_manifest:
+                        logger.warning(f"⚠️ [curl_cffi] 403 on manifest, trying smart_request fallback for {final_curl_url[:50]}...")
+                        from utils.smart_request import smart_request
+                        sr_result = await smart_request("request.get", final_curl_url, headers=curl_headers)
+                        if sr_result.get("html"):
+                            logger.info("✅ [smart_request] Fallback success for manifest content")
+                            # Mock a response object that looks like what the rest of the code expects
+                            class MockSRResp:
+                                def __init__(self, content):
+                                    self.status = 200
+                                    self.headers = {"Content-Type": "application/vnd.apple.mpegurl"}
+                                    self.url = yarl.URL(final_curl_url)
+                                    self._content = content.encode('utf-8')
+                                async def read(self): return self._content
+                                async def text(self, **kwargs): return self._content.decode('utf-8')
+                                async def close(self): pass
+                                async def __aenter__(self): return self
+                                async def __aexit__(self, *args): pass
+                            
+                            resp_ctx = MockSRResp(sr_result["html"])
+                            goto_manifest_processing = True
+                        else:
+                            # Fallback failed too, use original curl_resp
+                            resp_ctx = MockResp(curl_resp)
+                            goto_manifest_processing = True
+                    else:
+                        resp_ctx = MockResp(curl_resp)
+                        goto_manifest_processing = True
                 except Exception as e:
                     logger.error(f"❌ [curl_cffi] Error: {e}")
                     goto_manifest_processing = False
