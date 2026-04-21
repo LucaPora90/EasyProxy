@@ -34,13 +34,6 @@ except ImportError:
     HAS_CURL_CFFI = False
     CurlAsyncSession = None
 
-try:
-    from playwright.async_api import async_playwright
-    HAS_PLAYWRIGHT = True
-except ImportError:
-    HAS_PLAYWRIGHT = False
-    async_playwright = None
-
 from config import (
     GLOBAL_PROXIES,
     TRANSPORT_ROUTES,
@@ -370,18 +363,6 @@ class HLSProxy:
 
         # Version information
         self.latest_version = "Checking..."
-
-    @staticmethod
-    def _debug_header_snapshot(headers: dict) -> str:
-        if not headers:
-            return "keys=[] referer=- origin=- cookie_count=0 ua=0"
-        cookie_value = headers.get("Cookie") or headers.get("cookie") or ""
-        cookie_count = len([part for part in cookie_value.split(";") if part.strip()]) if cookie_value else 0
-        referer_value = headers.get("Referer") or headers.get("referer") or "-"
-        origin_value = headers.get("Origin") or headers.get("origin") or "-"
-        ua_present = "1" if (headers.get("User-Agent") or headers.get("user-agent")) else "0"
-        keys = ",".join(sorted(headers.keys()))
-        return f"keys=[{keys}] referer={referer_value} origin={origin_value} cookie_count={cookie_count} ua={ua_present}"
 
     async def shorten_hls_url(self, url: str) -> str:
         """Crea un ID breve per un URL e lo memorizza nella mappa."""
@@ -1283,11 +1264,6 @@ class HLSProxy:
             if hls_sid and hls_sid in self.hls_header_sessions:
                 logger.info(f"📁 Using HLS header session: {hls_sid}")
                 combined_headers.update(self.hls_header_sessions[hls_sid])
-                logger.debug(
-                    "🧪 [hls sid debug] phase=load sid=%s %s",
-                    hls_sid,
-                    self._debug_header_snapshot(self.hls_header_sessions[hls_sid]),
-                )
 
             # 1. Header passati come h_X=Y
             for param_name, param_value in request.query.items():
@@ -1399,11 +1375,6 @@ class HLSProxy:
                     current_hls_sid = f"sid_{int(time.time())}_{random.getrandbits(16)}"
                     self.hls_header_sessions[current_hls_sid] = stream_headers
                     logger.info(f"🆕 Created HLS header session: {current_hls_sid}")
-                    logger.debug(
-                        "🧪 [hls sid debug] phase=create-manifest sid=%s %s",
-                        current_hls_sid,
-                        self._debug_header_snapshot(stream_headers),
-                    )
 
                 rewritten_manifest = await ManifestRewriter.rewrite_manifest_urls(
                     manifest_content=captured_manifest,
@@ -1902,11 +1873,6 @@ class HLSProxy:
                 hls_sid = f"sid_{int(time.time())}_{random.getrandbits(16)}"
                 self.hls_header_sessions[hls_sid] = stream_headers
                 logger.info(f"🆕 Created HLS header session in extractor: {hls_sid}")
-                logger.debug(
-                    "🧪 [hls sid debug] phase=create-extractor sid=%s %s",
-                    hls_sid,
-                    self._debug_header_snapshot(stream_headers),
-                )
                 header_params = f"&hls_sid={hls_sid}"
             else:
                 header_params = "".join(
@@ -2456,19 +2422,6 @@ class HLSProxy:
                     f"📡 [Proxy Stream] {routing} - Using session (direct) for: {stream_url}"
                 )
 
-            if is_cccdn_stream:
-                logger.debug(
-                    "🧪 [cccdn debug] phase=pre-fetch path=%s manifest=%s referer=%s origin=%s cookie_count=%s ua=%s range=%s sid=%s",
-                    request.path,
-                    ".m3u8" in stream_url.lower() or ".mpd" in stream_url.lower(),
-                    headers.get("Referer", "-"),
-                    headers.get("Origin", "-"),
-                    _cookie_summary(headers.get("Cookie")),
-                    "1" if headers.get("User-Agent") else "0",
-                    "1" if headers.get("range") or headers.get("Range") else "0",
-                    request.query.get("hls_sid", "-"),
-                )
-            
             # --- PROTECTED DOMAINS FALLBACK: curl_cffi ---
             if HAS_CURL_CFFI and (not is_cccdn_stream) and any(d in stream_url for d in ["cinemacity.cc", "torrentio", "strem.fun"]):
                 logger.info(f"🚀 [curl_cffi] Using browser impersonation for: {stream_url}")
@@ -2536,18 +2489,6 @@ class HLSProxy:
                     # ✅ NUOVO: Se è un manifest, proviamo a usare smart_request come fallback
                     # se curl_cffi diretto dovesse dare ancora 403.
                     is_manifest = ".m3u8" in final_curl_url.lower() or ".mpd" in final_curl_url.lower()
-                    if is_cccdn_stream:
-                        logger.debug(
-                            "🧪 [cccdn debug] phase=curl-request manifest=%s referer=%s origin=%s cookie_count=%s ua=%s sec_fetch_site=%s url=%s",
-                            is_manifest,
-                            curl_headers.get("Referer", "-"),
-                            curl_headers.get("Origin", "-"),
-                            _cookie_summary(curl_headers.get("Cookie")),
-                            "1",
-                            curl_headers.get("Sec-Fetch-Site", "-"),
-                            _short_url(final_curl_url),
-                        )
-                    
                     curl_resp = await curl_s.get(
                         final_curl_url, 
                         headers=curl_headers, 
@@ -2610,8 +2551,6 @@ class HLSProxy:
                                 async def __aexit__(self, *args): pass
                             
                             # ✅ DEBUG: Vediamo cosa ci restituisce il fallback
-                            logger.debug(f"🔍 [Fallback Debug] Cookies received: {sr_result.get('cookies')}")
-                            
                             # ✅ CRITICAL: Aggiorna la sessione con i cookie freschi sbloccati
                             target_sid = request.query.get("hls_sid")
                             fresh_cookies = sr_result.get("cookies")
@@ -2638,13 +2577,6 @@ class HLSProxy:
                     else:
                         resp_ctx = MockResp(curl_resp)
                         goto_manifest_processing = True
-                    if is_cccdn_stream:
-                        logger.debug(
-                            "🧪 [cccdn debug] phase=curl-response status=%s manifest=%s final_url=%s",
-                            curl_resp.status_code,
-                            is_manifest,
-                            _short_url(str(curl_resp.url)),
-                        )
                 except Exception as e:
                     logger.error(f"❌ [curl_cffi] Error: {e}")
                     goto_manifest_processing = False
@@ -2661,17 +2593,6 @@ class HLSProxy:
                 if resp.status not in [200, 206]:
                     error_body = await resp.read()
                     routing = "WARP" if session_proxy == WARP_PROXY_URL else ("BYPASS" if session_proxy is None else "PROXY")
-                    if is_cccdn_stream:
-                        logger.debug(
-                            "🧪 [cccdn debug] phase=response-error status=%s path=%s referer=%s origin=%s cookie_count=%s content_type=%s url=%s",
-                            resp.status,
-                            request.path,
-                            headers.get("Referer", "-"),
-                            headers.get("Origin", "-"),
-                            _cookie_summary(headers.get("Cookie")),
-                            content_type,
-                            _short_url(stream_url),
-                        )
                     logger.warning(f"⚠️ Upstream returned error {resp.status} for {stream_url} [Routing: {routing}]")
                     return web.Response(body=error_body, status=resp.status, headers={"Content-Type": content_type, "Access-Control-Allow-Origin": "*"})
 
@@ -2725,11 +2646,6 @@ class HLSProxy:
                         current_hls_sid = f"sid_{int(time.time())}_{random.getrandbits(16)}"
                         self.hls_header_sessions[current_hls_sid] = headers
                         logger.info(f"🆕 Created HLS header session in proxy: {current_hls_sid}")
-                        logger.debug(
-                            "🧪 [hls sid debug] phase=create-proxy sid=%s %s",
-                            current_hls_sid,
-                            self._debug_header_snapshot(headers),
-                        )
 
                     rewritten = await ManifestRewriter.rewrite_manifest_urls(
                         manifest_content=manifest_content,
@@ -3864,125 +3780,6 @@ class HLSProxy:
         except Exception as e:
             logger.error(f"❌ Error fetching IP: {e}")
             return web.Response(text=str(e), status=500)
-
-    async def handle_debug_fetch(self, request):
-        """Diagnostic endpoint to compare aiohttp/curl_cffi/playwright fetch behavior."""
-        if not check_password(request):
-            return web.Response(status=401, text="Unauthorized: Invalid API Password")
-
-        target_url = request.query.get("url") or request.query.get("d")
-        if not target_url:
-            return web.Response(status=400, text="Missing 'url' or 'd' parameter")
-
-        headers = {}
-        for param_name, param_value in request.query.items():
-            if param_name.startswith("h_"):
-                headers[param_name[2:]] = param_value
-
-        use_proxy = request.query.get("use_proxy") == "1"
-        proxy_url = get_proxy_for_url(target_url, TRANSPORT_ROUTES, GLOBAL_PROXIES) if use_proxy else None
-        disable_ssl = get_ssl_setting_for_url(target_url, TRANSPORT_ROUTES)
-        timeout = aiohttp.ClientTimeout(total=30)
-
-        def summarize_text(value: str, limit: int = 200) -> str:
-            if value is None:
-                return ""
-            if len(value) <= limit:
-                return value
-            return value[:limit] + "..."
-
-        async def run_aiohttp_probe():
-            result = {"ok": False, "engine": "aiohttp", "proxy": proxy_url or ""}
-            try:
-                connector = get_connector_for_proxy(proxy_url) if proxy_url else TCPConnector(limit=0, ssl=False if disable_ssl else None)
-                async with ClientSession(timeout=timeout, connector=connector, cookie_jar=aiohttp.CookieJar(unsafe=True)) as session:
-                    async with session.get(target_url, headers=headers, ssl=not disable_ssl, allow_redirects=True) as resp:
-                        body = await resp.text(errors="replace")
-                        cookies = session.cookie_jar.filter_cookies(yarl.URL(str(resp.url)))
-                        result.update({
-                            "ok": resp.status in (200, 206),
-                            "status": resp.status,
-                            "final_url": str(resp.url),
-                            "content_type": resp.headers.get("content-type", ""),
-                            "body_snippet": summarize_text(body),
-                            "cookie_names": sorted(list(cookies.keys())),
-                        })
-            except Exception as e:
-                result["error"] = str(e)
-            return result
-
-        async def run_curl_probe():
-            result = {"ok": False, "engine": "curl_cffi", "proxy": proxy_url or ""}
-            if not HAS_CURL_CFFI:
-                result["error"] = "curl_cffi not installed"
-                return result
-            try:
-                async with CurlAsyncSession(impersonate="chrome124") as session:
-                    curl_headers = dict(headers)
-                    curl_proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
-                    resp = await session.get(
-                        target_url,
-                        headers=curl_headers,
-                        proxies=curl_proxies,
-                        verify=not disable_ssl,
-                        timeout=30,
-                        allow_redirects=True,
-                    )
-                    result.update({
-                        "ok": resp.status_code in (200, 206),
-                        "status": resp.status_code,
-                        "final_url": str(resp.url),
-                        "content_type": resp.headers.get("content-type", ""),
-                        "body_snippet": summarize_text(resp.text),
-                        "cookie_names": sorted(list(resp.cookies.get_dict().keys())),
-                    })
-            except Exception as e:
-                result["error"] = str(e)
-            return result
-
-        async def run_playwright_probe():
-            result = {"ok": False, "engine": "playwright", "proxy": proxy_url or ""}
-            if not HAS_PLAYWRIGHT:
-                result["error"] = "playwright not installed"
-                return result
-            try:
-                launch_kwargs = {"headless": True}
-                if proxy_url:
-                    launch_kwargs["proxy"] = {"server": proxy_url}
-                async with async_playwright() as p:
-                    browser = await p.chromium.launch(**launch_kwargs)
-                    context = await browser.new_context(ignore_https_errors=disable_ssl, extra_http_headers=headers)
-                    page = await context.new_page()
-                    response = await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
-                    body = await page.content()
-                    cookies = await context.cookies()
-                    result.update({
-                        "ok": bool(response and response.status in (200, 206)),
-                        "status": response.status if response else None,
-                        "final_url": page.url,
-                        "content_type": response.headers.get("content-type", "") if response else "",
-                        "body_snippet": summarize_text(body),
-                        "cookie_names": sorted([c["name"] for c in cookies]),
-                    })
-                    await context.close()
-                    await browser.close()
-            except Exception as e:
-                result["error"] = str(e)
-            return result
-
-        results = await asyncio.gather(
-            run_aiohttp_probe(),
-            run_curl_probe(),
-            run_playwright_probe(),
-        )
-
-        return web.json_response({
-            "url": target_url,
-            "headers": headers,
-            "use_proxy": use_proxy,
-            "proxy_url": proxy_url,
-            "results": results,
-        })
 
     async def cleanup(self):
         """Pulizia delle risorse"""
