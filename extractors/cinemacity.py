@@ -244,12 +244,23 @@ class CinemaCityExtractor:
         clean_cookies = clean_cookies.strip().rstrip(';')
 
         # mediaflow_endpoint will determine how to handle the stream
+        # Use player_referer (player.php iframe URL) — CDN validates this, not the page URL
+        try:
+            origin = urllib.parse.urlparse(url)
+            origin_str = f"{origin.scheme}://{origin.netloc}"
+        except Exception:
+            origin_str = self.base_url
+
         return {
             "destination_url": safe_url,
             "request_headers": {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                "Referer": url,
-                "Cookie": clean_cookies
+                "Referer": player_referer,
+                "Origin": origin_str,
+                "Cookie": clean_cookies,
+                "Accept": "*/*",
+                "Accept-Language": "en-US,en;q=0.5",
+                "Connection": "keep-alive"
             },
             "mediaflow_endpoint": "hls_manifest_proxy" if ".m3u8" in safe_url else "proxy_stream_endpoint"
         }
