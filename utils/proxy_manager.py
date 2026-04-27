@@ -97,7 +97,9 @@ class FreeProxyManager:
             except Exception:
                 pass
 
-    async def get_proxies(self, probe_func: Callable[[str], Any], force_refresh: bool = False) -> List[str]:
+    async def get_proxies(self, probe_func: Optional[Callable[[str], Any]] = None, force_refresh: bool = False) -> List[str]:
+        if probe_func is None:
+            probe_func = lambda x: True
         now = time.time()
         
         # We need a minimum amount of working proxies.
@@ -208,7 +210,7 @@ class FreeProxyManager:
             
             return list(self.proxies)
 
-    async def get_next_sequence(self, probe_func: Callable[[str], Any]) -> List[str]:
+    async def get_next_sequence(self, probe_func: Optional[Callable[[str], Any]] = None) -> List[str]:
         proxies = await self.get_proxies(probe_func)
         if not proxies:
             return []

@@ -965,6 +965,15 @@ class HLSProxy:
                     return self.extractors[key]
 
             # 2. Auto-detection basata sull'URL
+            # ✅ NUOVO: Salta estrattori specifici se l'URL sembra già un link diretto a un media
+            # (evita di provare a estrarre un .mp4 come se fosse una pagina HTML)
+            path_lower = url.split('?')[0].lower()
+            if any(path_lower.endswith(ext) for ext in [".mp4", ".m3u8", ".ts", ".mkv", ".avi", ".mov", ".flv", ".wmv", ".mp3", ".aac", ".m4a", ".mpd"]):
+                key = "hls_generic"
+                if key not in self.extractors:
+                    self.extractors[key] = GenericHLSExtractor(request_headers, proxies=GLOBAL_PROXIES)
+                return self.extractors[key]
+
             if "vavoo.to" in url:
                 key = "vavoo_direct" if bypass_warp else "vavoo"
                 proxy = get_proxy_for_url("vavoo.to", TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp)

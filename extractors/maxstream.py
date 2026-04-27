@@ -11,6 +11,7 @@ from bs4 import BeautifulSoup
 from config import GLOBAL_PROXIES, TRANSPORT_ROUTES, get_proxy_for_url, get_connector_for_proxy
 
 from utils.smart_request import smart_request
+from utils.proxy_manager import FreeProxyManager
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,24 @@ class MaxstreamExtractor:
         self.mediaflow_endpoint = "hls_proxy"
         self.proxies = proxies or []
         self.resolver = StaticResolver()
+        self.proxy_manager = FreeProxyManager.get_instance(
+            "maxstream",
+            [
+                "https://raw.githubusercontent.com/proxifly/free-proxy-list/refs/heads/main/proxies/all/data.txt",
+                "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=protocolipport&format=text",
+                "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt",
+                "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks4.txt",
+                "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt",
+                "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt",
+                "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks5.txt",
+                "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies.txt",
+                "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt",
+                "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/all.txt",
+                "https://raw.githubusercontent.com/mmpx12/proxy-list/master/https.txt",
+                "https://raw.githubusercontent.com/mmpx12/proxy-list/master/socks4.txt",
+                "https://raw.githubusercontent.com/mmpx12/proxy-list/master/socks5.txt"
+            ]
+        )
 
     def _get_random_proxy(self):
         return random.choice(self.proxies) if self.proxies else None
@@ -142,6 +161,16 @@ class MaxstreamExtractor:
             real_ips = await self._resolve_doh(domain)
             for ip in real_ips[:2]: # Try first 2 IPs
                 paths.append({"proxy": None, "use_ip": ip})
+        
+        # Path 4: Free Proxies fallback (if it's a redirector or maxstream)
+        if any(d in domain for d in ["uprot.net", "safego.cc", "clicka.cc", "maxstream"]):
+            try:
+                # Use a dummy probe to get current proxies without full validation wait
+                free_proxies = await self.proxy_manager.get_proxies(lambda x: True)
+                for p in free_proxies[:3]: # Try first 3 available
+                    paths.append({"proxy": p, "use_ip": None})
+            except Exception as e:
+                logger.debug(f"Failed to get free proxies: {e}")
         
         for path in paths:
             proxy = path["proxy"]
