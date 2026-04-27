@@ -1,0 +1,21 @@
+name: Sync della repo sullo Space HF
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+env:
+  HF_USERNAME: wrangler90
+  HF_SPACE: Luca
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Request Factory Rebuild
+        run: |
+          curl -X POST \
+          -H "Authorization: Bearer ${{ secrets.HF_TOKEN }}" \
+          "https://huggingface.co/api/spaces/${HF_USERNAME}/${HF_SPACE}/restart?factory=true"
