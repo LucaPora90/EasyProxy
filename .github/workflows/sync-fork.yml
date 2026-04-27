@@ -2,7 +2,7 @@ name: Sync Fork EasyProxy
 
 on:
   schedule:
-    - cron: "0 * * * *"   # ogni ora
+    - cron: "0 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -23,7 +23,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git remote add upstream https://github.com/LucaPora90/EasyProxy.git || true
+          git remote remove upstream || true
+          git remote add upstream https://github.com/LucaPora90/EasyProxy.git
           git fetch upstream
 
           git checkout main
