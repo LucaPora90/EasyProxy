@@ -48,29 +48,40 @@ class FreeProxyManager:
         all_candidates = []
         scraper = cloudscraper.create_scraper(delay=2)
         
-        for url in self.list_urls:
+        async def fetch_one(url):
             try:
                 logger.debug(f"ProxyManager[{self.name}]: Fetching from {url}")
-                resp = await asyncio.to_thread(scraper.get, url, timeout=25)
+                # Use a smaller timeout for faster pool initialization
+                resp = await asyncio.to_thread(scraper.get, url, timeout=15)
                 resp.raise_for_status()
                 
-                count = 0
+                candidates = []
                 for line in resp.text.splitlines():
                     line = line.strip()
                     if not line:
                         continue
                     normalized = self._normalize_proxy_url(line)
-                    if normalized and normalized not in all_candidates:
-                        all_candidates.append(normalized)
-                        count += 1
-                        if self.max_fetch > 0 and len(all_candidates) >= self.max_fetch:
-                            break
-                logger.info(f"ProxyManager[{self.name}]: Fetched {count} candidates from {url}")
-                if self.max_fetch > 0 and len(all_candidates) >= self.max_fetch:
-                    break
+                    if normalized:
+                        candidates.append(normalized)
+                return candidates
             except Exception as e:
-                logger.warning(f"ProxyManager[{self.name}]: Failed to fetch proxy list from {url}: {e}")
+                logger.debug(f"ProxyManager[{self.name}]: Failed to fetch proxy list from {url}: {e}")
+                return []
+
+        # Fetch all URLs in parallel
+        tasks = [asyncio.create_task(fetch_one(url)) for url in self.list_urls]
+        results = await asyncio.gather(*tasks)
         
+        seen = set()
+        for candidates in results:
+            for c in candidates:
+                if c not in seen:
+                    all_candidates.append(c)
+                    seen.add(c)
+                    if self.max_fetch > 0 and len(all_candidates) >= self.max_fetch:
+                        return all_candidates
+        
+        logger.info(f"ProxyManager[{self.name}]: Fetched total {len(all_candidates)} candidates from {len(self.list_urls)} sources")
         return all_candidates
 
     async def _probe_proxy_worker(self, proxy_url: str, probe_func: Callable[[str], Any], semaphore: asyncio.Semaphore, good_list: List[str], ready_event: Optional[asyncio.Event] = None):

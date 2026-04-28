@@ -122,7 +122,7 @@ async def smart_request(
                     {
                         "name": k,
                         "value": v,
-                        "domain": cookie_domain,
+                        "domain": f".{cookie_domain.split('.')[-2]}.{cookie_domain.split('.')[-1]}" if len(cookie_domain.split('.')) >= 2 else cookie_domain,
                         "path": "/",
                         "secure": cookie_secure,
                     }
@@ -133,13 +133,8 @@ async def smart_request(
         "url": url,
         "maxTimeout": (FLARESOLVERR_TIMEOUT + 60) * 1000,
     }
-    fs_request_headers = {
-        key: value
-        for key, value in headers.items()
-        if key.lower() != "cookie"
-    }
-    if fs_request_headers:
-        payload["headers"] = fs_request_headers
+    # FlareSolverr v2/v3 doesn't support 'headers' anymore and it can cause issues.
+    # It handles its own headers through browser impersonation.
     if fs_cookies: payload["cookies"] = fs_cookies
     if post_data: payload["postData"] = post_data
     

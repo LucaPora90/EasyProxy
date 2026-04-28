@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import random
 import re
@@ -138,11 +139,10 @@ class MaxstreamExtractor:
         return []
 
     async def _smart_request(self, url: str, method="GET", is_binary=False, **kwargs):
-        """Request with automatic retry using different proxies and resolver fallback on connection failure."""
+        """Request with parallelized path testing for maximum speed."""
         if url.startswith("data:"):
             import base64
             try:
-                # Support for data URIs (e.g. base64 captchas)
                 _, data = url.split(",", 1)
                 decoded = base64.b64decode(data)
                 return decoded if is_binary else decoded.decode("utf-8", errors="ignore")
@@ -150,151 +150,135 @@ class MaxstreamExtractor:
                 logger.error(f"Failed to decode data URI: {e}")
                 return b"" if is_binary else ""
 
-        last_error = None
         parsed_url = urlparse(url)
         domain = parsed_url.netloc
         
-        # Clear previous mapping for this domain to start fresh
+        # Clear previous mapping for this domain
         self.resolver.mapping.pop(domain, None)
 
-        # Determine paths to try: Direct, Proxies, and then resolver override
-        paths = []
-        # Path 1: Direct (system DNS)
-        paths.append({"proxy": None, "use_ip": None})
+        # 1. Define high-priority paths to test in parallel
+        priority_paths = []
+        # Path 1: Direct
+        priority_paths.append({"proxy": None, "use_ip": None})
         
-        # Path 2: Proxies (route-specific first)
+        # Path 2: Configured Proxies
         proxies_for_url = self._get_proxies_for_url(url)
-        if proxies_for_url:
-            for p in proxies_for_url:
-                paths.append({"proxy": p, "use_ip": None})
+        for p in proxies_for_url[:2]:
+            priority_paths.append({"proxy": p, "use_ip": None})
         
-        # Path 3: DoH fallback (override resolver) if it's uprot or maxstream
-        if "uprot.net" in domain or "maxstream" in domain:
+        # Path 3: DoH fallback
+        if any(d in domain for d in ["uprot.net", "maxstream"]):
             real_ips = await self._resolve_doh(domain)
-            for ip in real_ips[:2]: # Try first 2 IPs
-                paths.append({"proxy": None, "use_ip": ip})
-        
-        # Path 4: Free Proxies fallback (if it's a redirector or maxstream)
-        if any(d in domain for d in ["uprot.net", "safego.cc", "clicka.cc", "maxstream"]):
-            try:
-                # Use a dummy probe to get current proxies without full validation wait
-                free_proxies = await self.proxy_manager.get_proxies(lambda x: True)
-                # Randomize to avoid hitting the same failing proxies in sequence
-                random.shuffle(free_proxies)
-                for p in free_proxies[:10]: # Try more proxies
-                    paths.append({"proxy": p, "use_ip": None})
-            except Exception as e:
-                logger.debug(f"Failed to get free proxies: {e}")
-        
-        for path in paths:
+            for ip in real_ips[:1]:
+                priority_paths.append({"proxy": None, "use_ip": ip})
+
+        async def try_path(path):
             proxy = path["proxy"]
             use_ip = path["use_ip"]
             
+            # For parallel execution, we need isolated sessions for DoH paths
+            # since they modify the resolver mapping.
+            # To keep it simple and safe, we'll use a local session for each path
+            # if it's a proxy or DoH request.
+            
+            local_resolver = StaticResolver()
             if use_ip:
-                # CRITICAL: Must destroy old session to flush TCPConnector DNS cache!
-                # Otherwise connector reuses cached (hijacked) IP even with new resolver mapping.
-                if self.session and not self.session.closed:
-                    await self.session.close()
-                    self.session = None
-                self.resolver.mapping[domain] = use_ip
-                logger.debug(f"DoH bypass: forcing {domain} -> {use_ip}")
-            else:
-                self.resolver.mapping.pop(domain, None)
-
-            session = await self._get_session(proxy=proxy)
+                local_resolver.mapping[domain] = use_ip
+            
+            timeout = ClientTimeout(total=20, connect=8, sock_read=15)
+            connector = get_connector_for_proxy(proxy) if proxy else TCPConnector(resolver=local_resolver, ssl=False)
+            
             try:
-                # Add current cookies to kwargs for aiohttp
-                if self.cookies:
-                    kwargs["cookies"] = self.cookies
-                
-                async with session.request(method, url, ssl=False, **kwargs) as response:
-                    if response.status < 400:
-                        if is_binary:
-                            content = await response.read()
-                            if proxy: await session.close()
-                            return content
-                        text = await response.text()
-                        
-                        # Update persistent cookies
-                        for k, v in response.cookies.items():
-                            self.cookies[k] = v.value
-                        
-                        # Check for Cloudflare challenge in successful response
-                        if any(marker in text.lower() for marker in ["cf-challenge", "ray id", "checking your browser"]):
-                            # Fallback to the global smart_request utility
-                            if proxy: await session.close()
-                            fs_cmd = f"request.{method.lower()}"
-                            # Pass the current proxy and cookies
-                            fs_proxies = [proxy] if proxy else self.proxies
+                async with ClientSession(timeout=timeout, connector=connector, headers=self.base_headers) as session:
+                    # Add current cookies
+                    call_kwargs = kwargs.copy()
+                    if self.cookies:
+                        call_kwargs["cookies"] = self.cookies
+                    
+                    async with session.request(method, url, ssl=False, **call_kwargs) as response:
+                        if response.status < 400:
+                            if is_binary:
+                                return await response.read()
+                            text = await response.text()
                             
-                            # Add existing cookies to headers for smart_request to pick up
+                            # Update persistent cookies (thread-safe-ish since it's just a dict update)
+                            for k, v in response.cookies.items():
+                                self.cookies[k] = v.value
+                            
+                            # Check for Cloudflare
+                            if any(marker in text.lower() for marker in ["cf-challenge", "ray id", "checking your browser"]):
+                                # Try FlareSolverr for this path
+                                fs_cmd = f"request.{method.lower()}"
+                                fs_headers = kwargs.get("headers", {}).copy()
+                                if self.cookies:
+                                    fs_headers["Cookie"] = "; ".join([f"{k}={v}" for k, v in self.cookies.items()])
+
+                                result = await smart_request(fs_cmd, url, headers=fs_headers, post_data=kwargs.get("data"), proxies=[proxy] if proxy else None)
+                                
+                                if isinstance(result, dict) and result.get("html"):
+                                    self.cookies.update(result.get("cookies", {}))
+                                    html = result.get("html", "")
+                                    if not ("Chromium Authors" in html or "id=\"main-frame-error\"" in html):
+                                        return html
+                                return None
+                            
+                            return text
+                        elif response.status in (403, 503):
+                            # Try FlareSolverr immediately
+                            fs_cmd = f"request.{method.lower()}"
                             fs_headers = kwargs.get("headers", {}).copy()
                             if self.cookies:
                                 fs_headers["Cookie"] = "; ".join([f"{k}={v}" for k, v in self.cookies.items()])
 
-                            result = await smart_request(fs_cmd, url, headers=fs_headers, post_data=kwargs.get("data"), proxies=fs_proxies)
-
-                            if isinstance(result, dict):
+                            result = await smart_request(fs_cmd, url, headers=fs_headers, post_data=kwargs.get("data"), proxies=[proxy] if proxy else None)
+                            
+                            if isinstance(result, dict) and result.get("html"):
                                 self.cookies.update(result.get("cookies", {}))
                                 html = result.get("html", "")
-                                
-                                # Check if FlareSolverr returned a browser error page (Chromium Authors style)
-                                if "Chromium Authors" in html or "id=\"main-frame-error\"" in html:
-                                    logger.warning(f"FlareSolverr returned a browser error page on this path, trying next...")
-                                    last_error = "FlareSolverr browser error page"
-                                    html = ""
-
-                                if html: return html
-                            
-                            last_error = "FlareSolverr challenge failed or empty response"
-                            logger.warning(f"FlareSolverr failed for {url} on this path, trying next path...")
-                            continue
-
-                        if proxy: await session.close()
-                        return text
-                    elif response.status in (403, 503):
-                        # Might be Cloudflare block, try FlareSolverr immediately for this path
-                        logger.warning(f"HTTP {response.status} on {url}, checking with FlareSolverr...")
-                        if proxy: await session.close()
-                        fs_cmd = f"request.{method.lower()}"
-                        # Pass the current proxy and cookies
-                        fs_proxies = [proxy] if proxy else self.proxies
-                        
-                        fs_headers = kwargs.get("headers", {}).copy()
-                        if self.cookies:
-                            fs_headers["Cookie"] = "; ".join([f"{k}={v}" for k, v in self.cookies.items()])
-
-                        result = await smart_request(fs_cmd, url, headers=fs_headers, post_data=kwargs.get("data"), proxies=fs_proxies)
-                        
-                        if isinstance(result, dict):
-                            self.cookies.update(result.get("cookies", {}))
-                            html = result.get("html", "")
-                            
-                            # Check if FlareSolverr returned a browser error page (Chromium Authors style)
-                            if "Chromium Authors" in html or "id=\"main-frame-error\"" in html:
-                                logger.warning(f"FlareSolverr returned a browser error page on this path, trying next...")
-                                last_error = "FlareSolverr browser error page"
-                                html = ""
-
-                            if html: return html
-                            
-                        last_error = "FlareSolverr block/challenge failed"
-                        logger.warning(f"FlareSolverr failed for {url} on this path, trying next path...")
-                        continue
-                    else:
-                        logger.warning(f"Request to {url} failed (Status {response.status}) [Proxy: {proxy}, StaticIP: {use_ip}]")
-            except Exception as e:
-                logger.warning(f"Request to {url} failed (Error: {e}) [Proxy: {proxy}, StaticIP: {use_ip}]")
-                last_error = e
-                # If DoH attempt failed, destroy session so next IP gets fresh connector
-                if use_ip and self.session and not self.session.closed:
-                    await self.session.close()
-                    self.session = None
+                                if not ("Chromium Authors" in html or "id=\"main-frame-error\"" in html):
+                                    return html
+                        return None
+            except Exception:
+                return None
             finally:
-                if proxy and 'session' in locals() and not session.closed:
-                    await session.close()
+                if not connector.closed:
+                    await connector.close()
+
+        # 2. Execute priority paths in parallel
+        logger.debug(f"Testing {len(priority_paths)} priority paths in parallel...")
+        tasks = [asyncio.create_task(try_path(p)) for p in priority_paths]
         
-        raise ExtractorError(f"Connection failed for {url} after trying all paths. Last error: {last_error}")
+        for task in asyncio.as_completed(tasks):
+            result = await task
+            if result:
+                # Cancel remaining priority tasks
+                for t in tasks:
+                    if not t.done(): t.cancel()
+                return result
+
+        # 3. Fallback to Free Proxies in batches
+        if any(d in domain for d in ["uprot.net", "safego.cc", "clicka.cc", "maxstream"]):
+            logger.info("Priority paths failed. Trying free proxies in batches...")
+            try:
+                free_proxies = await self.proxy_manager.get_proxies()
+                random.shuffle(free_proxies)
+                
+                # Batch of 3 proxies at a time
+                batch_size = 3
+                for i in range(0, min(len(free_proxies), 9), batch_size):
+                    batch = free_proxies[i : i + batch_size]
+                    batch_tasks = [asyncio.create_task(try_path({"proxy": p, "use_ip": None})) for p in batch]
+                    
+                    for task in asyncio.as_completed(batch_tasks):
+                        res = await task
+                        if res:
+                            for t in batch_tasks:
+                                if not t.done(): t.cancel()
+                            return res
+            except Exception as e:
+                logger.debug(f"Free proxy fallback failed: {e}")
+
+        raise ExtractorError(f"Connection failed for {url} after all parallel attempts.")
 
     async def _solve_uprot_captcha(self, text: str, original_url: str) -> str:
         """Find, download and solve captcha on uprot page."""

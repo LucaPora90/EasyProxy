@@ -7,6 +7,7 @@ import os
 from urllib.parse import urlparse, urljoin, urlencode
 
 import aiohttp
+from aiohttp import ClientSession, TCPConnector
 from bs4 import BeautifulSoup, SoupStrainer
 from aiohttp_socks import ProxyConnector
 
@@ -92,7 +93,6 @@ class MixdropExtractor:
                 fs_headers["X-Proxy-Server"] = get_solver_proxy_url(proxy)
         if post_data: payload["postData"] = post_data
         if session_id: payload["session"] = session_id
-        if headers: payload["headers"] = headers
         async with aiohttp.ClientSession() as fs_session:
             async with fs_session.post(endpoint, json=payload, headers=fs_headers, timeout=settings.flaresolverr_timeout + 95) as resp:
                 data = await resp.json()
@@ -122,70 +122,73 @@ class MixdropExtractor:
         if force_flaresolverr:
             try:
                 fs_cmd = "request.post" if post_data else "request.get"
-                fs_res = await self._request_flaresolverr(fs_cmd, target_url, urlencode(post_data) if post_data else None, session_id=session_id, headers=request_headers)
+                fs_res = await self._request_flaresolverr(fs_cmd, target_url, urlencode(post_data) if post_data else None, session_id=session_id)
                 sol = fs_res.get("solution", {})
                 cookies.update({c["name"]: c["value"] for c in sol.get("cookies", [])})
                 return sol.get("response", ""), sol.get("url", target_url)
             except Exception:
                 return None, target_url
 
-        # Determine initial preferred proxy (WARP/Route)
-        preferred_proxy = get_proxy_for_url(target_url, TRANSPORT_ROUTES, self.proxies, self.bypass_warp_active)
-        
-        attempts = []
-        if preferred_proxy:
-            attempts.append(preferred_proxy)
-        attempts.append(None) # Direct
-        
-        for p in attempts:
+        async def try_path(p, is_fs=False):
             try:
-                async with await self._get_session(proxy=p) as session:
-                    if post_data:
-                        async with session.post(target_url, data=post_data, cookies=cookies, headers=request_headers, timeout=12) as r:
-                            text = await r.text()
-                            if r.status == 200 and not any(m in text.lower() for m in ["cf-challenge", "ray id", "checking your browser"]):
-                                cookies.update({k: v.value for k, v in r.cookies.items()})
-                                return text, str(r.url)
-                    else:
-                        async with session.get(target_url, cookies=cookies, headers=request_headers, timeout=12) as r:
-                            text = await r.text()
-                            if r.status == 200 and not any(m in text.lower() for m in ["cf-challenge", "ray id", "checking your browser"]):
-                                cookies.update({k: v.value for k, v in r.cookies.items()})
-                                return text, str(r.url)
-            except Exception as e:
-                logger.debug(f"Attempt with proxy {p} failed: {e}")
-                continue
+                request_headers = dict(headers)
+                if referer: request_headers["Referer"] = referer
+                
+                if is_fs:
+                    fs_cmd = "request.post" if post_data else "request.get"
+                    fs_res = await self._request_flaresolverr(fs_cmd, target_url, urlencode(post_data) if post_data else None, session_id=session_id)
+                    sol = fs_res.get("solution", {})
+                    return sol.get("response", ""), sol.get("url", target_url), {c["name"]: c["value"] for c in sol.get("cookies", [])}
+                else:
+                    connector = get_connector_for_proxy(p) if p else TCPConnector(ssl=False)
+                    async with ClientSession(connector=connector, headers=self.base_headers) as local_session:
+                        if post_data:
+                            async with local_session.post(target_url, data=post_data, cookies=cookies, headers=request_headers, timeout=12) as r:
+                                if r.status == 200:
+                                    text = await r.text()
+                                    if not any(m in text.lower() for m in ["cf-challenge", "ray id", "checking your browser"]):
+                                        return text, str(r.url), {k: v.value for k, v in r.cookies.items()}
+                        else:
+                            async with local_session.get(target_url, cookies=cookies, headers=request_headers, timeout=12) as r:
+                                if r.status == 200:
+                                    text = await r.text()
+                                    if not any(m in text.lower() for m in ["cf-challenge", "ray id", "checking your browser"]):
+                                        return text, str(r.url), {k: v.value for k, v in r.cookies.items()}
+            except: pass
+            return None
 
-        # Fallback to Free Proxies
-        try:
-            if any(d in target_url.lower() for d in ["safego.cc", "clicka.cc", "clicka", "uprot.net"]):
-                free_proxies = await self.proxy_manager.get_proxies(lambda x: True)
-                for p in free_proxies[:2]:
-                    try:
-                        async with await self._get_session(proxy=p) as free_session:
-                            if post_data:
-                                async with free_session.post(target_url, data=post_data, cookies=cookies, headers=request_headers, timeout=15) as r:
-                                    if r.status == 200:
-                                        cookies.update({k: v.value for k, v in r.cookies.items()})
-                                        return await r.text(), str(r.url)
-                            else:
-                                async with free_session.get(target_url, cookies=cookies, headers=request_headers, timeout=15) as r:
-                                    if r.status == 200:
-                                        cookies.update({k: v.value for k, v in r.cookies.items()})
-                                        return await r.text(), str(r.url)
-                    except: continue
-        except Exception as pe:
-            logger.debug(f"Free proxy error: {pe}")
+        # 1. Try Preferred Proxy, Direct, and FlareSolverr in parallel
+        preferred_proxy = get_proxy_for_url(target_url, TRANSPORT_ROUTES, self.proxies, self.bypass_warp_active)
+        tasks = [
+            asyncio.create_task(try_path(preferred_proxy)) if preferred_proxy else None,
+            asyncio.create_task(try_path(None)),
+            asyncio.create_task(try_path(None, is_fs=True))
+        ]
+        tasks = [t for t in tasks if t]
+        
+        for task in asyncio.as_completed(tasks):
+            res = await task
+            if res:
+                text, final_url, new_cookies = res
+                cookies.update(new_cookies)
+                return text, final_url
 
-        # Final Fallback to FlareSolverr
-        try:
-            fs_cmd = "request.post" if post_data else "request.get"
-            fs_res = await self._request_flaresolverr(fs_cmd, target_url, urlencode(post_data) if post_data else None, session_id=session_id, headers=request_headers)
-            sol = fs_res.get("solution", {})
-            cookies.update({c["name"]: c["value"] for c in sol.get("cookies", [])})
-            return sol.get("response", ""), sol.get("url", target_url)
-        except Exception:
-            return None, target_url
+        # 2. Fallback to Free Proxies in parallel batches
+        if any(d in target_url.lower() for d in ["safego.cc", "clicka.cc", "clicka", "uprot.net"]):
+            try:
+                free_proxies = await self.proxy_manager.get_proxies()
+                for i in range(0, min(len(free_proxies), 15), 5):
+                    batch = free_proxies[i:i+5]
+                    batch_tasks = [asyncio.create_task(try_path(p)) for p in batch]
+                    for bt in asyncio.as_completed(batch_tasks):
+                        res = await bt
+                        if res:
+                            text, final_url, new_cookies = res
+                            cookies.update(new_cookies)
+                            return text, final_url
+            except: pass
+
+        return None, target_url
 
     def _unpack(self, packed_js: str) -> str:
         try:
@@ -242,66 +245,75 @@ class MixdropExtractor:
                 url.replace("mixdrop.co", "mixdrop.ag"),
             ]
             
-            for current_url in mirrors:
+            async def solve_url(current_url, depth=0):
+                if depth > 3: return None
                 try:
-                    headers = self._step_headers(ua, current_url)
-                    for _ in range(2):
-                        html, ua_res = None, ua
-                        
-                        # 1. Preferred Proxy / Direct
-                        pref_p = get_proxy_for_url(current_url, TRANSPORT_ROUTES, self.proxies, self.bypass_warp_active)
+                    m_headers = self._step_headers(ua, current_url)
+                    pref_p = get_proxy_for_url(current_url, TRANSPORT_ROUTES, self.proxies, self.bypass_warp_active)
+                    
+                    async def fetch_direct():
                         try:
-                            async with await self._get_session(proxy=pref_p) as session:
-                                async with session.get(current_url, cookies=cookies, headers=headers, timeout=8) as r:
-                                    if r.status == 200: html = await r.text()
+                            connector = get_connector_for_proxy(pref_p) if pref_p else TCPConnector(ssl=False)
+                            async with ClientSession(connector=connector, headers=self.base_headers) as local_session:
+                                async with local_session.get(current_url, cookies=cookies, headers=m_headers, timeout=10) as r:
+                                    if r.status == 200:
+                                        t = await r.text()
+                                        if not any(m in t.lower() for m in ["cf-challenge", "robot", "checking your browser"]):
+                                            return t, str(r.url), ua, {}
                         except: pass
+                        return None
 
-                        # 2. FlareSolverr Fallback
-                        if not html or "Cloudflare" in html or "robot" in html.lower():
-                            res = await self._request_flaresolverr("request.get", current_url, session_id=session_id, wait=0, headers=headers)
-                            solution = res.get("solution", {})
-                            html, ua_res = solution.get("response", ""), solution.get("userAgent", ua)
-                            headers["User-Agent"] = ua_res
-                            cookies.update({c["name"]: c["value"] for c in solution.get("cookies", [])})
-                        
-                        if "robot" in html.lower() and "captcha" in html.lower():
+                    async def fetch_fs():
+                        try:
+                            res = await self._request_flaresolverr("request.get", current_url, session_id=session_id, wait=0)
+                            sol = res.get("solution", {})
+                            return sol.get("response", ""), sol.get("url", current_url), sol.get("userAgent", ua), {c["name"]: c["value"] for c in sol.get("cookies", [])}
+                        except: pass
+                        return None
+
+                    tasks = [asyncio.create_task(fetch_direct()), asyncio.create_task(fetch_fs())]
+                    for t in asyncio.as_completed(tasks):
+                        res = await t
+                        if res and res[0]:
+                            html, final_url, ua_res, new_cookies = res
+                            cookies.update(new_cookies)
+                            
+                            # Unpack JS
+                            if "eval(function(p,a,c,k,e,d)" in html:
+                                for block in re.findall(r'eval\(function\(p,a,c,k,e,d\).*?\}\(.*\)\)', html, re.S):
+                                    html += "\n" + self._unpack(block)
+
+                            # Find video patterns
+                            patterns = [
+                                r'(?:MDCore|vsConfig)\.wurl\s*=\s*["\']([^"\']+)["\']', 
+                                r'source\s*src\s*=\s*["\']([^"\']+)["\']', 
+                                r'file:\s*["\']([^"\']+)["\']', 
+                                r'["\'](https?://[^\s"\']+\.(?:mp4|m3u8)[^\s"\']*)["\']',
+                                r'wurl\s*:\s*["\']([^"\']+)["\']'
+                            ]
+                            for p in patterns:
+                                match = re.search(p, html)
+                                if match:
+                                    v_url = match.group(1)
+                                    if v_url.startswith("//"): v_url = "https:" + v_url
+                                    return self._build_result(v_url, final_url, ua_res, cookies=cookies)
+
+                            # Check for iframes
                             soup = BeautifulSoup(html, "lxml")
-                            form = soup.find("form")
-                            if form:
-                                post_fields = {inp.get("name"): inp.get("value", "") for inp in form.find_all("input") if inp.get("name")}
-                                if post_fields:
-                                    html, current_url = await self._light_fetch(headers, cookies, session_id, current_url, post_data=post_fields, referer=current_url)
-                                    if not html: break
-                        
-                        if "eval(function(p,a,c,k,e,d)" in html:
-                            for block in re.findall(r'eval\(function\(p,a,c,k,e,d\).*?\}\(.*\)\)', html, re.S):
-                                html += "\n" + self._unpack(block)
+                            iframe = soup.find("iframe", src=re.compile(r'/e/|/emb', re.I))
+                            if iframe:
+                                iframe_url = urljoin(final_url, iframe["src"])
+                                return await solve_url(iframe_url, depth + 1)
+                except: pass
+                return None
 
-                        patterns = [
-                            r'(?:MDCore|vsConfig)\.wurl\s*=\s*["\']([^"\']+)["\']', 
-                            r'source\s*src\s*=\s*["\']([^"\']+)["\']', 
-                            r'file:\s*["\']([^"\']+)["\']', 
-                            r'["\'](https?://[^\s"\']+\.(?:mp4|m3u8)[^\s"\']*)["\']',
-                            r'wurl\s*:\s*["\']([^"\']+)["\']'
-                        ]
-                        for p in patterns:
-                            match = re.search(p, html)
-                            if match:
-                                v_url = match.group(1)
-                                if v_url.startswith("//"): v_url = "https:" + v_url
-                                result = self._build_result(v_url, current_url, ua_res, cookies=cookies)
-                                MixdropExtractor._result_cache[cache_key] = (result, time.time())
-                                return result
-
-                        soup = BeautifulSoup(html, "lxml")
-                        iframe = soup.find("iframe", src=re.compile(r'/e/|/emb', re.I))
-                        if iframe:
-                            current_url = urljoin(current_url, iframe["src"])
-                            continue
-                        break
-                except Exception as e:
-                    logger.debug(f"Mirror {current_url} failed: {e}")
-                    continue
+            # Test all mirrors in parallel
+            mirror_tasks = [asyncio.create_task(solve_url(m)) for m in mirrors]
+            for mt in asyncio.as_completed(mirror_tasks):
+                result = await mt
+                if result:
+                    MixdropExtractor._result_cache[cache_key] = (result, time.time())
+                    return result
 
             raise ExtractorError("Mixdrop: Video source not found")
         finally:
@@ -311,7 +323,7 @@ class MixdropExtractor:
                 await solver_manager.release_session(final_session_id, is_persistent)
 
     async def _solve_redirector_hybrid(self, url: str, session_id: str) -> tuple:
-        res = await self._request_flaresolverr("request.get", url, session_id=session_id, headers=self._step_headers(self.base_headers.get("User-Agent"), url))
+        res = await self._request_flaresolverr("request.get", url, session_id=session_id)
         solution = res.get("solution", {})
         ua, cookies = solution.get("userAgent"), {c["name"]: c["value"] for c in solution.get("cookies", [])}
         html, current_url = solution.get("response", ""), solution.get("url", url)
@@ -434,7 +446,7 @@ class MixdropExtractor:
                     if r.status == 200: return await r.read()
         except: pass
         try:
-            fs_res = await self._request_flaresolverr("request.get", target_url, session_id=session_id, headers=request_headers)
+            fs_res = await self._request_flaresolverr("request.get", target_url, session_id=session_id)
             response_text = fs_res.get("solution", {}).get("response", "")
             if "base64" in response_text or len(response_text) > 1000:
                 try: return base64.b64decode(response_text)

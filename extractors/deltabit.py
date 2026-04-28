@@ -6,6 +6,7 @@ import base64
 from urllib.parse import urlparse, urljoin, urlencode
 
 import aiohttp
+from aiohttp import ClientSession, TCPConnector
 from bs4 import BeautifulSoup, SoupStrainer
 from aiohttp_socks import ProxyConnector
 
@@ -93,7 +94,6 @@ class DeltabitExtractor:
                 fs_headers["X-Proxy-Server"] = get_solver_proxy_url(proxy)
         if post_data: payload["postData"] = post_data
         if session_id: payload["session"] = session_id
-        if headers: payload["headers"] = headers
         async with aiohttp.ClientSession() as fs_session:
             async with fs_session.post(endpoint, json=payload, headers=fs_headers, timeout=settings.flaresolverr_timeout + 95) as resp:
                 data = await resp.json()
@@ -130,17 +130,44 @@ class DeltabitExtractor:
                 url, ua, cookies = await self._solve_redirector_hybrid(url, session_id)
 
             session_id = final_session_id
-
             if "deltabit.co" in url.lower(): url = url.replace("deltabit.co/ ", "deltabit.co/")
+
+            async def try_path(p, is_fs=False):
+                try:
+                    m_headers = self._step_headers(ua, url)
+                    if is_fs:
+                        res = await self._request_flaresolverr("request.get", url, session_id=session_id, wait=2000)
+                        sol = res.get("solution", {})
+                        return sol.get("response", ""), sol.get("url", url), sol.get("userAgent", ua), {c["name"]: c["value"] for c in sol.get("cookies", [])}
+                    else:
+                        connector = get_connector_for_proxy(p) if p else None
+                        async with aiohttp.ClientSession(connector=connector, headers=self.base_headers) as local_session:
+                            async with local_session.get(url, cookies=cookies, headers=m_headers, timeout=12) as r:
+                                if r.status == 200:
+                                    t = await r.text()
+                                    if not any(m in t.lower() for m in ["cf-challenge", "robot", "checking your browser"]):
+                                        return t, str(r.url), ua, {k: v.value for k, v in r.cookies.items()}
+                except: pass
+                return None
+
+            pref_p = get_proxy_for_url(url, TRANSPORT_ROUTES, self.proxies, self.bypass_warp_active)
+            tasks = [
+                asyncio.create_task(try_path(pref_p)) if pref_p else None,
+                asyncio.create_task(try_path(None)),
+                asyncio.create_task(try_path(None, is_fs=True))
+            ]
+            tasks = [t for t in tasks if t]
             
-            # 2. Final page fetch (FlareSolverr for stability)
-            res = await self._request_flaresolverr("request.get", url, session_id=session_id, wait=2000, headers=self._step_headers(ua, url))
-            solution = res.get("solution", {})
-            html, ua = solution.get("response", ""), solution.get("userAgent", self.base_headers.get("User-Agent"))
-            # Collect final cookies
-            fs_cookies = {c["name"]: c["value"] for c in solution.get("cookies", [])}
-            cookies.update(fs_cookies)
-            url = solution.get("url", url) # Update URL to final destination
+            html = None
+            for task in asyncio.as_completed(tasks):
+                res = await task
+                if res:
+                    html, url, ua, new_cookies = res
+                    cookies.update(new_cookies)
+                    break
+            
+            if not html:
+                raise ExtractorError("Deltabit: Page fetch failed")
             
             soup = BeautifulSoup(html, 'lxml')
             form_data = {inp.get('name'): inp.get('value', '') for inp in soup.find_all('input') if inp.get('name')}
@@ -157,7 +184,7 @@ class DeltabitExtractor:
             form_data['imhuman'], form_data['referer'] = "", url
             await asyncio.sleep(2.5) 
             
-            post_res = await self._request_flaresolverr("request.post", url, urlencode(form_data), session_id=session_id, wait=0, headers=self._step_headers(ua, url))
+            post_res = await self._request_flaresolverr("request.post", url, urlencode(form_data), session_id=session_id, wait=0)
             post_solution = post_res.get("solution", {})
             post_html = post_solution.get("response", "")
             # Update cookies after POST
@@ -175,7 +202,7 @@ class DeltabitExtractor:
                 await solver_manager.release_session(final_session_id, is_persistent)
 
     async def _solve_redirector_hybrid(self, url: str, session_id: str) -> tuple:
-        res = await self._request_flaresolverr("request.get", url, session_id=session_id, headers=self._step_headers(self.base_headers.get("User-Agent"), url))
+        res = await self._request_flaresolverr("request.get", url, session_id=session_id)
         solution = res.get("solution", {})
         ua, cookies = solution.get("userAgent"), {c["name"]: c["value"] for c in solution.get("cookies", [])}
         html, current_url = solution.get("response", ""), solution.get("url", url)
@@ -189,85 +216,61 @@ class DeltabitExtractor:
 
         async def light_fetch(target_url, post_data=None, referer=None, force_flaresolverr=False):
             nonlocal fs_counter
-            request_headers = dict(headers)
-            if referer:
-                request_headers["Referer"] = referer
-            
-            if force_flaresolverr:
-                if fs_counter >= max_fs_calls:
-                    logger.warning(f"Deltabit: FlareSolverr call limit reached ({max_fs_calls})")
-                    return None, target_url
-                fs_counter += 1
+            async def try_path_light(p, is_fs=False):
                 try:
-                    fs_cmd = "request.post" if post_data else "request.get"
-                    fs_res = await self._request_flaresolverr(fs_cmd, target_url, urlencode(post_data) if post_data else None, session_id=session_id, headers=request_headers)
-                    sol = fs_res.get("solution", {})
-                    cookies.update({c["name"]: c["value"] for c in sol.get("cookies", [])})
-                    return sol.get("response", ""), sol.get("url", target_url)
-                except Exception:
-                    return None, target_url
+                    request_headers = dict(headers)
+                    if referer: request_headers["Referer"] = referer
+                    
+                    if is_fs:
+                        fs_cmd = "request.post" if post_data else "request.get"
+                        fs_res = await self._request_flaresolverr(fs_cmd, target_url, urlencode(post_data) if post_data else None, session_id=session_id)
+                        sol = fs_res.get("solution", {})
+                        return sol.get("response", ""), sol.get("url", target_url), {c["name"]: c["value"] for c in sol.get("cookies", [])}
+                    else:
+                        connector = get_connector_for_proxy(p) if p else TCPConnector(ssl=False)
+                        async with ClientSession(connector=connector, headers=self.base_headers) as local_session:
+                            if post_data:
+                                async with local_session.post(target_url, data=post_data, cookies=cookies, headers=request_headers, timeout=12) as r:
+                                    if r.status == 200:
+                                        t = await r.text()
+                                        if not any(m in t.lower() for m in ["cf-challenge", "ray id", "checking your browser"]):
+                                            return t, str(r.url), {k: v.value for k, v in r.cookies.items()}
+                            else:
+                                async with local_session.get(target_url, cookies=cookies, headers=request_headers, timeout=12) as r:
+                                    if r.status == 200:
+                                        t = await r.text()
+                                        if not any(m in t.lower() for m in ["cf-challenge", "ray id", "checking your browser"]):
+                                            return t, str(r.url), {k: v.value for k, v in r.cookies.items()}
+                except: pass
+                return None
 
-            # Sequence of attempts for light_fetch
-            # 1. Preferred Proxy (WARP/Route) or Direct
-            # 2. Free Proxies Fallback
-            # 3. FlareSolverr Fallback
+            tasks = [
+                asyncio.create_task(try_path_light(preferred_proxy)) if preferred_proxy else None,
+                asyncio.create_task(try_path_light(None)),
+                asyncio.create_task(try_path_light(None, is_fs=True))
+            ]
+            tasks = [t for t in tasks if t]
             
-            attempts = []
-            if preferred_proxy:
-                attempts.append(preferred_proxy) # Warp/Global first
-            attempts.append(None) # Direct (VPS IP) second
-            
-            for p in attempts:
-                try:
-                    async with await self._get_session(proxy=p) as session:
-                        if post_data:
-                            async with session.post(target_url, data=post_data, cookies=cookies, headers=request_headers, timeout=12) as r:
-                                text = await r.text()
-                                if r.status == 200 and not any(m in text.lower() for m in ["cf-challenge", "ray id", "checking your browser"]):
-                                    cookies.update({k: v.value for k, v in r.cookies.items()})
-                                    return text, str(r.url)
-                        else:
-                            async with session.get(target_url, cookies=cookies, headers=request_headers, timeout=12) as r:
-                                text = await r.text()
-                                if r.status == 200 and not any(m in text.lower() for m in ["cf-challenge", "ray id", "checking your browser"]):
-                                    cookies.update({k: v.value for k, v in r.cookies.items()})
-                                    return text, str(r.url)
-                except Exception as e:
-                    logger.debug(f"Attempt with proxy {p} failed: {e}")
-                    continue
+            for task in asyncio.as_completed(tasks):
+                res = await task
+                if res:
+                    text, final_url, new_cookies = res
+                    cookies.update(new_cookies)
+                    return text, final_url
 
-            # If standard attempts fail, try Free Proxies
-            logger.debug(f"Standard attempts failed for {target_url}, trying free proxy fallback...")
-            try:
-                if any(d in target_url.lower() for d in ["safego.cc", "clicka.cc", "clicka", "uprot.net"]):
-                    free_proxies = await self.proxy_manager.get_proxies(lambda x: True)
-                    for p in free_proxies[:2]:
-                        try:
-                            async with await self._get_session(proxy=p) as free_session:
-                                if post_data:
-                                    async with free_session.post(target_url, data=post_data, cookies=cookies, headers=request_headers, timeout=15) as r:
-                                        if r.status == 200:
-                                            cookies.update({k: v.value for k, v in r.cookies.items()})
-                                            return await r.text(), str(r.url)
-                                else:
-                                    async with free_session.get(target_url, cookies=cookies, headers=request_headers, timeout=15) as r:
-                                        if r.status == 200:
-                                            cookies.update({k: v.value for k, v in r.cookies.items()})
-                                            return await r.text(), str(r.url)
-                        except: continue
-            except Exception as pe:
-                logger.debug(f"Free proxy error: {pe}")
-
-            # Final Fallback to FlareSolverr
-            if fs_counter < max_fs_calls:
-                fs_counter += 1
-                logger.info(f"Using FlareSolverr fallback for {target_url}")
+            # Fallback to Free Proxies in parallel batches
+            if any(d in target_url.lower() for d in ["safego.cc", "clicka.cc", "clicka", "uprot.net"]):
                 try:
-                    fs_cmd = "request.post" if post_data else "request.get"
-                    fs_res = await self._request_flaresolverr(fs_cmd, target_url, urlencode(post_data) if post_data else None, session_id=session_id, headers=request_headers)
-                    sol = fs_res.get("solution", {})
-                    cookies.update({c["name"]: c["value"] for c in sol.get("cookies", [])})
-                    return sol.get("response", ""), sol.get("url", target_url)
+                    free_proxies = await self.proxy_manager.get_proxies()
+                    for i in range(0, min(len(free_proxies), 15), 5):
+                        batch = free_proxies[i:i+5]
+                        batch_tasks = [asyncio.create_task(try_path_light(p)) for p in batch]
+                        for bt in asyncio.as_completed(batch_tasks):
+                            res = await bt
+                            if res:
+                                text, final_url, new_cookies = res
+                                cookies.update(new_cookies)
+                                return text, final_url
                 except: pass
             
             return None, target_url
@@ -290,7 +293,7 @@ class DeltabitExtractor:
             if fs_counter < max_fs_calls:
                 fs_counter += 1
                 try:
-                    fs_res = await self._request_flaresolverr("request.get", target_url, session_id=session_id, headers=request_headers)
+                    fs_res = await self._request_flaresolverr("request.get", target_url, session_id=session_id)
                     solution = fs_res.get("solution", {})
                     response_text = solution.get("response", "")
                     if "base64" in response_text or len(response_text) > 1000:
