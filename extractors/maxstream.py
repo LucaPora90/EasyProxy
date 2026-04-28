@@ -61,6 +61,7 @@ class MaxstreamExtractor:
         self.session = None
         self.mediaflow_endpoint = "hls_proxy"
         self.proxies = proxies or []
+        self.cookies = {} # Persistent cookies for the session
         self.resolver = StaticResolver()
         self.proxy_manager = FreeProxyManager.get_instance(
             "maxstream",
@@ -138,6 +139,17 @@ class MaxstreamExtractor:
 
     async def _smart_request(self, url: str, method="GET", is_binary=False, **kwargs):
         """Request with automatic retry using different proxies and resolver fallback on connection failure."""
+        if url.startswith("data:"):
+            import base64
+            try:
+                # Support for data URIs (e.g. base64 captchas)
+                _, data = url.split(",", 1)
+                decoded = base64.b64decode(data)
+                return decoded if is_binary else decoded.decode("utf-8", errors="ignore")
+            except Exception as e:
+                logger.error(f"Failed to decode data URI: {e}")
+                return b"" if is_binary else ""
+
         last_error = None
         parsed_url = urlparse(url)
         domain = parsed_url.netloc
@@ -167,7 +179,9 @@ class MaxstreamExtractor:
             try:
                 # Use a dummy probe to get current proxies without full validation wait
                 free_proxies = await self.proxy_manager.get_proxies(lambda x: True)
-                for p in free_proxies[:3]: # Try first 3 available
+                # Randomize to avoid hitting the same failing proxies in sequence
+                random.shuffle(free_proxies)
+                for p in free_proxies[:10]: # Try more proxies
                     paths.append({"proxy": p, "use_ip": None})
             except Exception as e:
                 logger.debug(f"Failed to get free proxies: {e}")
@@ -189,7 +203,11 @@ class MaxstreamExtractor:
 
             session = await self._get_session(proxy=proxy)
             try:
-                async with session.request(method, url, **kwargs) as response:
+                # Add current cookies to kwargs for aiohttp
+                if self.cookies:
+                    kwargs["cookies"] = self.cookies
+                
+                async with session.request(method, url, ssl=False, **kwargs) as response:
                     if response.status < 400:
                         if is_binary:
                             content = await response.read()
@@ -197,14 +215,40 @@ class MaxstreamExtractor:
                             return content
                         text = await response.text()
                         
+                        # Update persistent cookies
+                        for k, v in response.cookies.items():
+                            self.cookies[k] = v.value
+                        
                         # Check for Cloudflare challenge in successful response
                         if any(marker in text.lower() for marker in ["cf-challenge", "ray id", "checking your browser"]):
-                            logger.warning(f"Cloudflare detected on {url} (Proxy: {proxy}), trying FlareSolverr fallback...")
                             # Fallback to the global smart_request utility
                             if proxy: await session.close()
                             fs_cmd = f"request.{method.lower()}"
-                            result = await smart_request(fs_cmd, url, headers=kwargs.get("headers"), post_data=kwargs.get("data"), proxies=self.proxies)
-                            return result.get("html", "") if isinstance(result, dict) else result
+                            # Pass the current proxy and cookies
+                            fs_proxies = [proxy] if proxy else self.proxies
+                            
+                            # Add existing cookies to headers for smart_request to pick up
+                            fs_headers = kwargs.get("headers", {}).copy()
+                            if self.cookies:
+                                fs_headers["Cookie"] = "; ".join([f"{k}={v}" for k, v in self.cookies.items()])
+
+                            result = await smart_request(fs_cmd, url, headers=fs_headers, post_data=kwargs.get("data"), proxies=fs_proxies)
+
+                            if isinstance(result, dict):
+                                self.cookies.update(result.get("cookies", {}))
+                                html = result.get("html", "")
+                                
+                                # Check if FlareSolverr returned a browser error page (Chromium Authors style)
+                                if "Chromium Authors" in html or "id=\"main-frame-error\"" in html:
+                                    logger.warning(f"FlareSolverr returned a browser error page on this path, trying next...")
+                                    last_error = "FlareSolverr browser error page"
+                                    html = ""
+
+                                if html: return html
+                            
+                            last_error = "FlareSolverr challenge failed or empty response"
+                            logger.warning(f"FlareSolverr failed for {url} on this path, trying next path...")
+                            continue
 
                         if proxy: await session.close()
                         return text
@@ -213,8 +257,30 @@ class MaxstreamExtractor:
                         logger.warning(f"HTTP {response.status} on {url}, checking with FlareSolverr...")
                         if proxy: await session.close()
                         fs_cmd = f"request.{method.lower()}"
-                        result = await smart_request(fs_cmd, url, headers=kwargs.get("headers"), post_data=kwargs.get("data"), proxies=self.proxies)
-                        return result.get("html", "") if isinstance(result, dict) else result
+                        # Pass the current proxy and cookies
+                        fs_proxies = [proxy] if proxy else self.proxies
+                        
+                        fs_headers = kwargs.get("headers", {}).copy()
+                        if self.cookies:
+                            fs_headers["Cookie"] = "; ".join([f"{k}={v}" for k, v in self.cookies.items()])
+
+                        result = await smart_request(fs_cmd, url, headers=fs_headers, post_data=kwargs.get("data"), proxies=fs_proxies)
+                        
+                        if isinstance(result, dict):
+                            self.cookies.update(result.get("cookies", {}))
+                            html = result.get("html", "")
+                            
+                            # Check if FlareSolverr returned a browser error page (Chromium Authors style)
+                            if "Chromium Authors" in html or "id=\"main-frame-error\"" in html:
+                                logger.warning(f"FlareSolverr returned a browser error page on this path, trying next...")
+                                last_error = "FlareSolverr browser error page"
+                                html = ""
+
+                            if html: return html
+                            
+                        last_error = "FlareSolverr block/challenge failed"
+                        logger.warning(f"FlareSolverr failed for {url} on this path, trying next path...")
+                        continue
                     else:
                         logger.warning(f"Request to {url} failed (Status {response.status}) [Proxy: {proxy}, StaticIP: {use_ip}]")
             except Exception as e:
@@ -241,11 +307,11 @@ class MaxstreamExtractor:
         # Use lxml and search specifically for the captcha pattern
         soup = BeautifulSoup(text, "lxml")
         
-        # 1. Try to find captcha image
-        img_tag = soup.find("img", src=re.compile(r'/captcha|/image/|captcha\.php'))
+        # 1. Try to find captcha image (including base64)
+        img_tag = soup.find("img", src=re.compile(r'data:image/|/captcha|/image/|captcha\.php'))
         if not img_tag:
             # Fallback to regex for captcha image
-            img_match = re.search(r'<img[^>]+src=["\']([^"\']*(?:captcha|image|captcha\.php)[^"\']*)["\']', text)
+            img_match = re.search(r'<img[^>]+src=["\']([^"\']*(?:data:image/|captcha|image|captcha\.php)[^"\']*)["\']', text)
             if img_match:
                 img_url = img_match.group(1)
             else:
@@ -291,6 +357,7 @@ class MaxstreamExtractor:
         logger.debug(f"Captcha solved: {res}")
         
         # Prepare form action
+        from urllib.parse import urlencode
         if not form_action or form_action == "#":
             form_action = original_url
         elif form_action.startswith("/"):
@@ -307,19 +374,23 @@ class MaxstreamExtractor:
             field_name = captcha_input["name"]
             
         post_data = {field_name: res}
-        # Add other hidden fields
+        # Add ALL other form elements (hidden, buttons, etc)
         if form:
-            for hidden in form.find_all("input", type="hidden"):
-                if hidden.get("name"):
-                    post_data[hidden["name"]] = hidden.get("value", "")
+            for inp in form.find_all(["input", "button", "select"]):
+                name = inp.get("name")
+                value = inp.get("value", "")
+                if name and name not in post_data:
+                    post_data[name] = value
         else:
-            # Regex for hidden fields
-            for m in re.finditer(r'<input[^>]+type=["\']hidden["\'][^>]+name=["\']([^"\']+)["\'][^>]+value=["\']([^"\']*)["\']', text):
-                post_data[m.group(1)] = m.group(2)
+            # Regex fallback for hidden fields
+            for m in re.finditer(r'<input[^>]+name=["\']([^"\']+)["\'][^>]+value=["\']([^"\']*)["\']', text):
+                if m.group(1) not in post_data:
+                    post_data[m.group(1)] = m.group(2)
         
         logger.debug(f"Submitting captcha to: {form_action} with data: {post_data}")
         headers = {**self.base_headers, "referer": original_url}
-        solved_text = await self._smart_request(form_action, method="POST", data=post_data, headers=headers)
+        # Use urlencode for FlareSolverr and add a wait time to allow page transition
+        solved_text = await self._smart_request(form_action, method="POST", data=urlencode(post_data), headers=headers, wait=3000)
         
         # Try to parse the new page
         try:

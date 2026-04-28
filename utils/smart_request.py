@@ -22,6 +22,7 @@ async def smart_request(
     post_data: Optional[str] = None,
     proxies: Optional[list] = None,
     bypass_warp: bool = None,
+    wait: int = 0,
 ) -> Any:
     """
     Effettua una richiesta intelligente: prova la via diretta, poi curl_cffi, e se fallisce usa FlareSolverr.
@@ -59,7 +60,7 @@ async def smart_request(
             cookie_jar=aiohttp.CookieJar(unsafe=True),
         ) as session:
             method = session.get if cmd.lower() == "request.get" else session.post
-            async with method(url, headers=headers, data=post_data, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+            async with method(url, headers=headers, data=post_data, ssl=False, timeout=aiohttp.ClientTimeout(total=20)) as resp:
                 if resp.status == 200:
                     content = await resp.text()
                     if not any(marker in content.lower() for marker in CF_MARKERS):
@@ -89,7 +90,7 @@ async def smart_request(
                 if "user-agent" in curl_headers: del curl_headers["user-agent"]
                 
                 c_method = s.get if cmd.lower() == "request.get" else s.post
-                c_resp = await c_method(url, headers=curl_headers, data=post_data, proxies=curl_proxies, timeout=30)
+                c_resp = await c_method(url, headers=curl_headers, data=post_data, proxies=curl_proxies, verify=False, timeout=30)
                 
                 if c_resp.status_code == 200:
                     # Restituiamo sempre lo stesso formato dizionario
@@ -141,6 +142,10 @@ async def smart_request(
         payload["headers"] = fs_request_headers
     if fs_cookies: payload["cookies"] = fs_cookies
     if post_data: payload["postData"] = post_data
+    
+    # Add wait parameter if specified
+    if wait > 0:
+        payload["wait"] = wait
     if proxy:
         payload["proxy"] = {"url": proxy}
         headers_for_fs = {"X-Proxy-Server": get_solver_proxy_url(proxy)}
