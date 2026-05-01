@@ -16,6 +16,47 @@ except ImportError:
 
 class ManifestRewriter:
     @staticmethod
+    def rewrite_mpd_native(
+        manifest_content: str,
+        mpd_url: str,
+        proxy_base: str,
+        stream_headers: dict,
+        clearkey_param: str = None,
+        api_password: str = None,
+        bypass_warp: bool = False,
+        disable_ssl: bool = False,
+        session_id: str = None
+    ) -> str:
+        """Riscrive il manifest MPD per DASH nativo (senza conversione HLS)."""
+        try:
+            # 1. Pulizia DRM e pssh (come nella versione Android)
+            # Rimuove blocchi ContentProtection (sia autochiudenti che con body)
+            mpd = manifest_content
+            mpd = re.sub(r'<ContentProtection[\s\S]*?</ContentProtection>', '', mpd, flags=re.IGNORECASE)
+            mpd = re.sub(r'<ContentProtection[^>]*/>', '', mpd, flags=re.IGNORECASE)
+            
+            # Rimuove cenc:pssh
+            mpd = re.sub(r'<cenc:pssh>[\s\S]*?</cenc:pssh>', '', mpd, flags=re.IGNORECASE)
+            mpd = re.sub(r'<cenc:pssh[^>]*/>', '', mpd, flags=re.IGNORECASE)
+
+            # Rimuove BaseURL esistenti (tutti i livelli)
+            mpd = re.sub(r'<BaseURL>[^<]*</BaseURL>\s*', '', mpd)
+
+            # 2. Inserimento BaseURL che punta al nostro proxy
+            # Il path sarà /proxy/mpd/segment/{sessionId}/
+            proxy_segment_base = f"{proxy_base}/proxy/mpd/segment/{session_id}/"
+            
+            mpd_tag_match = re.search(r'(<MPD[^>]*>)', mpd, re.IGNORECASE)
+            if mpd_tag_match:
+                insert_pos = mpd_tag_match.end()
+                mpd = mpd[:insert_pos] + f"\n  <BaseURL>{proxy_segment_base}</BaseURL>" + mpd[insert_pos:]
+
+            return mpd
+        except Exception as e:
+            logger.error(f"Error during native MPD rewrite: {e}")
+            return manifest_content
+
+    @staticmethod
     def rewrite_mpd_manifest(
         manifest_content: str,
         base_url: str,

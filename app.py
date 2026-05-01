@@ -70,6 +70,8 @@ def create_app():
     app.router.add_get('/proxy/manifest.m3u8', proxy.handle_proxy_request)
     app.router.add_get('/proxy/hls/manifest.m3u8', proxy.handle_proxy_request)
     app.router.add_get('/proxy/mpd/manifest.m3u8', proxy.handle_proxy_request)
+    app.router.add_get('/proxy/mpd/manifest.mpd', proxy.handle_proxy_request)
+    app.router.add_get('/proxy/mpd/segment/{session_id}/{tail:.*}', proxy.handle_dash_segment)
     # ✅ NUOVO: Endpoint generico per stream (compatibilità MFP)
     app.router.add_get('/proxy/stream', proxy.handle_proxy_request)
     app.router.add_get('/extractor', proxy.handle_extractor_request)
