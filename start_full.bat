@@ -46,7 +46,7 @@ IF EXIST "flaresolverr\src\flaresolverr.py" (
     IF ERRORLEVEL 1 (
         echo [OK] Starting FlareSolverr on port %FLARESOLVERR_PORT%...
         set PORT=%FLARESOLVERR_PORT%
-        start "FlareSolverr" /MIN python "flaresolverr\src\flaresolverr.py"
+        start "FlareSolverr" /MIN cmd /c "python flaresolverr\src\flaresolverr.py >nul 2>&1"
     ) ELSE (
         echo [OK] FlareSolverr already active on port %FLARESOLVERR_PORT%.
     )

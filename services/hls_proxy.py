@@ -114,7 +114,8 @@ if MPD_MODE in ("legacy", "none", "disabled"):
     TurboVidPlayExtractor,
     LiveTVExtractor,
     F16PxExtractor,
-) = None, None, None, None, None
+    Sports99Extractor,
+) = None, None, None, None, None, None
 DLStreamsExtractor = None
 StreamHGExtractor = None
 CinemaCityExtractor = None
@@ -305,6 +306,12 @@ try:
     logger.info("✅ F16PxExtractor module loaded.")
 except ImportError:
     logger.warning("⚠️ F16PxExtractor module not found.")
+    
+try:
+    from extractors.sports99 import Sports99Extractor
+    logger.info("✅ Sports99Extractor module loaded.")
+except ImportError:
+    logger.warning("⚠️ Sports99Extractor module not found.")
 
 try:
     from extractors.dlstreams import DLStreamsExtractor
@@ -954,6 +961,12 @@ class HLSProxy:
                             request_headers, proxies=proxy_list
                         )
                     return self.extractors[key]
+                elif host in ["sports99", "cdnlivetv"]:
+                    if key not in self.extractors:
+                        self.extractors[key] = Sports99Extractor(
+                            request_headers, proxies=proxy_list
+                        )
+                    return self.extractors[key]
                 elif host in ["dlhd", "dlstreams"]:
                     key = "dlstreams_direct" if bypass_warp else "dlstreams"
                     if key not in self.extractors:
@@ -1175,7 +1188,7 @@ class HLSProxy:
             ):
                 key = "dlstreams_direct" if bypass_warp else "dlstreams"
                 proxy = get_proxy_for_url(
-                    "dlhd.dad", TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp
+                    url, TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp
                 )
                 proxy_list = [proxy] if proxy else []
                 if key not in self.extractors:
@@ -1313,6 +1326,15 @@ class HLSProxy:
                 proxy_list = [proxy] if proxy else []
                 if key not in self.extractors:
                     self.extractors[key] = F16PxExtractor(
+                        request_headers, proxies=proxy_list
+                    )
+                return self.extractors[key]
+            elif "cdnlivetv.tv" in url or "cdnlivetv.ru" in url:
+                key = "sports99"
+                proxy = get_proxy_for_url("cdnlivetv.tv", TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp)
+                proxy_list = [proxy] if proxy else []
+                if key not in self.extractors:
+                    self.extractors[key] = Sports99Extractor(
                         request_headers, proxies=proxy_list
                     )
                 return self.extractors[key]
@@ -3100,8 +3122,26 @@ class HLSProxy:
                 except: pass
 
                 if manifest_content is None and (".m3u8" in stream_url or "mpegurl" in content_type):
-                    try: manifest_content = content_bytes.decode("utf-8", errors='replace')
-                    except: pass
+                    try:
+                        decoded_text = content_bytes.decode("utf-8", errors='replace')
+                        if decoded_text.lstrip().startswith("#EXTM3U"):
+                            manifest_content = decoded_text
+                        else:
+                            logger.warning(
+                                "Upstream did not return a valid HLS manifest for %s: %s",
+                                stream_url,
+                                decoded_text[:120].replace("\n", "\\n"),
+                            )
+                            return web.Response(
+                                text="Upstream did not return a valid HLS manifest",
+                                status=502,
+                                headers={
+                                    "Content-Type": "text/plain; charset=utf-8",
+                                    "Access-Control-Allow-Origin": "*",
+                                },
+                            )
+                    except Exception:
+                        pass
 
                 if manifest_content:
                     logger.info(f"📄 HLS manifest detected: {stream_url}")
