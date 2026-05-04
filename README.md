@@ -95,8 +95,6 @@ Configure the server via a `.env` file. See `.env.example` for all options.
 | :--- | :--- | :--- |
 | `PORT` | Server port | `7860` |
 | `API_PASSWORD` | Optional password for API endpoints | `ep` |
-| `FLARESOLVERR_URL` | URL for FlareSolverr | `http://localhost:8191` |
-| `FLARESOLVERR_TIMEOUT` | Timeout for FlareSolverr requests (seconds) | `30` |
 | `DVR_ENABLED` | Enable recording features | `false` |
 | `ENABLE_WARP` | Enable integrated Cloudflare WARP | `false` |
 | `WARP_EXCLUDED_HOSTS` | Comma-separated hosts that must bypass the WARP VPN tunnel and use the server real IP | built-in defaults |
