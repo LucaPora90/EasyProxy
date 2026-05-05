@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     gnupg \
     gpg \
+    tar \
     && curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg \
     && echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ bookworm main" | tee /etc/apt/sources.list.d/cloudflare-client.list \
     && apt-get update && apt-get install -y --no-install-recommends \
@@ -42,6 +43,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-liberation \
     chromium-driver \
     && rm -rf /var/lib/apt/lists/*
+
+# Optional userspace WARP tools. They allow WARP as a local SOCKS5 proxy
+# without NET_ADMIN or /dev/net/tun when WARP_MODE=wireproxy is selected.
+ARG WGCF_VERSION=2.2.29
+ARG WIREPROXY_VERSION=1.0.9
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+        amd64) wgcf_arch="amd64"; wireproxy_arch="amd64" ;; \
+        arm64) wgcf_arch="arm64"; wireproxy_arch="arm64" ;; \
+        armhf) wgcf_arch="armv7"; wireproxy_arch="arm" ;; \
+        *) echo "Unsupported architecture for wgcf/wireproxy: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fL "https://github.com/ViRb3/wgcf/releases/download/v${WGCF_VERSION}/wgcf_${WGCF_VERSION}_linux_${wgcf_arch}" -o /usr/local/bin/wgcf; \
+    chmod +x /usr/local/bin/wgcf; \
+    curl -fL "https://github.com/pufferffish/wireproxy/releases/download/v${WIREPROXY_VERSION}/wireproxy_linux_${wireproxy_arch}.tar.gz" -o /tmp/wireproxy.tar.gz; \
+    tar -xzf /tmp/wireproxy.tar.gz -C /tmp; \
+    find /tmp -type f -name wireproxy -exec mv {} /usr/local/bin/wireproxy \; ; \
+    chmod +x /usr/local/bin/wireproxy; \
+    rm -f /tmp/wireproxy.tar.gz
 
 # 2. Environment Settings
 ENV PYTHONPATH=/app

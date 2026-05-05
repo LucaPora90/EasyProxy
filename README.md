@@ -95,8 +95,6 @@ Configure the server via a `.env` file. See `.env.example` for all options.
 | :--- | :--- | :--- |
 | `PORT` | Server port | `7860` |
 | `API_PASSWORD` | Optional password for API endpoints | `ep` |
-| `FLARESOLVERR_URL` | URL for FlareSolverr | `http://localhost:8191` |
-| `FLARESOLVERR_TIMEOUT` | Timeout for FlareSolverr requests (seconds) | `30` |
 | `DVR_ENABLED` | Enable recording features | `false` |
 | `ENABLE_WARP` | Enable integrated Cloudflare WARP | `false` |
 | `WARP_EXCLUDED_HOSTS` | Comma-separated hosts that must bypass the WARP VPN tunnel and use the server real IP | built-in defaults |
@@ -120,8 +118,7 @@ To function correctly, the container needs elevated network permissions:
 docker run -d --name easyproxy --cap-add=NET_ADMIN --device /dev/net/tun -e ENABLE_WARP=true -p 7860:7860 ghcr.io/realbestia1/easyproxy:latest
 ```
 
-> [!NOTE]
-> If you are deploying on **HuggingFace Spaces**, WARP cannot be used due to security restrictions. Set `ENABLE_WARP=false` in your environment variables.
+For restricted Docker environments that cannot expose `/dev/net/tun`, build the image and run with `-e ENABLE_WARP=true -e WARP_MODE=wireproxy`.
 
 > [!IMPORTANT]
 > If a provider has issues behind WARP, configure the host in `WARP_EXCLUDED_HOSTS`.
