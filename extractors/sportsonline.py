@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import logging
 import re
 import json
@@ -277,6 +278,46 @@ class SportsonlineExtractor:
         return None
 
     @staticmethod
+    def _extract_econfig_m3u8(html: str) -> str | None:
+        """Decode current dynmill player config and return its stream URL."""
+        config_match = re.search(r"window\._econfig\s*=\s*['\"]([^'\"]+)['\"]", html)
+        if not config_match:
+            return None
+
+        try:
+            encoded_config = config_match.group(1)
+            decoded_config = base64.b64decode(
+                encoded_config + "=" * (-len(encoded_config) % 4)
+            ).decode("latin1")
+
+            part_order = [2, 0, 3, 1]
+            part_length = -(-len(decoded_config) // 4)
+            encoded_parts = []
+            offset = 0
+
+            for _ in range(4):
+                part = decoded_config[offset : offset + part_length]
+                offset += part_length
+                encoded_parts.append(part[:3] + part[4:])
+
+            decoded_parts = [""] * 4
+            for index, part in enumerate(encoded_parts):
+                decoded_parts[part_order[index]] = base64.b64decode(
+                    part + "=" * (-len(part) % 4)
+                ).decode("latin1")
+
+            joined_config = "".join(decoded_parts)
+            config_json = base64.b64decode(
+                joined_config + "=" * (-len(joined_config) % 4)
+            ).decode("utf-8")
+            config = json.loads(config_json)
+        except Exception as e:
+            logger.debug(f"Failed to decode Sportsonline _econfig: {e}")
+            return None
+
+        return config.get("stream_url_nop2p") or config.get("stream_url")
+
+    @staticmethod
     def _normalize_stream_url(stream_url: str, base_url: str) -> str:
         cleaned = stream_url.strip().strip("\"'").replace("\\/", "/")
         if cleaned.startswith("//"):
@@ -384,7 +425,10 @@ class SportsonlineExtractor:
             if not packed_blocks:
                 logger.warning("No packed blocks found, trying direct m3u8 search")
                 # Fallback: try direct m3u8 search
-                direct_match = self._extract_m3u8_candidate(iframe_html)
+                direct_match = (
+                    self._extract_m3u8_candidate(iframe_html)
+                    or self._extract_econfig_m3u8(iframe_html)
+                )
                 if direct_match:
                     m3u8_url = self._normalize_stream_url(direct_match, iframe_url)
                     logger.debug(f"Found direct m3u8 URL: {m3u8_url}")
@@ -433,6 +477,8 @@ class SportsonlineExtractor:
 
             if not m3u8_url:
                 fallback_candidate = self._extract_m3u8_candidate(iframe_html)
+                if not fallback_candidate:
+                    fallback_candidate = self._extract_econfig_m3u8(iframe_html)
                 if fallback_candidate:
                     m3u8_url = fallback_candidate
 
