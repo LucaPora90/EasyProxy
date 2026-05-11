@@ -5,16 +5,11 @@ import re
 import json
 from urllib.parse import urlparse, urljoin
 from typing import Dict, Any
-import gzip
-import zlib
 import random
 import aiohttp
 from aiohttp import ClientSession, ClientTimeout, TCPConnector
-import zstandard  # Importa la libreria zstandard
-from aiohttp_socks import ProxyConnector
 from config import get_proxy_for_url, TRANSPORT_ROUTES, GLOBAL_PROXIES, get_connector_for_proxy
 
-from utils.smart_request import smart_request
 
 logger = logging.getLogger(__name__)
 
@@ -184,53 +179,31 @@ class SportsonlineExtractor:
     async def _make_robust_request(
         self, url: str, headers: dict = None, retries=2, initial_delay=1, timeout=15
     ):
-        """Effettua richieste HTTP robuste usando smart_request per gestire Cloudflare."""
+        """Effettua richieste HTTP robuste con aiohttp e proxy configurati."""
         final_headers = headers or self.base_headers
 
         for attempt in range(retries):
             try:
                 logger.debug(f"Attempt {attempt + 1}/{retries} for URL: {url}")
-                
-                # Usiamo smart_request che gestisce già il bypass Cloudflare
-                response_data = await smart_request(
-                    "request.get", url, headers=final_headers, proxies=self.proxies
-                )
-                html, _cookies = self._extract_html_and_cookies(response_data)
-                
-                if not html:
-                    raise ExtractorError(f"SmartRequest returned empty response for {url}")
-                
-                # Restituiamo il contenuto e l'URL finale (mocked)
-                return html, url
+                session = await self._get_session(url)
+                async with session.get(url, headers=final_headers, timeout=timeout) as response:
+                    response.raise_for_status()
+                    html = await self._handle_response_content(response)
+                    if not html:
+                        raise ExtractorError(f"Empty response for {url}")
+                    return html, str(response.url)
 
             except Exception as e:
-                logger.warning(f"⚠️ SmartRequest attempt {attempt + 1} failed for {url}: {str(e)}")
+                logger.warning(f"Request attempt {attempt + 1} failed for {url}: {str(e)}")
                 if attempt < retries - 1:
                     await asyncio.sleep(initial_delay)
                 else:
-                    raise ExtractorError(f"All SmartRequest attempts failed for {url}: {str(e)}")
+                    raise ExtractorError(f"All request attempts failed for {url}: {str(e)}")
         raise ExtractorError(f"Unable to complete request for {url}")
-
     async def _handle_response_content(self, response: aiohttp.ClientResponse) -> str:
-        """Gestisce la decompressione manuale del corpo della risposta."""
-        content_encoding = response.headers.get("Content-Encoding")
+        """Read response body; aiohttp already handles standard decompression."""
         raw_body = await response.read()
-
-        if content_encoding == "zstd":
-            dctx = zstandard.ZstdDecompressor()
-            try:
-                decompressed_body = dctx.decompress(raw_body, max_output_size=104857600)
-                return decompressed_body.decode(response.charset or "utf-8")
-            except zstandard.ZstdError as zs_e:
-                raise ExtractorError(f"Zstd decompression error: {zs_e}")
-        elif content_encoding == "gzip":
-            decompressed_body = gzip.decompress(raw_body)
-            return decompressed_body.decode(response.charset or "utf-8")
-        elif content_encoding == "deflate":
-            decompressed_body = zlib.decompress(raw_body)
-            return decompressed_body.decode(response.charset or "utf-8")
-        else:
-            return raw_body.decode(response.charset or "utf-8")
+        return raw_body.decode(response.charset or "utf-8", errors="replace")
 
     def _detect_packed_blocks(self, html: str) -> list[str]:
         raw_matches: list[str] = []
@@ -326,29 +299,6 @@ class SportsonlineExtractor:
         if not urlparse(cleaned).scheme:
             return urljoin(base_url, cleaned)
         return cleaned
-
-    @staticmethod
-    def _extract_html_and_cookies(response_data: Any) -> tuple[str, dict[str, str]]:
-        """Normalize SmartRequest responses into an HTML string plus cookies."""
-        if isinstance(response_data, str):
-            return response_data, {}
-
-        if isinstance(response_data, dict):
-            html = response_data.get("html", "")
-            cookies = response_data.get("cookies", {}) or {}
-            if not isinstance(html, str):
-                raise ExtractorError(
-                    f"SmartRequest returned non-string html payload: {type(html).__name__}"
-                )
-            if not isinstance(cookies, dict):
-                cookies = {}
-            return html, {
-                str(name): str(value) for name, value in cookies.items() if value is not None
-            }
-
-        raise ExtractorError(
-            f"SmartRequest returned unsupported payload type: {type(response_data).__name__}"
-        )
 
     async def extract(self, url: str, **kwargs) -> Dict[str, Any]:
         """Main extraction flow: fetch page, extract iframe, unpack and find m3u8."""
