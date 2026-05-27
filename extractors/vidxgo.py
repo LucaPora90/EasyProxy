@@ -2,27 +2,19 @@
 VidXgo extractor.
 
 Decodes the obfuscated player at v.vidxgo.co / vidxgo.* and returns the master
-HLS playlist. CDN signed URLs on the .ts segments have a ~5 min TTL, so this
-extractor:
-
-  1. Caches the extracted (url + manifest) for `CACHE_TTL_SECONDS` (3 min).
-  2. Honors `force_refresh=True` to skip the cache (used by EP background
-     refresh loop and by the segment-error refresh path).
-  3. Transforms the VOD manifest into an "EVENT" / live one by removing
-     `#EXT-X-ENDLIST`, so the player keeps re-fetching the manifest and EP
-     gets a chance to serve a freshly-extracted segment URL list before the
-     CDN tokens expire.
+HLS playlist. CDN signed URLs on the .ts segments have a ~5 min TTL. Always
+re-fetches the embed page on each extract() call to get fresh tokens. Transforms
+the VOD manifest into an "EVENT" / live one by removing `#EXT-X-ENDLIST`, so the
+player keeps re-fetching the manifest and EP gets a chance to serve a
+freshly-extracted segment URL list before the CDN tokens expire.
 """
 
 import asyncio
 import base64
 import logging
-import random
 import re
-import time
 from urllib.parse import urlparse, parse_qs
 
-import aiohttp
 from aiohttp import ClientSession, ClientTimeout, TCPConnector
 
 from config import GLOBAL_PROXIES, TRANSPORT_ROUTES, get_proxy_for_url, get_connector_for_proxy
@@ -33,13 +25,6 @@ logger = logging.getLogger(__name__)
 class ExtractorError(Exception):
     pass
 
-
-# How long an extraction is considered fresh as a fallback. The real
-# freshness is computed from the `e=` query param of the signed m3u8 URL
-# (ms epoch). We refresh when fewer than `REFRESH_SAFETY_MARGIN` seconds
-# remain on the token.
-CACHE_TTL_SECONDS = 180
-REFRESH_SAFETY_MARGIN = 60  # seconds before token `e=` expiry to refresh
 
 
 def _parse_e_expiry(url: str) -> float | None:
@@ -120,9 +105,6 @@ class VidXgoExtractor:
             "sec-fetch-site": "cross-site",
         }
 
-        # In-memory cache: key=embed_url -> (timestamp, m3u8_url, manifest_text, headers)
-        self._cache: dict[str, tuple[float, str, str, dict]] = {}
-
     # ------------------------------------------------------------------ proxies
 
     def _get_proxies_for_url(self, url: str) -> list[str]:
@@ -201,8 +183,8 @@ class VidXgoExtractor:
     def _make_live(manifest_text: str) -> str:
         """
         Turn a VOD playlist into an EVENT/live one so the player re-fetches
-        the manifest periodically. This is what gives EP the chance to call
-        extract() again after CACHE_TTL_SECONDS and serve fresh segment URLs.
+        the manifest periodically. This gives EP the chance to call
+        extract() again and serve fresh segment URLs.
         """
         if not manifest_text:
             return manifest_text
@@ -258,40 +240,6 @@ class VidXgoExtractor:
             "origin": vd_domain,
         }
 
-        # Cache lookup.
-        # NOTE: EP's captured-HLS refresh loop hammers extract() every ~2s with
-        # force_refresh=True. We honor force_refresh only when the cache is
-        # actually past its TTL, so vidxgo.co isn't bombarded.
-        now = time.time()
-        cached = self._cache.get(url)
-        cache_fresh = False
-        if cached:
-            cached_ts, cached_m3u8_url, *_ = cached
-            expiry_ts = _parse_e_expiry(cached_m3u8_url)
-            if expiry_ts is not None:
-                # Use the signed URL's real expiry as freshness gate.
-                cache_fresh = (expiry_ts - now) > REFRESH_SAFETY_MARGIN
-            else:
-                cache_fresh = (now - cached_ts) < CACHE_TTL_SECONDS
-        if cached and cache_fresh and (not force_refresh or background_refresh):
-            ts, m3u8_url, master_text, captured_map, cached_headers = cached
-            logger.debug(
-                f"vidxgo: cache hit for {url} (age={int(now - ts)}s, "
-                f"force={force_refresh}, bg={background_refresh})"
-            )
-            return {
-                "destination_url": m3u8_url,
-                "request_headers": cached_headers,
-                "captured_manifest": master_text,
-                "captured_manifests": captured_map,
-                "mediaflow_endpoint": self.mediaflow_endpoint,
-                "selected_proxy": self.selected_proxy,
-            }
-        if cached and not cache_fresh:
-            logger.info(f"vidxgo: cache expired for {url} (age={int(now - cached[0])}s) -> refresh")
-        elif force_refresh and cached:
-            logger.info(f"vidxgo: force_refresh (user) for {url}")
-
         # 1. Fetch embed page.
         embed_headers = {**self.embed_headers, **{k.lower(): v for k, v in request_headers.items() if k.lower() == "cookie"}}
         html = await self._fetch(url, embed_headers)
@@ -324,6 +272,16 @@ class VidXgoExtractor:
                 if raw and not raw.startswith("#"):
                     variant_urls.append(urljoin(m3u8_url, raw))
 
+        # Also capture audio/subtitle EXT-X-MEDIA playlist URLs
+        for line in master_lines:
+            if line.startswith("#EXT-X-MEDIA:") and 'URI="' in line:
+                uri_start = line.find('URI="') + 5
+                uri_end = line.find('"', uri_start)
+                if uri_start > 4 and uri_end > uri_start:
+                    media_url = urljoin(m3u8_url, line[uri_start:uri_end])
+                    if media_url not in variant_urls:
+                        variant_urls.append(media_url)
+
         # Fetch variants in parallel; ignore individual failures so the master
         # still plays even if one rendition is broken.
         async def _grab(v_url: str) -> tuple[str, str | None]:
@@ -344,9 +302,7 @@ class VidXgoExtractor:
         # Single-variant streams: master IS the variant.
         captured_map[m3u8_url] = master_text
 
-        # 4. Cache + return.
-        self._cache[url] = (now, m3u8_url, master_text, captured_map, playback_headers)
-
+        # 4. Return.
         return {
             "destination_url": m3u8_url,
             "request_headers": playback_headers,

@@ -242,10 +242,6 @@ ENABLE_WARP = os.environ.get("ENABLE_WARP", "false").lower() == "true"
 WARP_PROXY_URL = os.environ.get("WARP_PROXY_URL", "").strip() or "socks5h://127.0.0.1:1080"
 
 _default_warp_exclude_domains = [
-    "cinemacity.cc",
-    "*.cinemacity.cc",
-    "cccdn.net",
-    "*.cccdn.net",
     "strem.fun",
     "*.strem.fun",
     "torrentio.strem.fun",
@@ -299,7 +295,7 @@ MAX_RECORDING_DURATION = int(os.environ.get("MAX_RECORDING_DURATION", 28800))
 RECORDINGS_RETENTION_DAYS = int(os.environ.get("RECORDINGS_RETENTION_DAYS", 7))
 
 # --- Version/Mode Configuration ---
-APP_VERSION = "2.6.33"
+APP_VERSION = "2.7.12"
 
 _has_solvers = os.path.exists("flaresolverr")
 VERSION_MODE = "Full" if _has_solvers else "Light"
