@@ -283,10 +283,9 @@ class ManifestRewriter:
         # no_bypass e mantenuto per compatibilita, ma il rewriter ora proxa sempre.
         _ = no_bypass
 
-        # VixSrc used to have a custom master-playlist rewrite here.
-        # ExoPlayer is stricter than VLC about HLS master/media relationships,
-        # so we now let VixSrc fall through to the generic HLS rewriting path.
-        _ = is_vixsrc_stream
+        # ExoPlayer is stricter than VLC about HLS master/media relationships.
+        # For VixSrc, preserve the full master instead of collapsing to one
+        # variant, otherwise audio/video TrackGroups can become inconsistent.
 
         # Generic master-playlist optimization: keep only the highest-bandwidth
         # video variant, while preserving audio/media tags and other metadata.
@@ -304,7 +303,7 @@ class ManifestRewriter:
                     }
                 )
 
-        if generic_streams:
+        if generic_streams and not is_vixsrc_stream:
             highest_quality_stream = max(generic_streams, key=lambda x: x["bandwidth"])
             logger.debug(
                 "Generic HLS: selected max bandwidth %s.",

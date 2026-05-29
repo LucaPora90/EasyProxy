@@ -111,7 +111,14 @@ def should_use_short_manifest_urls(original_url: str, host_param: str, response_
 def should_use_short_captured_manifest_urls(original_url: str, host_param: str) -> bool:
     original = (original_url or "").lower()
     host = (host_param or "").lower()
-    return "cinemacity.cc" in original or "vidxgo" in original or host in {"city", "cinemacity"}
+    return (
+        "cinemacity.cc" in original
+        or "vidxgo" in original
+        or "vixsrc" in original
+        or "vixcloud" in original
+        or "streamvix" in original
+        or host in {"city", "cinemacity", "vixsrc", "vixcloud", "streamvix"}
+    )
 
 
 def requires_captured_manifest_proxy(host_param: str | None, original_url: str, stream_url: str) -> bool:

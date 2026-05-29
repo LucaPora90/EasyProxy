@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 import aiohttp
 from config import FLARESOLVERR_URL, FLARESOLVERR_TIMEOUT, get_proxy_for_url, TRANSPORT_ROUTES, GLOBAL_PROXIES
+from config import PROXY_TEST_TIMEOUT
 from curl_cffi.requests import AsyncSession
 
 logger = logging.getLogger(__name__)
@@ -26,20 +27,48 @@ class CinemaCityExtractor:
         self.base_url = "https://cinemacity.cc"
         self.flaresolverr_url = FLARESOLVERR_URL
         self.flaresolverr_timeout = FLARESOLVERR_TIMEOUT
+        self.last_used_proxy = None
+
+    @staticmethod
+    def _normalize_proxy_url(proxy_value: str) -> str:
+        proxy_value = proxy_value.strip()
+        if proxy_value.startswith("socks5://"):
+            return proxy_value.replace("socks5://", "socks5h://", 1)
+        if "://" not in proxy_value:
+            return f"socks5h://{proxy_value}"
+        return proxy_value
 
     async def _ensure_cookies(self):
         if self._cookies and self._user_agent:
             return
         endpoint = f"{self.flaresolverr_url.rstrip('/')}/v1"
-        payload = {"cmd": "request.get", "url": self.base_url, "maxTimeout": (self.flaresolverr_timeout + 60) * 1000}
-        async with aiohttp.ClientSession() as s:
-            async with s.post(endpoint, json=payload, timeout=aiohttp.ClientTimeout(total=self.flaresolverr_timeout + 95)) as r:
-                d = await r.json()
-        if d.get("status") != "ok":
-            raise ExtractorError(f"FlareSolverr: {d.get('message', '')}")
-        self._cookies = {c["name"]: c["value"] for c in d["solution"].get("cookies", [])}
-        self._user_agent = d["solution"].get("userAgent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-        logger.info(f"CinemaCity: FS cookies: {list(self._cookies.keys())}")
+        # self.proxies has priority order: [primary] + [extractor-specific] + [GLOBAL_PROXIES]
+        proxies_to_try = []
+        for proxy in self.proxies or []:
+            if proxy and proxy not in proxies_to_try:
+                proxies_to_try.append(proxy)
+        route_proxy = get_proxy_for_url(self.base_url, TRANSPORT_ROUTES, self.proxies)
+        if route_proxy and route_proxy not in proxies_to_try:
+            proxies_to_try.append(route_proxy)
+        if None not in proxies_to_try:
+            proxies_to_try.append(None)
+        logger.info(f"CinemaCity FS proxy list ({len(proxies_to_try)}): {[p or 'direct' for p in proxies_to_try[:5]]}...")
+
+        for proxy in proxies_to_try:
+            payload = {"cmd": "request.get", "url": self.base_url, "maxTimeout": (self.flaresolverr_timeout + 60) * 1000}
+            if proxy:
+                payload["proxy"] = proxy.replace("socks5h://", "socks5://", 1)
+            async with aiohttp.ClientSession() as s:
+                async with s.post(endpoint, json=payload, timeout=aiohttp.ClientTimeout(total=self.flaresolverr_timeout + 95)) as r:
+                    d = await r.json()
+            if d.get("status") == "ok":
+                self._cookies = {c["name"]: c["value"] for c in d["solution"].get("cookies", [])}
+                self._user_agent = d["solution"].get("userAgent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+                self.last_used_proxy = self._normalize_proxy_url(proxy) if proxy else None
+                logger.info(f"CinemaCity: FS cookies via {proxy or 'direct'}: {list(self._cookies.keys())}")
+                return
+            logger.warning("CinemaCity FS failed via %s: %s", proxy or "direct", d.get("message", ""))
+        raise ExtractorError("FlareSolverr: all attempts failed for cinemacity")
 
     def _build_cookie_str(self, extra_cookies: str = "") -> str:
         parts = [f"{k}={v}" for k, v in self._cookies.items()]
@@ -51,6 +80,10 @@ class CinemaCityExtractor:
         await self._ensure_cookies()
         cookie_str = self._build_cookie_str(session_cookies)
 
+        request_kwargs = {}
+        if self.last_used_proxy:
+            request_kwargs["proxies"] = {"http": self.last_used_proxy, "https": self.last_used_proxy}
+
         async with AsyncSession(impersonate="chrome124") as sess:
             r = await sess.get(url, headers={
                 "User-Agent": self._user_agent,
@@ -58,7 +91,7 @@ class CinemaCityExtractor:
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.5",
                 "Referer": "https://cinemacity.cc/",
-            })
+            }, timeout=PROXY_TEST_TIMEOUT, **request_kwargs)
             html = r.text
             resp_cookies = dict(r.cookies) if hasattr(r, 'cookies') else {}
             logger.info(f"CinemaCity: curl_cffi status={r.status_code} len={len(html)}")

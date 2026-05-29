@@ -200,10 +200,11 @@ class HLSProxyExtractorHandlerMixin:
                         )
                     return await self.shorten_hls_url(manifest_url)
 
-                # vidxgo: direct manifest response (needs captured manifest for token refresh)
-                # Others (vixsrc, cinemacity, etc): pre-store captured manifests, then 302 redirect
-                is_vidxgo = hasattr(extractor, 'extractor_name') and extractor.extractor_name == "vidxgo"
-                if is_vidxgo:
+                # Signed HLS providers need direct captured manifest responses so
+                # segment retries can refresh stale tokenized URLs.
+                extractor_name = getattr(extractor, 'extractor_name', None)
+                uses_captured_manifest = extractor_name in {"vidxgo", "vixsrc"}
+                if uses_captured_manifest:
                     async def shorten_captured_manifest_url(manifest_url: str) -> str:
                         captured_text = captured_manifests.get(manifest_url)
                         if captured_text:
@@ -265,6 +266,7 @@ class HLSProxyExtractorHandlerMixin:
                 full_proxy_url += "&redirect_stream=true"
 
             if redirect_stream:
+                logger.info("↪️ Redirecting extractor result to proxy endpoint: %s", endpoint)
                 logger.debug(f"↪️ Redirecting to: {full_proxy_url}")
                 return web.HTTPFound(full_proxy_url)
 

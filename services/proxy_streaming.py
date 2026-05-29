@@ -148,7 +148,7 @@ class HLSProxyStreamingMixin:
 
         # Priorità: proxy passato esplicitamente -> proxy in query string
         forced_proxy = forced_proxy or request.query.get("proxy") or None
-
+        request._ps_forced_proxy = forced_proxy
         try:
             # Ping browser-based extractors to keep shared browser alive
             ext = get_browser_activity_extractor(self.extractors)
@@ -233,6 +233,9 @@ class HLSProxyStreamingMixin:
             headers.pop("X-EasyProxy-Disable-SSL", None)
             headers.pop("x-easyproxy-disable-ssl", None)
             is_special_cdn = is_special_cdn_stream(stream_url)
+
+            if request.path.startswith("/proxy/hls/segment."):
+                self._schedule_segment_count_refresh(stream_url)
 
             if is_special_cdn:
                 headers["Accept-Encoding"] = "identity"
@@ -355,7 +358,12 @@ class HLSProxyStreamingMixin:
                     return None
                 refreshed_url = self._refresh_segment_token(stream_url)
                 if not refreshed_url or refreshed_url == stream_url:
-                    return None
+                    refreshed = await self._refresh_captured_hls_for_segment(stream_url)
+                    if not refreshed:
+                        return None
+                    refreshed_url = self._refresh_segment_token(stream_url)
+                    if not refreshed_url or refreshed_url == stream_url:
+                        return None
 
                 if self._should_force_direct_from_query(request):
                     retry_session = await self._get_session(url=refreshed_url)
@@ -797,6 +805,15 @@ class HLSProxyStreamingMixin:
             if "Connection lost" in err_msg or "Connection reset" in err_msg:
                 logger.info(f"ℹ️ Stream connection closed by client or server: {stream_url}")
                 return web.Response(text="Connection lost", status=499)
+
+            # If forced_proxy was set and failed with a proxy/connection error, re-extract
+            forced_proxy = getattr(request, '_ps_forced_proxy', None)
+            if forced_proxy and not getattr(request, '_ps_retried', False):
+                is_proxy_err = any(x in err_msg for x in ("invalid reply", "connection refused", "connection reset", "proxy connection timed out", "can't connect to server", "0x9", "0x7", "socks5"))
+                if is_proxy_err:
+                    request._ps_retried = True
+                    logger.warning("Proxy %s failed for %s, re-extraction needed", forced_proxy, stream_url)
+                    raise Exception("PROXY_DEAD_RETRY_EXTRACTION")
 
             logger.error(
                 "❌ Generic error in stream proxy [%s]: %r",

@@ -48,6 +48,8 @@ class HLSProxy(
         self.hls_url_max_entries = 2000
         self.captured_hls_manifest_map = {}
         self.captured_hls_refresh_tasks = {}
+        self.captured_hls_segment_counts = {}
+        self.captured_hls_segment_refresh_tasks = {}
 
         # Cache for proxy sessions (proxy_url -> session)
         # This reuses connections for the same proxy to improve performance

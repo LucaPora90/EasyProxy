@@ -2,7 +2,7 @@ import logging
 import re
 import urllib.parse
 
-from config import GLOBAL_PROXIES, TRANSPORT_ROUTES, get_proxy_for_url
+from config import GLOBAL_PROXIES, TRANSPORT_ROUTES, get_proxy_for_url, get_extractor_proxies
 from extractors.generic import GenericHLSExtractor, ExtractorError
 from extractors.registry_imports import *
 
@@ -34,6 +34,15 @@ def _resolve_sportsonline_proxy(url: str, bypass_warp: bool = False) -> str | No
     return get_proxy_for_url(url, TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp)
 
 
+def _build_proxy_list(primary_proxy: str | None = None, extractor_name: str | None = None) -> list[str]:
+    """Build ordered proxy list: extractor-specific first, then route/primary, then GLOBAL_PROXIES."""
+    proxies = []
+    for proxy in get_extractor_proxies(extractor_name or "") + ([primary_proxy] if primary_proxy else []) + list(GLOBAL_PROXIES):
+        if proxy and proxy not in proxies:
+            proxies.append(proxy)
+    return proxies
+
+
 async def resolve_extractor(self, url: str, request_headers: dict, host: str = None, bypass_warp: bool = False):
     """Ottiene l'estrattore appropriato per l'URL"""
     try:
@@ -51,7 +60,9 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
                 GLOBAL_PROXIES,
                 bypass_warp=bypass_warp,
             )
-            proxy_list = [proxy] if proxy else []
+            # Normalize host → extractor name for env var lookup (e.g. "city" → "cinemacity")
+            x = {"city": "cinemacity"}.get(host, host)
+            proxy_list = _build_proxy_list(proxy, x)
 
             if host == "vavoo":
                 if key not in self.extractors:
@@ -264,13 +275,13 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
         if any(path_lower.endswith(ext) for ext in [".mp4", ".m3u8", ".ts", ".mkv", ".avi", ".mov", ".flv", ".wmv", ".mp3", ".aac", ".m4a", ".mpd"]):
             key = "hls_generic"
             if key not in self.extractors:
-                self.extractors[key] = GenericHLSExtractor(request_headers, proxies=GLOBAL_PROXIES)
+                self.extractors[key] = GenericHLSExtractor(request_headers, proxies=_build_proxy_list(None, "generic"))
             return self.extractors[key]
 
         if "vavoo.to" in url:
             key = "vavoo_direct" if bypass_warp else "vavoo"
             proxy = get_proxy_for_url("vavoo.to", TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp)
-            proxy_list = [proxy] if proxy else []
+            proxy_list = _build_proxy_list(proxy, "vavoo")
             if key not in self.extractors:
                 self.extractors[key] = VavooExtractor(
                     request_headers, proxies=proxy_list
@@ -281,7 +292,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
         ):
             key = "vixsrc_direct" if bypass_warp else "vixsrc"
             proxy = get_proxy_for_url("vixsrc.to", TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp)
-            proxy_list = [proxy] if proxy else []
+            proxy_list = _build_proxy_list(proxy, "vixsrc")
             if key not in self.extractors:
                 self.extractors[key] = VixSrcExtractor(
                     request_headers, proxies=proxy_list
@@ -292,7 +303,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
         ):
             key = "vixcloud_direct" if bypass_warp else "vixcloud"
             proxy = get_proxy_for_url("vixcloud.co", TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp)
-            proxy_list = [proxy] if proxy else []
+            proxy_list = _build_proxy_list(proxy, "vixcloud")
             if key not in self.extractors:
                 self.extractors[key] = VixSrcExtractor(
                     request_headers, proxies=proxy_list
@@ -301,7 +312,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
         elif _is_sportsonline_candidate(url):
             key = "sportsonline_direct" if bypass_warp else "sportsonline"
             proxy = _resolve_sportsonline_proxy(url)
-            proxy_list = [proxy] if proxy else []
+            proxy_list = _build_proxy_list(proxy, "sportsonline")
             if key not in self.extractors:
                 self.extractors[key] = SportsonlineExtractor(
                     request_headers, proxies=proxy_list
@@ -321,7 +332,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
         ):
             key = "streamhg_direct" if bypass_warp else "streamhg"
             proxy = get_proxy_for_url("streamhg", TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp)
-            proxy_list = [proxy] if proxy else []
+            proxy_list = _build_proxy_list(proxy, "streamhg")
             if key not in self.extractors:
                 self.extractors[key] = StreamHGExtractor(
                     request_headers, proxies=proxy_list
@@ -330,7 +341,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
         elif "cinemacity.cc" in url.lower():
             key = "cinemacity_direct" if bypass_warp else "cinemacity"
             proxy = get_proxy_for_url("cinemacity.cc", TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp)
-            proxy_list = [proxy] if proxy else []
+            proxy_list = _build_proxy_list(proxy, "cinemacity")
             if key not in self.extractors:
                 self.extractors[key] = CinemaCityExtractor(
                     request_headers, proxies=proxy_list
@@ -344,7 +355,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
                 GLOBAL_PROXIES,
                 bypass_warp=bypass_warp,
             )
-            proxy_list = [proxy] if proxy else []
+            proxy_list = _build_proxy_list(proxy, "embedsports")
             if key not in self.extractors:
                 self.extractors[key] = EmbedSportsExtractor(
                     request_headers, proxies=proxy_list, bypass_warp=bypass_warp
@@ -353,7 +364,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
         elif "mixdrop" in url or "m1xdrop" in url:
             key = "mixdrop_direct" if bypass_warp else "mixdrop"
             proxy = get_proxy_for_url("mixdrop", TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp)
-            proxy_list = [proxy] if proxy else []
+            proxy_list = _build_proxy_list(proxy, "mixdrop")
             if key not in self.extractors:
                 self.extractors[key] = MixdropExtractor(
                     request_headers, proxies=proxy_list
@@ -372,7 +383,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
         ):
             key = "voe_direct" if bypass_warp else "voe"
             proxy = get_proxy_for_url("voe.sx", TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp)
-            proxy_list = [proxy] if proxy else []
+            proxy_list = _build_proxy_list(proxy, "voe")
             if key not in self.extractors:
                 self.extractors[key] = VoeExtractor(
                     request_headers, proxies=proxy_list
@@ -386,7 +397,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
                 GLOBAL_PROXIES,
                 bypass_warp=bypass_warp
             )
-            proxy_list = [proxy] if proxy else []
+            proxy_list = _build_proxy_list(proxy, "freeshot")
             if key not in self.extractors:
                 self.extractors[key] = FreeshotExtractor(
                     request_headers, proxies=proxy_list
@@ -401,7 +412,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
             proxy = get_proxy_for_url(
                 "streamtape", TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp
             )
-            proxy_list = [proxy] if proxy else []
+            proxy_list = _build_proxy_list(proxy, "streamtape")
             if key not in self.extractors:
                 self.extractors[key] = StreamtapeExtractor(
                     request_headers, proxies=proxy_list
@@ -412,7 +423,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
             proxy = get_proxy_for_url(
                 "orionoid.com", TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp
             )
-            proxy_list = [proxy] if proxy else []
+            proxy_list = _build_proxy_list(proxy, "orion")
             if key not in self.extractors:
                 self.extractors[key] = OrionExtractor(
                     request_headers, proxies=proxy_list
@@ -435,7 +446,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
             proxy = get_proxy_for_url(
                 url, TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp
             )
-            proxy_list = [proxy] if proxy else []
+            proxy_list = _build_proxy_list(proxy, "doodstream")
             if key not in self.extractors:
                 self.extractors[key] = DoodStreamExtractor(
                     request_headers,
@@ -445,7 +456,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
         elif "fastream" in url:
             key = "fastream_direct" if bypass_warp else "fastream"
             proxy = get_proxy_for_url("fastream", TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp)
-            proxy_list = [proxy] if proxy else []
+            proxy_list = _build_proxy_list(proxy, "fastream")
             if key not in self.extractors:
                 self.extractors[key] = FastreamExtractor(
                     request_headers, proxies=proxy_list
@@ -454,7 +465,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
         elif "filelions" in url:
             key = "filelions_direct" if bypass_warp else "filelions"
             proxy = get_proxy_for_url("filelions", TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp)
-            proxy_list = [proxy] if proxy else []
+            proxy_list = _build_proxy_list(proxy, "filelions")
             if key not in self.extractors:
                 self.extractors[key] = FileLionsExtractor(
                     request_headers, proxies=proxy_list
@@ -463,7 +474,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
         elif "filemoon" in url:
             key = "filemoon_direct" if bypass_warp else "filemoon"
             proxy = get_proxy_for_url("filemoon", TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp)
-            proxy_list = [proxy] if proxy else []
+            proxy_list = _build_proxy_list(proxy, "filemoon")
             if key not in self.extractors:
                 self.extractors[key] = FileMoonExtractor(
                     request_headers, proxies=proxy_list
@@ -476,7 +487,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
             proxy = get_proxy_for_url(
                 url, TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp
             )
-            proxy_list = [proxy] if proxy else []
+            proxy_list = _build_proxy_list(proxy, "dlstreams")
             if key not in self.extractors:
                 self.extractors[key] = DLStreamsExtractor(
                     request_headers, proxies=proxy_list, bypass_warp=bypass_warp
@@ -487,7 +498,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
             proxy = get_proxy_for_url(
                 "lulustream", TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp
             )
-            proxy_list = [proxy] if proxy else []
+            proxy_list = _build_proxy_list(proxy, "lulustream")
             if key not in self.extractors:
                 self.extractors[key] = LuluStreamExtractor(
                     request_headers, proxies=proxy_list
@@ -495,7 +506,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
             return self.extractors[key]
         elif "maxstream" in url:
             key = "maxstream_direct" if bypass_warp else "maxstream"
-            proxy_list = []
+            proxy_list = _build_proxy_list(None, "maxstream")
             for candidate in (url, "maxstream.video", "maxstream"):
                 proxy = get_proxy_for_url(
                     candidate, TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp
@@ -510,7 +521,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
         elif "ok.ru" in url or "odnoklassniki" in url:
             key = "okru"
             proxy = get_proxy_for_url("ok.ru", TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp)
-            proxy_list = [proxy] if proxy else []
+            proxy_list = _build_proxy_list(proxy, "okru")
             if key not in self.extractors:
                 self.extractors[key] = OkruExtractor(
                     request_headers, proxies=proxy_list
@@ -524,7 +535,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
             proxy = get_proxy_for_url(
                 "streamwish", TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp
             )
-            proxy_list = [proxy] if proxy else []
+            proxy_list = _build_proxy_list(proxy, "streamwish")
             if key not in self.extractors:
                 self.extractors[key] = StreamWishExtractor(
                     request_headers, proxies=proxy_list
@@ -535,7 +546,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
             proxy = get_proxy_for_url(
                 "supervideo", TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp
             )
-            proxy_list = [proxy] if proxy else []
+            proxy_list = _build_proxy_list(proxy, "supervideo")
             if key not in self.extractors:
                 self.extractors[key] = SupervideoExtractor(
                     request_headers, proxies=proxy_list
@@ -546,7 +557,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
             proxy = get_proxy_for_url(
                 "vidxgo", TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp
             )
-            proxy_list = [proxy] if proxy else []
+            proxy_list = _build_proxy_list(proxy, "vidxgo")
             if key not in self.extractors:
                 if VidXgoExtractor is None:
                     raise RuntimeError("VidXgoExtractor module not available")
@@ -561,7 +572,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
             proxy = get_proxy_for_url(
                 "dropload", TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp
             )
-            proxy_list = [proxy] if proxy else []
+            proxy_list = _build_proxy_list(proxy, "dropload")
             if key not in self.extractors:
                 self.extractors[key] = DroploadExtractor(
                     request_headers, proxies=proxy_list
@@ -574,7 +585,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
             # Only match embed pages (e.g. uqload.is/abc123.html), not CDN video URLs (m80.uqload.is/.../v.mp4)
             key = "uqload"
             proxy = get_proxy_for_url("uqload", TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp)
-            proxy_list = [proxy] if proxy else []
+            proxy_list = _build_proxy_list(proxy, "uqload")
             if key not in self.extractors:
                 self.extractors[key] = UqloadExtractor(
                     request_headers, proxies=proxy_list
@@ -583,7 +594,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
         elif "vidmoly" in url:
             key = "vidmoly"
             proxy = get_proxy_for_url("vidmoly", TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp)
-            proxy_list = [proxy] if proxy else []
+            proxy_list = _build_proxy_list(proxy, "vidmoly")
             if key not in self.extractors:
                 self.extractors[key] = VidmolyExtractor(
                     request_headers, proxies=proxy_list
@@ -592,7 +603,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
         elif "vidoza" in url or "videzz" in url:
             key = "vidoza"
             proxy = get_proxy_for_url("vidoza", TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp)
-            proxy_list = [proxy] if proxy else []
+            proxy_list = _build_proxy_list(proxy, "vidoza")
             if key not in self.extractors:
                 self.extractors[key] = VidozaExtractor(
                     request_headers, proxies=proxy_list
@@ -613,7 +624,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
             proxy = get_proxy_for_url(
                 "turbovidplay", TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp
             )
-            proxy_list = [proxy] if proxy else []
+            proxy_list = _build_proxy_list(proxy, "turbovidplay")
             if key not in self.extractors:
                 self.extractors[key] = TurboVidPlayExtractor(
                     request_headers, proxies=proxy_list
@@ -624,7 +635,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
         ):
             key = "f16px"
             proxy = get_proxy_for_url("f16px", TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp)
-            proxy_list = [proxy] if proxy else []
+            proxy_list = _build_proxy_list(proxy, "f16px")
             if key not in self.extractors:
                 self.extractors[key] = F16PxExtractor(
                     request_headers, proxies=proxy_list
@@ -633,7 +644,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
         elif "cdnlivetv.tv" in url or "cdnlivetv.ru" in url:
             key = "sports99"
             proxy = get_proxy_for_url("cdnlivetv.tv", TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp)
-            proxy_list = [proxy] if proxy else []
+            proxy_list = _build_proxy_list(proxy, "sports99")
             if key not in self.extractors:
                 self.extractors[key] = Sports99Extractor(
                     request_headers, proxies=proxy_list
@@ -645,7 +656,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
             key = "hls_generic"
             if key not in self.extractors:
                 self.extractors[key] = GenericHLSExtractor(
-                    request_headers, proxies=GLOBAL_PROXIES
+                    request_headers, proxies=_build_proxy_list(None, "generic")
                 )
             return self.extractors[key]
     except (NameError, TypeError) as e:

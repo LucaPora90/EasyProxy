@@ -20,6 +20,11 @@ class HLSProxyManifestHandlerMixin:
         token = BYPASS_WARP_CONTEXT.set(bypass_warp)
         proxy_token = SELECTED_PROXY_CONTEXT.set(None)
         selected_proxy = None
+        raw_proxy = request.query.get("proxy")
+        if raw_proxy:
+            selected_proxy = urllib.parse.unquote(raw_proxy)
+            if "://" not in selected_proxy and "%3a" in selected_proxy.lower():
+                selected_proxy = urllib.parse.unquote(selected_proxy)
 
         try:
             extractor = None
@@ -640,8 +645,31 @@ class HLSProxyManifestHandlerMixin:
             return await self._proxy_stream(request, stream_url, stream_headers, bypass_warp=bypass_warp, forced_proxy=selected_proxy)
 
         except Exception as e:
-            # ✅ MIGLIORATO: Distingui tra errori temporanei (sito offline) ed errori critici
             error_msg = str(e).lower()
+
+            # Retry extraction once if proxy died during playlist fetch
+            if "proxy_dead_retry_extraction" in error_msg and not getattr(request, '_extraction_retried', False):
+                request._extraction_retried = True
+                logger.warning("⚠️ Proxy died during playlist fetch, re-extracting %s", target_url)
+                try:
+                    extractor2 = await self.get_extractor(target_url, combined_headers, bypass_warp=bypass_warp)
+                    if extractor2:
+                        extractor2.request_headers = combined_headers
+                        result2 = await extractor2.extract(
+                            target_url,
+                            force_refresh=force_refresh,
+                            request_headers=combined_headers,
+                            bypass_warp=bypass_warp,
+                        )
+                        stream_url2 = result2["destination_url"]
+                        stream_headers2 = result2.get("request_headers", {})
+                        selected_proxy2 = result2.get("selected_proxy")
+                        logger.info("Re-extraction success: %s", stream_url2[:80])
+                        return await self._proxy_stream(request, stream_url2, stream_headers2, bypass_warp=bypass_warp, forced_proxy=selected_proxy2)
+                except Exception as retry_err:
+                    logger.error("Re-extraction failed: %s", retry_err)
+
+            # ✅ MIGLIORATO: Distingui tra errori temporanei (sito offline) ed errori critici
             is_expired_embed = is_expired_embed_error(error_msg)
             is_not_found = "404" in error_msg or "not found" in error_msg
             is_temporary_error = any(

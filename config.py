@@ -4,7 +4,11 @@ import random
 import socket
 import time
 import contextvars
+import urllib.request
 from dotenv import load_dotenv
+
+_proxy_file_cache: dict[str, tuple[float, list]] = {}
+_PROXY_FILE_TTL = 600
 
 # ContextVar for thread-safe/async-safe warp bypass state
 BYPASS_WARP_CONTEXT = contextvars.ContextVar("bypass_warp", default=False)
@@ -22,6 +26,8 @@ LOG_LEVEL_MAP = {
     "CRITICAL": logging.CRITICAL,
 }
 LOG_LEVEL = LOG_LEVEL_MAP.get(LOG_LEVEL_STR, logging.WARNING)
+PROXY_TEST_TIMEOUT = int(os.environ.get("PROXY_TEST_TIMEOUT", "5"))
+PROXY_TEST_CONCURRENCY = max(1, int(os.environ.get("PROXY_TEST_CONCURRENCY", "60")))
 
 logging.basicConfig(
     level=LOG_LEVEL,
@@ -44,8 +50,62 @@ def parse_proxies(proxy_env_var: str) -> list:
     """Analizza una stringa di proxy separati da virgola da una variabile d'ambiente."""
     proxies_str = os.environ.get(proxy_env_var, "").strip()
     if proxies_str:
-        return [p.strip() for p in proxies_str.split(",") if p.strip()]
+        proxies = []
+        for proxy in proxies_str.split(","):
+            proxy = proxy.strip()
+            if proxy.startswith("="):
+                proxy = proxy[1:].strip()
+            if proxy:
+                proxies.append(proxy)
+        return proxies
     return []
+
+
+def parse_proxy_file(proxy_file_env_var: str) -> list:
+    """Read proxies from comma-separated file paths/URLs, one proxy per line. Cached for 10 min."""
+    raw = os.environ.get(proxy_file_env_var, "").strip()
+    if not raw:
+        return []
+    now = time.time()
+    cached = _proxy_file_cache.get(raw)
+    if cached and (now - cached[0]) < _PROXY_FILE_TTL:
+        return cached[1]
+    proxies = []
+    for path in raw.split(","):
+        path = path.strip()
+        if not path:
+            continue
+        try:
+            if path.startswith(("http://", "https://")):
+                with urllib.request.urlopen(path, timeout=10) as response:
+                    text = response.read().decode("utf-8", errors="ignore")
+            else:
+                with open(path, "r", encoding="utf-8") as file:
+                    text = file.read()
+            for line in text.splitlines():
+                line = line.strip()
+                if line.startswith("="):
+                    line = line[1:].strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line not in proxies:
+                    proxies.append(line)
+        except Exception as e:
+            logger.warning(f"Error reading proxy file {path}: {e}")
+    _proxy_file_cache[raw] = (now, proxies)
+    return proxies
+
+
+def get_extractor_proxies(extractor_name: str) -> list:
+    """Returns proxies from EXTRACTOR_PROXY and EXTRACTOR_PROXY_FILE env vars."""
+    if not extractor_name:
+        return []
+    prefix = extractor_name.upper().replace('-', '_')
+    proxies = []
+    for proxy in parse_proxies(f"{prefix}_PROXY") + parse_proxy_file(f"{prefix}_PROXY_FILE"):
+        if proxy and proxy not in proxies:
+            proxies.append(proxy)
+    return proxies
 
 
 def parse_transport_routes() -> list:
@@ -137,41 +197,21 @@ def get_proxy_for_url(url: str, transport_routes: list, global_proxies: list, by
     if bypass_warp is None:
         bypass_warp = BYPASS_WARP_CONTEXT.get()
     if not url:
-        if bypass_warp:
-            return None
         proxy = random.choice(global_proxies) if global_proxies else None
         return proxy if is_proxy_alive(proxy) else None
-
-    # `bypass_warp` means "force real IP / direct connection" for the whole flow.
-    # Do this before TRANSPORT_ROUTES so host-specific routes cannot silently
-    # reintroduce WARP or another proxy when the caller explicitly asked to bypass.
-    if bypass_warp:
-        return None
 
     normalized_url = url.lower()
 
     if transport_routes:
         for route in transport_routes:
-            url_pattern = route["url"]
-            if url_pattern in url:
+            url_pattern = route["url"].lower()
+            if url_pattern in normalized_url:
                 proxy_value = route.get("proxy")
                 if not proxy_value:
                     return None
                 return proxy_value if is_proxy_alive(proxy_value) else None
 
-    # Check if WARP should be used
-    is_excluded = any(domain in normalized_url for domain in WARP_EXCLUDE_DOMAINS)
-    
-    if ENABLE_WARP and not bypass_warp and not is_excluded:
-        return WARP_PROXY_URL if is_proxy_alive(WARP_PROXY_URL) else None
-
-    # Fallback to Global Proxies
-    # Se bypass_warp è True, preferiamo la connessione DIRETTA (Real IP) per coerenza
-    # invece di pescare un proxy a caso dalla lista globale, che causerebbe rotazione IP.
-    if bypass_warp:
-        return None
-
-    # Use sticky proxy if already selected for this request context
+    # Explicit GLOBAL_PROXY wins over WARP. warp=off disables only WARP, not configured proxies.
     proxy = SELECTED_PROXY_CONTEXT.get()
     if proxy:
         return proxy if is_proxy_alive(proxy) else None
@@ -179,7 +219,16 @@ def get_proxy_for_url(url: str, transport_routes: list, global_proxies: list, by
     proxy = random.choice(global_proxies) if global_proxies else None
     if proxy:
         SELECTED_PROXY_CONTEXT.set(proxy)
-        
+
+    if proxy:
+        return proxy if is_proxy_alive(proxy) else None
+
+    # Check if WARP should be used only when no explicit proxy is configured.
+    is_excluded = any(domain in normalized_url for domain in WARP_EXCLUDE_DOMAINS)
+
+    if ENABLE_WARP and not bypass_warp and not is_excluded:
+        return WARP_PROXY_URL if is_proxy_alive(WARP_PROXY_URL) else None
+
     return proxy if is_proxy_alive(proxy) else None
 
 
@@ -295,7 +344,7 @@ MAX_RECORDING_DURATION = int(os.environ.get("MAX_RECORDING_DURATION", 28800))
 RECORDINGS_RETENTION_DAYS = int(os.environ.get("RECORDINGS_RETENTION_DAYS", 7))
 
 # --- Version/Mode Configuration ---
-APP_VERSION = "2.7.12"
+APP_VERSION = "2.7.23"
 
 _has_solvers = os.path.exists("flaresolverr")
 VERSION_MODE = "Full" if _has_solvers else "Light"
