@@ -17,7 +17,7 @@ from urllib.parse import urlparse, parse_qs
 
 from aiohttp import ClientSession, ClientTimeout, TCPConnector
 
-from config import GLOBAL_PROXIES, TRANSPORT_ROUTES, get_proxy_for_url, get_connector_for_proxy
+from config import get_connector_for_proxy, get_ordered_proxies_for_url
 
 logger = logging.getLogger(__name__)
 
@@ -111,20 +111,13 @@ class VidXgoExtractor:
     # ------------------------------------------------------------------ proxies
 
     def _get_proxies_for_url(self, url: str) -> list[str]:
-        ordered = []
-        for p in self.proxies:
-            if p and p not in ordered:
-                ordered.append(p)
-        route_proxy = get_proxy_for_url(url, TRANSPORT_ROUTES, GLOBAL_PROXIES)
-        if route_proxy and route_proxy not in ordered:
-            ordered.append(route_proxy)
-        return ordered
+        return get_ordered_proxies_for_url(url, self.extractor_name, self.proxies)
 
     # ------------------------------------------------------------------ fetch
 
     async def _fetch(self, url: str, headers: dict) -> str:
-        """GET `url` trying direct first, then each configured proxy."""
-        paths = [None] + self._get_proxies_for_url(url)
+        """GET `url` trying configured proxies first, then direct fallback."""
+        paths = self._get_proxies_for_url(url) + [None]
         last_error = None
         for proxy in paths:
             timeout = ClientTimeout(total=25, connect=10, sock_read=20)

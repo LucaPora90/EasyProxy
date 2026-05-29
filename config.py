@@ -46,9 +46,14 @@ logger = logging.getLogger(__name__)
 logger.setLevel(LOG_LEVEL)
 
 
+def _strip_env_assignment(value: str, env_var: str) -> str:
+    prefix = f"{env_var}="
+    return value[len(prefix):].strip() if value.startswith(prefix) else value
+
+
 def parse_proxies(proxy_env_var: str) -> list:
     """Analizza una stringa di proxy separati da virgola da una variabile d'ambiente."""
-    proxies_str = os.environ.get(proxy_env_var, "").strip()
+    proxies_str = _strip_env_assignment(os.environ.get(proxy_env_var, "").strip(), proxy_env_var)
     if proxies_str:
         proxies = []
         for proxy in proxies_str.split(","):
@@ -63,7 +68,7 @@ def parse_proxies(proxy_env_var: str) -> list:
 
 def parse_proxy_file(proxy_file_env_var: str) -> list:
     """Read proxies from comma-separated file paths/URLs, one proxy per line. Cached for 10 min."""
-    raw = os.environ.get(proxy_file_env_var, "").strip()
+    raw = _strip_env_assignment(os.environ.get(proxy_file_env_var, "").strip(), proxy_file_env_var)
     if not raw:
         return []
     now = time.time()
@@ -106,6 +111,75 @@ def get_extractor_proxies(extractor_name: str) -> list:
         if proxy and proxy not in proxies:
             proxies.append(proxy)
     return proxies
+
+
+def get_preferred_proxy(proxies: list | None) -> str | None:
+    """Return the first alive proxy from an already ordered proxy list."""
+    for proxy in proxies or []:
+        if proxy and is_proxy_alive(proxy):
+            return proxy
+    return None
+
+
+def get_transport_route_proxy(url: str, transport_routes: list) -> str | None:
+    """Return only an explicit TRANSPORT_ROUTES proxy match, without global/WARP fallback."""
+    if not url or not transport_routes:
+        return None
+    normalized_url = url.lower()
+    for route in transport_routes:
+        url_pattern = route["url"].lower()
+        if url_pattern in normalized_url:
+            proxy_value = route.get("proxy")
+            if not proxy_value:
+                return None
+            return proxy_value if is_proxy_alive(proxy_value) else None
+    return None
+
+
+def get_ordered_proxies_for_url(
+    url: str | None,
+    extractor_name: str = "",
+    fallback_proxies: list | None = None,
+    bypass_warp: bool | None = None,
+) -> list[str]:
+    """Build proxy priority: extractor-specific, TRANSPORT_ROUTES, fallback/global, WARP."""
+    ordered = []
+
+    def add(proxy: str | None):
+        if proxy and proxy not in ordered and is_proxy_alive(proxy):
+            ordered.append(proxy)
+
+    for proxy in get_extractor_proxies(extractor_name or ""):
+        add(proxy)
+
+    add(get_transport_route_proxy(url or "", TRANSPORT_ROUTES))
+
+    for proxy in fallback_proxies or []:
+        add(proxy)
+
+    for proxy in GLOBAL_PROXIES:
+        add(proxy)
+
+    if bypass_warp is None:
+        bypass_warp = BYPASS_WARP_CONTEXT.get()
+    normalized_url = (url or "").lower()
+    is_excluded = any(domain in normalized_url for domain in WARP_EXCLUDE_DOMAINS)
+    if ENABLE_WARP and not bypass_warp and not is_excluded:
+        add(WARP_PROXY_URL)
+
+    return ordered
+
+
+def get_preferred_proxy_for_url(
+    url: str | None,
+    extractor_name: str = "",
+    fallback_proxies: list | None = None,
+    bypass_warp: bool | None = None,
+) -> str | None:
+    """Return the first proxy using the global ordered-priority rules."""
+    return get_preferred_proxy(
+        get_ordered_proxies_for_url(url, extractor_name, fallback_proxies, bypass_warp)
+    )
 
 
 def parse_transport_routes() -> list:
@@ -233,7 +307,7 @@ def get_proxy_for_url(url: str, transport_routes: list, global_proxies: list, by
 
 
 def get_connector_for_proxy(proxy_url: str, **kwargs):
-    """Crea un ProxyConnector (aiohttp-socks) gestendo correttamente socks5h."""
+    """Crea un ProxyConnector (aiohttp-socks) gestendo socks5h e socks4a."""
     from aiohttp_socks import ProxyConnector
 
     if not proxy_url:
@@ -245,17 +319,22 @@ def get_connector_for_proxy(proxy_url: str, **kwargs):
     if connector_url.startswith("socks5h://"):
         connector_url = connector_url.replace("socks5h://", "socks5://")
         rdns = True
+    elif connector_url.startswith("socks4a://"):
+        connector_url = connector_url.replace("socks4a://", "socks4://")
+        rdns = True
 
     return ProxyConnector.from_url(connector_url, rdns=rdns, **kwargs)
 
 
 def get_solver_proxy_url(proxy_url: str | None) -> str | None:
-    """Normalizza il proxy per solver/browser che non supportano socks5h."""
+    """Normalizza il proxy per solver/browser che non supportano socks5h/socks4a."""
     if not proxy_url:
         return None
 
     if proxy_url.startswith("socks5h://"):
         return proxy_url.replace("socks5h://", "socks5://", 1)
+    if proxy_url.startswith("socks4a://"):
+        return proxy_url.replace("socks4a://", "socks4://", 1)
 
     return proxy_url
 
@@ -344,7 +423,7 @@ MAX_RECORDING_DURATION = int(os.environ.get("MAX_RECORDING_DURATION", 28800))
 RECORDINGS_RETENTION_DAYS = int(os.environ.get("RECORDINGS_RETENTION_DAYS", 7))
 
 # --- Version/Mode Configuration ---
-APP_VERSION = "2.7.23"
+APP_VERSION = "2.7.25"
 
 _has_solvers = os.path.exists("flaresolverr")
 VERSION_MODE = "Full" if _has_solvers else "Light"

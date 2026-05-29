@@ -154,7 +154,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
                 return self.extractors[key]
             elif host == "maxstream":
                 if key not in self.extractors:
-                    proxy_candidates = []
+                    proxy_candidates = _build_proxy_list(None, "maxstream")
                     for candidate in ("maxstream.video", "maxstream"):
                         p = get_proxy_for_url(
                             candidate, TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp

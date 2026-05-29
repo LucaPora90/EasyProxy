@@ -270,8 +270,9 @@ class HLSProxyStreamingMixin:
                 else:
                     routing = "BYPASS (Real IP)"
 
+                session_kind = "proxy" if session_proxy else "direct"
                 logger.info(
-                    f"📡 [Proxy Stream] {routing} - Using session (direct) for: {stream_url}"
+                    f"📡 [Proxy Stream] {routing} - Using session ({session_kind}) for: {stream_url}"
                 )
 
             use_curl_cffi = should_use_curl_cffi(
