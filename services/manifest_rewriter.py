@@ -257,6 +257,7 @@ class ManifestRewriter:
         bypass_warp: bool = False,
         disable_ssl: bool = False,
         selected_proxy: str = None,
+        force_direct: bool = False,
     ) -> str:
         """Riscrive gli URL nei manifest HLS per passare attraverso il proxy."""
         lines = manifest_content.split("\n")
@@ -330,6 +331,8 @@ class ManifestRewriter:
             if selected_proxy:
                 # Usiamo un formato pulito per evitare double-encoding
                 header_params += f"&proxy={urllib.parse.quote(selected_proxy, safe='')}"
+            if force_direct:
+                header_params += "&direct=1"
 
             absolute_variant_url = ManifestRewriter._inherit_query_if_missing(
                 urljoin(base_url, highest_quality_stream["url"]),
@@ -421,16 +424,25 @@ class ManifestRewriter:
         
         if selected_proxy:
             header_params += f"&proxy={urllib.parse.quote(selected_proxy, safe='')}"
+        if force_direct:
+            header_params += "&direct=1"
 
         # Estrai query params dal base_url per ereditarli se necessario
         base_parsed = urllib.parse.urlparse(base_url)
         base_query = base_parsed.query
 
+        next_uri_is_manifest = False
         for line in lines:
             line = line.strip()
 
+            if line.startswith("#EXT-X-STREAM-INF:"):
+                rewritten_lines.append(line)
+                next_uri_is_manifest = True
+                continue
+
             # 1. GESTIONE CHIAVI AES-128
             if line.startswith("#EXT-X-KEY:") and 'URI=' in line:
+                next_uri_is_manifest = False
                 uri_start = line.find('URI="') + 5
                 uri_end = line.find('"', uri_start)
 
@@ -469,6 +481,8 @@ class ManifestRewriter:
                         proxy_key_url += "&disable_ssl=1"
                     if selected_proxy:
                         proxy_key_url += f"&proxy={urllib.parse.quote(selected_proxy, safe='')}"
+                    if force_direct:
+                        proxy_key_url += "&direct=1"
 
                     new_line = line[:uri_start] + proxy_key_url + line[uri_end:]
                     rewritten_lines.append(new_line)
@@ -477,6 +491,7 @@ class ManifestRewriter:
 
             # 2. GESTIONE MEDIA (Sottotitoli, Audio secondario)
             elif line.startswith("#EXT-X-MEDIA:") and 'URI=' in line:
+                next_uri_is_manifest = False
                 uri_start = line.find('URI="') + 5
                 uri_end = line.find('"', uri_start)
 
@@ -503,6 +518,7 @@ class ManifestRewriter:
 
             # 2b. GESTIONE I-FRAME STREAMS
             elif line.startswith("#EXT-X-I-FRAME-STREAM-INF:") and 'URI=' in line:
+                next_uri_is_manifest = False
                 uri_start = line.find('URI="') + 5
                 uri_end = line.find('"', uri_start)
 
@@ -529,6 +545,7 @@ class ManifestRewriter:
 
             # 2c. GESTIONE SESSION-KEY
             elif line.startswith("#EXT-X-SESSION-KEY:") and 'URI=' in line:
+                next_uri_is_manifest = False
                 uri_start = line.find('URI="') + 5
                 uri_end = line.find('"', uri_start)
 
@@ -560,6 +577,7 @@ class ManifestRewriter:
 
             # 3. GESTIONE MAP (Init Segment per fMP4)
             elif line.startswith("#EXT-X-MAP:") and 'URI=' in line:
+                next_uri_is_manifest = False
                 uri_start = line.find('URI="') + 5
                 uri_end = line.find('"', uri_start)
 
@@ -593,8 +611,13 @@ class ManifestRewriter:
 
                 encoded_url = urllib.parse.quote(absolute_url, safe="")
 
-                # Se e .m3u8 usa /proxy/hls/manifest.m3u8, altrimenti determina estensione
-                if ".m3u8" in absolute_url:
+                # Variant URIs after #EXT-X-STREAM-INF are playlists even when
+                # providers like VixSrc expose them as extensionless /playlist URLs.
+                is_manifest_uri = next_uri_is_manifest or ".m3u8" in absolute_url
+                next_uri_is_manifest = False
+
+                # Se e manifest usa /proxy/hls/manifest.m3u8, altrimenti determina estensione
+                if is_manifest_uri:
                     if shorten_url_func:
                         url_id = await shorten_url_func(absolute_url)
                         proxy_url = f"{proxy_base}/proxy/hls/manifest.m3u8?hls_url_id={url_id}{header_params}"
@@ -622,6 +645,7 @@ class ManifestRewriter:
                 rewritten_lines.append(proxy_url)
 
             else:
+                next_uri_is_manifest = False
                 # Tutti gli altri tag (es. #EXTINF, #EXT-X-ENDLIST)
                 rewritten_lines.append(line)
 

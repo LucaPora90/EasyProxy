@@ -130,6 +130,7 @@ class HLSProxyExtractorHandlerMixin:
             captured_manifests = result.get("captured_manifests") or {}
             force_disable_ssl = result.get("disable_ssl", False)
             selected_proxy = result.get("selected_proxy")
+            force_direct = result.get("force_direct", False)
             bypass_warp = result.get("bypass_warp", bypass_warp)
 
             logger.debug(f"Extractor Debug: Extractor result selected_proxy: {selected_proxy}")
@@ -183,6 +184,8 @@ class HLSProxyExtractorHandlerMixin:
                 header_params += "&warp=off"
             if selected_proxy:
                 header_params += f"&proxy={urllib.parse.quote(selected_proxy)}"
+            if force_direct:
+                header_params += "&direct=1"
 
             if redirect_stream and captured_manifest and endpoint == "/proxy/hls/manifest.m3u8":
                 original_channel_url = request.query.get("url") or request.query.get("d", "")
@@ -203,7 +206,7 @@ class HLSProxyExtractorHandlerMixin:
                 # Signed HLS providers need direct captured manifest responses so
                 # segment retries can refresh stale tokenized URLs.
                 extractor_name = getattr(extractor, 'extractor_name', None)
-                uses_captured_manifest = extractor_name in {"vidxgo", "vixsrc"}
+                uses_captured_manifest = extractor_name in {"vidxgo"}
                 if uses_captured_manifest:
                     async def shorten_captured_manifest_url(manifest_url: str) -> str:
                         captured_text = captured_manifests.get(manifest_url)
@@ -231,6 +234,7 @@ class HLSProxyExtractorHandlerMixin:
                         bypass_warp=bypass_warp,
                         disable_ssl=disable_ssl,
                         selected_proxy=selected_proxy,
+                        force_direct=force_direct,
                     )
                     return web.Response(
                         text=rewritten_manifest,

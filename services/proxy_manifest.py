@@ -25,6 +25,7 @@ class HLSProxyManifestHandlerMixin:
             selected_proxy = urllib.parse.unquote(raw_proxy)
             if "://" not in selected_proxy and "%3a" in selected_proxy.lower():
                 selected_proxy = urllib.parse.unquote(selected_proxy)
+        force_direct = self._should_force_direct_from_query(request)
 
         try:
             extractor = None
@@ -90,7 +91,7 @@ class HLSProxyManifestHandlerMixin:
                         base_url=captured_url,
                         proxy_base=proxy_base,
                         stream_headers=merged_headers,
-                        original_channel_url=request.query.get("url") or request.query.get("d", ""),
+                        original_channel_url=source_url or request.query.get("url") or request.query.get("d", ""),
                         api_password=request.query.get("api_password"),
                         get_extractor_func=lambda url, headers, host=None: self.get_extractor(
                             url, headers, host, bypass_warp=bypass_warp
@@ -100,6 +101,7 @@ class HLSProxyManifestHandlerMixin:
                         bypass_warp=bypass_warp,
                         disable_ssl=request.query.get("disable_ssl") == "1",
                         selected_proxy=selected_proxy,
+                        force_direct=force_direct,
                     )
                     return web.Response(
                         text=rewritten_manifest,
@@ -159,6 +161,7 @@ class HLSProxyManifestHandlerMixin:
                 captured_manifest = result.get("captured_manifest")
                 captured_manifests = result.get("captured_manifests") or {}
                 force_disable_ssl = result.get("disable_ssl", False)
+                force_direct = result.get("force_direct", force_direct)
 
                 # Cattura e sanifica il proxy per evitare double-encoding (%253A -> %3A)
                 raw_proxy = request.query.get("proxy") or result.get("selected_proxy")
@@ -294,6 +297,7 @@ class HLSProxyManifestHandlerMixin:
                     bypass_warp=bypass_warp,
                     disable_ssl=disable_ssl,
                     selected_proxy=selected_proxy,
+                    force_direct=force_direct,
                 )
                 return web.Response(
                     text=rewritten_manifest,
@@ -447,10 +451,11 @@ class HLSProxyManifestHandlerMixin:
                     manifest_content = None
                     retries = 2
                     for attempt in range(retries):
+                        mpd_proxy = None
                         try:
                             # Use helper to get proxy-enabled session
                             mpd_session, mpd_proxy = await self._get_proxy_session(
-                                stream_url, bypass_warp=bypass_warp
+                                stream_url, bypass_warp=bypass_warp, forced_proxy=selected_proxy
                             )
                             if mpd_proxy:
                                 logger.info(
@@ -472,6 +477,15 @@ class HLSProxyManifestHandlerMixin:
                                     error_text = await resp.text()
                                     logger.error(f"❌ Failed to fetch MPD (Status {resp.status}) at {stream_url}")
                                     if attempt == retries - 1:
+                                        if (mpd_proxy or selected_proxy) == WARP_PROXY_URL:
+                                            logger.warning("   [MPD] WARP returned %s, trying direct fallback", resp.status)
+                                            async with self.session.get(
+                                                stream_url, headers=stream_headers, ssl=ssl_context, allow_redirects=True
+                                            ) as direct_resp:
+                                                if direct_resp.status == 200:
+                                                    manifest_content = await direct_resp.text()
+                                                    final_mpd_url = str(direct_resp.url)
+                                                    break
                                         return web.Response(
                                             text=f"Failed to fetch MPD: {resp.status}\nResponse: {error_text[:1000]}",
                                             status=502,
@@ -507,6 +521,8 @@ class HLSProxyManifestHandlerMixin:
                             if attempt < retries - 1:
                                 logger.info("   [MPD] Retrying...")
                                 await asyncio.sleep(1)
+                            elif (mpd_proxy or selected_proxy) and (mpd_proxy or selected_proxy) != WARP_PROXY_URL:
+                                return web.Response(text=f"MPD unreachable via configured proxy: {e}", status=502)
                             else:
                                 logger.warning("   [MPD] All proxy attempts failed. Trying direct connection as final fallback...")
                                 try:
@@ -527,6 +543,8 @@ class HLSProxyManifestHandlerMixin:
                         except Exception as e:
                             logger.error(f"❌ [MPD] Unexpected error at attempt {attempt+1}: {e}")
                             if attempt == retries - 1:
+                                if (mpd_proxy or selected_proxy) and (mpd_proxy or selected_proxy) != WARP_PROXY_URL:
+                                    return web.Response(text=f"Unexpected error fetching MPD via configured proxy: {e}", status=500)
                                 # Try one last direct fallback even for unexpected errors
                                 try:
                                     async with self.session.get(
@@ -642,7 +660,7 @@ class HLSProxyManifestHandlerMixin:
                     )
 
             # Procedi con il proxy dello stream (passando l'eventuale bypass_warp attivato dall'estrattore e il proxy selezionato)
-            return await self._proxy_stream(request, stream_url, stream_headers, bypass_warp=bypass_warp, forced_proxy=selected_proxy)
+            return await self._proxy_stream(request, stream_url, stream_headers, bypass_warp=bypass_warp, forced_proxy=selected_proxy, force_direct=force_direct)
 
         except Exception as e:
             error_msg = str(e).lower()
@@ -664,8 +682,9 @@ class HLSProxyManifestHandlerMixin:
                         stream_url2 = result2["destination_url"]
                         stream_headers2 = result2.get("request_headers", {})
                         selected_proxy2 = result2.get("selected_proxy")
+                        force_direct2 = result2.get("force_direct", force_direct)
                         logger.info("Re-extraction success: %s", stream_url2[:80])
-                        return await self._proxy_stream(request, stream_url2, stream_headers2, bypass_warp=bypass_warp, forced_proxy=selected_proxy2)
+                        return await self._proxy_stream(request, stream_url2, stream_headers2, bypass_warp=bypass_warp, forced_proxy=selected_proxy2, force_direct=force_direct2)
                 except Exception as retry_err:
                     logger.error("Re-extraction failed: %s", retry_err)
 

@@ -13,7 +13,7 @@ import aiohttp
 from aiohttp import ClientSession, ClientTimeout, TCPConnector
 from aiohttp_socks import ProxyError as AioProxyError
 from python_socks import ProxyError as PyProxyError
-from config import TRANSPORT_ROUTES, GLOBAL_PROXIES, get_connector_for_proxy, SELECTED_PROXY_CONTEXT, get_solver_proxy_url, get_extractor_proxies, get_ordered_proxies_for_url, get_preferred_proxy_for_url
+from config import TRANSPORT_ROUTES, GLOBAL_PROXIES, get_connector_for_proxy, SELECTED_PROXY_CONTEXT, get_solver_proxy_url, get_extractor_proxies, get_ordered_proxies_for_url, get_preferred_proxy_for_url, should_allow_direct_fallback
 from config import PROXY_TEST_TIMEOUT, PROXY_TEST_CONCURRENCY
 from config import FLARESOLVERR_URL, FLARESOLVERR_TIMEOUT
 
@@ -30,6 +30,7 @@ class VixSrcExtractor:
         self.request_headers = request_headers
         self.base_headers = self._default_headers()
         self.session = None
+        self.session_proxy = None
         self.mediaflow_endpoint = "hls_manifest_proxy"
         self._session_lock = asyncio.Lock()
         self.proxies = []
@@ -39,6 +40,7 @@ class VixSrcExtractor:
         self.is_vixsrc = True
         self.extractor_name = "vixsrc"
         self.last_used_proxy = None
+        self.last_used_direct = False
         self.flaresolverr_url = FLARESOLVERR_URL
         self.flaresolverr_timeout = FLARESOLVERR_TIMEOUT
         self._fs_cookies = None
@@ -87,7 +89,7 @@ class VixSrcExtractor:
             solver_proxy = get_solver_proxy_url(proxy) if proxy else None
             if solver_proxy and solver_proxy not in proxies_to_try:
                 proxies_to_try.append(solver_proxy)
-        if None not in proxies_to_try:
+        if should_allow_direct_fallback(proxies_to_try):
             proxies_to_try.append(None)
         for proxy in proxies_to_try:
             payload = {"cmd": "request.get", "url": site, "maxTimeout": (self.flaresolverr_timeout + 60) * 1000}
@@ -103,6 +105,7 @@ class VixSrcExtractor:
                         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
                     self._fs_proxy = proxy
                     self.last_used_proxy = self._normalize_proxy_url(proxy) if proxy else None
+                    self.last_used_direct = proxy is None
                     logger.info(f"VixSrc: FS cookies via {proxy or 'direct'}: {list(self._fs_cookies.keys())}")
                     return
                 logger.warning("FS failed via %s: %s", proxy or "direct", d.get("message", ""))
@@ -185,8 +188,10 @@ class VixSrcExtractor:
             len(proxies_to_try),
             preferred_proxy,
         )
-        # Always try direct connection as last resort
-        if None not in proxies_to_try:
+        # If a proxy is configured, respect it. Direct is only allowed when no
+        # proxy route exists; otherwise direct can win the curl_cffi race and
+        # produce tokens for a different IP than streaming uses.
+        if should_allow_direct_fallback(proxies_to_try):
             proxies_to_try.append(None)
 
         impersonations = ["chrome131", "chrome124", "chrome120"]
@@ -249,6 +254,7 @@ class VixSrcExtractor:
                                     pending.cancel()
                             await asyncio.gather(*tasks, return_exceptions=True)
                             self.last_used_proxy = proxy
+                            self.last_used_direct = proxy is None
                             logger.info("curl_cffi success via %s for %s (imp=%s)", proxy or "direct", url, imp)
                             return response
                         if isinstance(status, int):
@@ -316,102 +322,24 @@ class VixSrcExtractor:
                 "Use the original /movie/ or /tv/ URL to refresh tokens."
             )
 
-    @staticmethod
-    def _inherit_query_if_missing(absolute_url: str, base_query: str) -> str:
-        if not base_query:
-            return absolute_url
-        parsed_url = urlparse(absolute_url)
-        if parsed_url.query:
-            return absolute_url
-        return urlunparse(parsed_url._replace(query=base_query))
-
-    @staticmethod
-    def _make_live(manifest_text: str) -> str:
-        out_lines = []
-        for line in (manifest_text or "").splitlines():
-            stripped = line.strip()
-            if stripped == "#EXT-X-ENDLIST":
-                continue
-            if stripped.startswith("#EXT-X-PLAYLIST-TYPE"):
-                out_lines.append("#EXT-X-PLAYLIST-TYPE:EVENT")
-                continue
-            out_lines.append(line)
-        if not any(line.startswith("#EXT-X-PLAYLIST-TYPE") for line in out_lines):
-            for idx, line in enumerate(out_lines):
-                if line.strip() == "#EXTM3U":
-                    out_lines.insert(idx + 1, "#EXT-X-PLAYLIST-TYPE:EVENT")
-                    break
-        return "\n".join(out_lines)
-
-    async def _capture_hls_manifests(self, m3u8_url: str, stream_headers: dict):
-        master_response = await self._make_robust_request(
-            m3u8_url,
-            headers=stream_headers,
-            retries=1,
-        )
-        master_url = str(master_response.url)
-        master_text = master_response.text
-        if "#EXTM3U" not in master_text:
-            raise ExtractorError("VixSrc extracted URL did not return a valid HLS manifest")
-        if "#EXTINF" in master_text:
-            master_text = self._make_live(master_text)
-
-        captured_map = {master_url: master_text}
-        master_lines = master_text.splitlines()
-        variant_urls = []
-        base_query = urlparse(master_url).query
-
-        def add_variant(raw_url: str):
-            raw_url = (raw_url or "").strip()
-            if not raw_url or raw_url.startswith("#"):
-                return
-            variant_url = self._inherit_query_if_missing(
-                urljoin(master_url, raw_url),
-                base_query,
-            )
-            if variant_url not in variant_urls:
-                variant_urls.append(variant_url)
-
-        for idx, line in enumerate(master_lines):
-            if line.startswith("#EXT-X-STREAM-INF:") and idx + 1 < len(master_lines):
-                add_variant(master_lines[idx + 1])
-            elif line.startswith("#EXT-X-MEDIA:") and 'URI="' in line:
-                uri_start = line.find('URI="') + 5
-                uri_end = line.find('"', uri_start)
-                if uri_start > 4 and uri_end > uri_start:
-                    add_variant(line[uri_start:uri_end])
-
-        for variant_url in variant_urls:
-            try:
-                variant_response = await self._make_robust_request(
-                    variant_url,
-                    headers=stream_headers,
-                    retries=1,
-                )
-                variant_final_url = str(variant_response.url)
-                variant_text = variant_response.text
-                if "#EXTM3U" not in variant_text:
-                    logger.warning("VixSrc variant is not a valid HLS manifest: %s", variant_url)
-                    continue
-                if "#EXTINF" in variant_text:
-                    variant_text = self._make_live(variant_text)
-                captured_map[variant_final_url] = variant_text
-            except Exception as exc:
-                logger.warning("VixSrc variant capture failed %s: %s", variant_url, exc)
-
-        return master_url, master_text, captured_map
-
     async def _get_session(self, url: str = None):
         """Ottiene una sessione HTTP persistente."""
+        proxy = None
+        if url:
+            proxy = get_preferred_proxy_for_url(url, self.extractor_name, self.proxies)
+        else:
+            proxy = self._get_random_proxy()
+        if proxy:
+            proxy = self._normalize_proxy_url(proxy)
+        self.last_used_proxy = proxy
+        self.last_used_direct = proxy is None
+
+        if self.session is not None and not self.session.closed and self.session_proxy != proxy:
+            await self.session.close()
+            self.session = None
+
         if self.session is None or self.session.closed:
-            proxy = None
-            if url:
-                proxy = get_preferred_proxy_for_url(url, self.extractor_name, self.proxies)
-            else:
-                proxy = self._get_random_proxy()
-            if proxy:
-                proxy = self._normalize_proxy_url(proxy)
-                self.last_used_proxy = proxy
+            self.session_proxy = proxy
             self.session = self._build_session_for_proxy(proxy)
         return self.session
 
@@ -725,25 +653,12 @@ class VixSrcExtractor:
                     stream_headers["Cookie"] = cookie_str
                     if self._fs_user_agent:
                         stream_headers["User-Agent"] = self._fs_user_agent
-                captured_manifest = None
-                captured_manifests = {}
-                destination_url = url
-                try:
-                    destination_url, captured_manifest, captured_manifests = await self._capture_hls_manifests(
-                        url,
-                        stream_headers,
-                    )
-                except Exception as exc:
-                    if kwargs.get("background_refresh") or kwargs.get("force_refresh"):
-                        raise
-                    logger.warning("VixSrc manifest capture failed, continuing without capture: %s", exc)
                 return {
-                    "destination_url": destination_url,
+                    "destination_url": url,
                     "request_headers": stream_headers,
-                    "captured_manifest": captured_manifest,
-                    "captured_manifests": captured_manifests,
                     "mediaflow_endpoint": self.mediaflow_endpoint,
                     "selected_proxy": selected_proxy or self.last_used_proxy,
+                    "force_direct": bool(kwargs.get("force_direct")) or (selected_proxy is None and self.last_used_direct),
                 }
 
             if "/embed/" in parsed_url.path:
@@ -883,25 +798,13 @@ class VixSrcExtractor:
                 stream_headers["Cookie"] = cookie_str
                 if self._fs_user_agent:
                     stream_headers["User-Agent"] = self._fs_user_agent
-            captured_manifest = None
-            captured_manifests = {}
-            try:
-                final_url, captured_manifest, captured_manifests = await self._capture_hls_manifests(
-                    final_url,
-                    stream_headers,
-                )
-            except Exception as exc:
-                if kwargs.get("background_refresh") or kwargs.get("force_refresh"):
-                    raise
-                logger.warning("VixSrc manifest capture failed, continuing without capture: %s", exc)
             logger.info("VixSrc URL extracted successfully: %s", final_url)
             return {
                 "destination_url": final_url,
                 "request_headers": stream_headers,
-                "captured_manifest": captured_manifest,
-                "captured_manifests": captured_manifests,
                 "mediaflow_endpoint": self.mediaflow_endpoint,
                 "selected_proxy": self.last_used_proxy,
+                "force_direct": self.last_used_proxy is None and self.last_used_direct,
             }
 
         except Exception as e:
@@ -916,3 +819,4 @@ class VixSrcExtractor:
             except Exception:
                 pass
             self.session = None
+            self.session_proxy = None

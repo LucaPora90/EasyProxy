@@ -172,8 +172,19 @@ class HLSProxyDashMixin:
                 # ✅ LOG CRITICO: Deve essere info per apparire nei log standard
                 if proxy_used:
                     logger.info(f"🔑 [Key Proxy] Routing through: {proxy_used}")
-                else:
+                elif (
+                    forced_proxy
+                    or GLOBAL_PROXIES
+                    or (ENABLE_WARP and not bypass_warp)
+                    or any(
+                        route.get("proxy")
+                        and route.get("url", "").lower() in key_url.lower()
+                        for route in TRANSPORT_ROUTES
+                    )
+                ):
                     logger.warning(f"🔑 [Key Proxy] NO PROXY assigned for: {key_url}")
+                else:
+                    logger.info(f"🔑 [Key Proxy] Using direct session for: {key_url}")
 
             secret_key = headers.pop("X-Secret-Key", None)
 

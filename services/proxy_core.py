@@ -34,11 +34,11 @@ class HLSProxyCoreMixin:
 
     def _refresh_segment_token(self, segment_url: str) -> str | None:
         """
-        For signed-token CDN URLs (VidXgo, VixSrc/StreamVix, etc.), rewrite the
-        query of the requested segment so it uses the freshest token currently
-        known in `captured_hls_manifest_map`. Matches by segment path: the
-        path component (everything before `?`) is stable across token
-        rotations, while the query holds the rotating token.
+        For signed-token CDN URLs (VidXgo), rewrite the query of the requested
+        segment so it uses the freshest token currently known in
+        `captured_hls_manifest_map`. Matches by segment path: the path
+        component (everything before `?`) is stable across token rotations,
+        while the query holds the rotating token.
 
         Returns the rewritten URL, or None if no match (caller falls back to
         the original URL).
@@ -52,10 +52,10 @@ class HLSProxyCoreMixin:
         seg_path = parsed.path
         if not seg_path:
             return None
-        # Only meaningful for hosts that put a rotating token in the query.
-        # VidXgo uses `e=` (ms epoch); VixSrc/StreamVix uses `token/expires`.
+        # Only meaningful for hosts that put a rotating VidXgo-style `e=` token
+        # in the query.
         q = urllib.parse.parse_qs(parsed.query)
-        if "e" not in q and not ({"token", "expires"} <= set(q)):
+        if "e" not in q:
             return None
         # Scan all captured variant manifests. The most recently refreshed
         # one wins (highest stored_at).
@@ -80,9 +80,15 @@ class HLSProxyCoreMixin:
         logger.debug("Refreshed segment token: %s -> %s", segment_url[-60:], fresh_url[-60:])
         return fresh_url
 
-    async def _refresh_captured_hls_for_segment(self, segment_url: str) -> bool:
+    async def _refresh_captured_hls_for_segment(
+        self,
+        segment_url: str,
+        bypass_warp: bool = False,
+        forced_proxy: str | None = None,
+    ) -> bool:
         """Re-extract a captured HLS source that contains the requested segment."""
         matches = self._captured_hls_matches_for_segment(segment_url)
+        forced_proxy = urllib.parse.unquote(forced_proxy) if forced_proxy else None
 
         seen_sources = set()
         for _, source_url, captured_headers, entry_ttl in sorted(matches, key=lambda item: item[0], reverse=True):
@@ -90,13 +96,23 @@ class HLSProxyCoreMixin:
                 continue
             seen_sources.add(source_url)
             try:
-                extractor = await self.get_extractor(source_url, captured_headers)
-                refreshed = await extractor.extract(
-                    source_url,
-                    request_headers=captured_headers,
-                    force_refresh=True,
-                    background_refresh=True,
-                )
+                proxy_token = SELECTED_PROXY_CONTEXT.set(forced_proxy)
+                try:
+                    extractor = await self.get_extractor(
+                        source_url,
+                        captured_headers,
+                        bypass_warp=bypass_warp,
+                    )
+                    refreshed = await extractor.extract(
+                        source_url,
+                        request_headers=captured_headers,
+                        force_refresh=True,
+                        background_refresh=True,
+                        bypass_warp=bypass_warp,
+                        proxy=forced_proxy,
+                    )
+                finally:
+                    SELECTED_PROXY_CONTEXT.reset(proxy_token)
                 refreshed_headers = refreshed.get("request_headers", captured_headers)
                 refreshed_manifests = list((refreshed.get("captured_manifests") or {}).items())
                 if not refreshed_manifests and refreshed.get("captured_manifest"):
@@ -124,50 +140,6 @@ class HLSProxyCoreMixin:
                 logger.debug("Captured HLS on-demand refresh failed for %s: %s", source_url, exc)
         return False
 
-    def _schedule_segment_count_refresh(self, segment_url: str, threshold: int = 10) -> bool:
-        """Refresh VixSrc before its approximate 12-segment token limit."""
-        if not self._is_vixsrc_signed_segment(segment_url):
-            return False
-
-        matches = self._captured_hls_matches_for_segment(segment_url)
-        if not matches:
-            return False
-
-        _, source_url, _, _ = sorted(matches, key=lambda item: item[0], reverse=True)[0]
-        count_key = f"vixsrc|{source_url}"
-        counts = getattr(self, "captured_hls_segment_counts", None)
-        if counts is None:
-            self.captured_hls_segment_counts = {}
-            counts = self.captured_hls_segment_counts
-        current_count = counts.get(count_key, 0) + 1
-
-        if current_count < threshold:
-            counts[count_key] = current_count
-            return False
-
-        counts[count_key] = 0
-        tasks = getattr(self, "captured_hls_segment_refresh_tasks", None)
-        if tasks is None:
-            self.captured_hls_segment_refresh_tasks = {}
-            tasks = self.captured_hls_segment_refresh_tasks
-        existing_task = tasks.get(count_key)
-        if existing_task and not existing_task.done():
-            return False
-
-        async def refresh_in_background():
-            refreshed = await self._refresh_captured_hls_for_segment(segment_url)
-            if refreshed:
-                logger.info(
-                    "captured HLS proactive refresh after %d VixSrc segments: %s",
-                    threshold,
-                    source_url,
-                )
-
-        task = asyncio.create_task(refresh_in_background())
-        tasks[count_key] = task
-        task.add_done_callback(lambda _task, key=count_key: tasks.pop(key, None))
-        return True
-
     def _captured_hls_matches_for_segment(self, segment_url: str):
         try:
             parsed = urllib.parse.urlparse(segment_url)
@@ -189,16 +161,6 @@ class HLSProxyCoreMixin:
         return matches
 
     @staticmethod
-    def _is_vixsrc_signed_segment(segment_url: str) -> bool:
-        try:
-            parsed = urllib.parse.urlparse(segment_url)
-            params = urllib.parse.parse_qs(parsed.query)
-        except Exception:
-            return False
-        host = parsed.netloc.lower()
-        return "vix-content.net" in host and {"token", "expires"} <= set(params)
-
-    @staticmethod
     def _iter_hls_manifest_urls(captured_url: str, captured_manifest: str):
         base_query = urllib.parse.urlparse(captured_url).query
         for line in captured_manifest.splitlines():
@@ -213,15 +175,12 @@ class HLSProxyCoreMixin:
 
     @staticmethod
     def _parse_signed_expiry_ts(u: str) -> float | None:
-        """Parse HLS signed URL expiry from VidXgo `e=` or VixSrc `expires=`."""
+        """Parse HLS signed URL expiry from VidXgo `e=`."""
         try:
             params = urllib.parse.parse_qs(urllib.parse.urlparse(u).query)
             raw_e = params.get("e", [None])[0]
             if raw_e:
                 return float(raw_e) / 1000.0
-            raw_expires = params.get("expires", [None])[0]
-            if raw_expires:
-                return float(raw_expires)
         except Exception:
             return None
         return None
@@ -350,7 +309,7 @@ class HLSProxyCoreMixin:
         parsed = urllib.parse.urlparse(manifest_url)
         path_parts = [part for part in parsed.path.split("/") if part]
         suffix = "/".join(path_parts[-3:]) or manifest_url
-        volatile_params = {"token", "expires", "asn", "edge"}
+        volatile_params = {"e"}
         stable_params = [
             (key, value)
             for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
@@ -638,8 +597,13 @@ class HLSProxyCoreMixin:
                 return session, proxy  # Return proxy URL for logging
             except Exception as e:
                 logger.warning(
-                    f"⚠️ Failed to create proxy connector: {e}, falling back to direct"
+                    f"⚠️ Failed to create proxy connector: {e}"
                 )
+                if WARP_PROXY_URL and proxy == WARP_PROXY_URL:
+                    logger.warning("⚠️ WARP proxy unavailable, falling back to direct")
+                    session = await self._get_session(prefer_default_family=prefer_default_family)
+                    return session, None
+                raise
 
         # Fallback to shared non-proxy session
         session = await self._get_session(prefer_default_family=prefer_default_family)
