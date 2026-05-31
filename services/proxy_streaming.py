@@ -68,17 +68,37 @@ class HLSProxyStreamingMixin:
             if is_special_cdn:
                 headers["Accept-Encoding"] = "identity"
 
-            # ✅ Use pooled session for better performance
+            # ✅ Use pooled session with automatic retry failover
             bypass_warp = request.query.get("warp", "").lower() == "off"
             forced_proxy = request.query.get("proxy") or None
 
-            session, _ = await self._get_proxy_session(
-                segment_url, bypass_warp=bypass_warp, forced_proxy=forced_proxy
-            )
-            disable_ssl = get_ssl_setting_for_url(segment_url, TRANSPORT_ROUTES)
-            # ✅ Use yarl.URL with encoded=True to prevent double-encoding of commas
-            final_segment_url = yarl.URL(segment_url, encoded=True)
-            async with session.get(final_segment_url, headers=headers, ssl=not disable_ssl) as resp:
+            current_proxy = forced_proxy
+            attempts = 2 if forced_proxy else 1
+            resp = None
+            resp_ctx = None
+
+            for attempt in range(attempts):
+                try:
+                    session, _ = await self._get_proxy_session(
+                        segment_url, bypass_warp=bypass_warp, forced_proxy=current_proxy
+                    )
+                    disable_ssl = get_ssl_setting_for_url(segment_url, TRANSPORT_ROUTES)
+                    # ✅ Use yarl.URL with encoded=True to prevent double-encoding of commas
+                    final_segment_url = yarl.URL(segment_url, encoded=True)
+                    resp_ctx = session.get(final_segment_url, headers=headers, ssl=not disable_ssl)
+                    resp = await resp_ctx.__aenter__()
+                    break
+                except (ClientConnectionError, AioProxyError, PyProxyError, asyncio.TimeoutError, OSError) as e:
+                    if attempt == 0 and current_proxy:
+                        logger.warning("Segment proxy %s failed for %s: %r. Retrying with a different proxy.", current_proxy, segment_name, e)
+                        mark_proxy_dead(current_proxy)
+                        new_proxy = get_proxy_for_url(segment_url, TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp)
+                        if new_proxy and new_proxy != current_proxy:
+                            current_proxy = new_proxy
+                            continue
+                    raise e
+
+            try:
                 response_headers = {}
 
                 for header in [
@@ -136,6 +156,9 @@ class HLSProxyStreamingMixin:
                     if "Connection lost" not in str(e) and "closing transport" not in str(e):
                         logger.error(f"Error streaming segment {segment_name}: {str(e)}")
                     return response
+            finally:
+                if resp_ctx:
+                    await resp_ctx.__aexit__(None, None, None)
 
         except Exception as e:
             logger.error(f"Error in segment proxy: {str(e)}")
@@ -862,7 +885,8 @@ class HLSProxyStreamingMixin:
                 is_proxy_err = any(x in err_lower for x in ("invalid reply", "request rejected", "connection refused", "connection reset", "proxy connection timed out", "can't connect to server", "couldn't connect", "connect call failed", "0x9", "0x7", "socks5"))
                 if is_proxy_err:
                     request._ps_retried = True
-                    logger.warning("Proxy %s failed for %s, re-extraction needed", forced_proxy, stream_url)
+                    logger.warning("Proxy %s failed for %s, marking dead and triggering re-extraction", forced_proxy, stream_url)
+                    mark_proxy_dead(forced_proxy)
                     raise Exception("PROXY_DEAD_RETRY_EXTRACTION")
 
             logger.error(

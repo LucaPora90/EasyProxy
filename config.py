@@ -234,14 +234,27 @@ def parse_transport_routes() -> list:
 
 
 _PROXY_STATUS_CACHE = {"alive": True, "last_check": 0}
+DEAD_PROXIES = {}  # proxy_url -> expire_time
 
 
 def is_proxy_alive(proxy_url: str, force_check: bool = False) -> bool:
-    """Checks if a local proxy is reachable to avoid 'Connection Refused' errors."""
-    if not proxy_url or "127.0.0.1" not in proxy_url:
-        return True
+    """Checks if a proxy is reachable and not marked dead globally."""
+    if not proxy_url:
+        return False
 
     now = time.time()
+    # Check if proxy is globally marked dead
+    if proxy_url in DEAD_PROXIES:
+        expire_time = DEAD_PROXIES[proxy_url]
+        if now < expire_time:
+            return False
+        else:
+            # Dead time has expired
+            DEAD_PROXIES.pop(proxy_url, None)
+
+    if "127.0.0.1" not in proxy_url:
+        return True
+
     if not force_check and now - _PROXY_STATUS_CACHE["last_check"] < 10:
         return _PROXY_STATUS_CACHE["alive"]
 
@@ -263,14 +276,18 @@ def is_proxy_alive(proxy_url: str, force_check: bool = False) -> bool:
         return False
 
 
-def mark_proxy_dead(proxy_url: str):
-    """Manually mark a proxy as dead in the cache (e.g. after a failed request)."""
-    if not proxy_url or "127.0.0.1" not in proxy_url:
+def mark_proxy_dead(proxy_url: str, dead_duration: int = 300):
+    """Manually mark a proxy as dead in the cache (e.g. after a failed request) for a period of time."""
+    if not proxy_url:
         return
         
-    _PROXY_STATUS_CACHE["alive"] = False
-    _PROXY_STATUS_CACHE["last_check"] = time.time()
-    logging.warning(f"Proxy {proxy_url} marked as dead after failure.")
+    now = time.time()
+    DEAD_PROXIES[proxy_url] = now + dead_duration
+    logging.warning(f"Proxy {proxy_url} marked as dead for {dead_duration} seconds.")
+
+    if "127.0.0.1" in proxy_url:
+        _PROXY_STATUS_CACHE["alive"] = False
+        _PROXY_STATUS_CACHE["last_check"] = now
 
 
 def get_proxy_for_url(url: str, transport_routes: list, global_proxies: list, bypass_warp: bool = None) -> str:
@@ -430,7 +447,7 @@ MAX_RECORDING_DURATION = int(os.environ.get("MAX_RECORDING_DURATION", 28800))
 RECORDINGS_RETENTION_DAYS = int(os.environ.get("RECORDINGS_RETENTION_DAYS", 7))
 
 # --- Version/Mode Configuration ---
-APP_VERSION = "2.7.32"
+APP_VERSION = "2.7.42"
 
 _has_solvers = os.path.exists("flaresolverr")
 VERSION_MODE = "Full" if _has_solvers else "Light"

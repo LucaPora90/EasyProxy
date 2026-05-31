@@ -267,6 +267,13 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
                         request_headers, proxies=proxy_list
                     )
                 return self.extractors[key]
+            elif host in ["adn", "altadefinizione", "altadefinizionestreaming"]:
+                key = "adn_direct" if bypass_warp else "adn"
+                if key not in self.extractors:
+                    self.extractors[key] = AdnExtractor(
+                        request_headers, proxies=proxy_list
+                    )
+                return self.extractors[key]
 
         # 2. Auto-detection basata sull'URL
         # ✅ NUOVO: Salta estrattori specifici se l'URL sembra già un link diretto a un media

@@ -120,7 +120,7 @@ class BaseExtractor:
                 
                 if is_proxy_err and SELECTED_PROXY_CONTEXT.get():
                     proxy_to_mark = SELECTED_PROXY_CONTEXT.get()
-                    if proxy_to_mark and "127.0.0.1" in proxy_to_mark:
+                    if proxy_to_mark:
                         mark_proxy_dead(proxy_to_mark)
                     SELECTED_PROXY_CONTEXT.set(None)
                 

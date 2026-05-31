@@ -13,7 +13,7 @@ import aiohttp
 from aiohttp import ClientSession, ClientTimeout, TCPConnector
 from aiohttp_socks import ProxyError as AioProxyError
 from python_socks import ProxyError as PyProxyError
-from config import TRANSPORT_ROUTES, GLOBAL_PROXIES, get_connector_for_proxy, SELECTED_PROXY_CONTEXT, get_solver_proxy_url, get_extractor_proxies, get_ordered_proxies_for_url, get_preferred_proxy_for_url, should_allow_direct_fallback
+from config import TRANSPORT_ROUTES, GLOBAL_PROXIES, get_connector_for_proxy, SELECTED_PROXY_CONTEXT, get_solver_proxy_url, get_extractor_proxies, get_ordered_proxies_for_url, get_preferred_proxy_for_url, should_allow_direct_fallback, mark_proxy_dead
 from config import PROXY_TEST_TIMEOUT, PROXY_TEST_CONCURRENCY
 from config import FLARESOLVERR_URL, FLARESOLVERR_TIMEOUT
 
@@ -223,8 +223,12 @@ class VixSrcExtractor:
                     content = resp.text
                 if 200 <= resp.status_code < 300:
                     return True, proxy, MockResponse(content, resp.status_code, url), None, resp.status_code
+                if proxy_value and resp.status_code != 404:
+                    mark_proxy_dead(proxy_value)
                 return False, proxy, None, None, resp.status_code
             except Exception as exc:
+                if proxy_value:
+                    mark_proxy_dead(proxy_value)
                 return False, proxy, None, exc, None
 
         specific = [p for p in get_extractor_proxies(self.extractor_name) if p in proxies_to_try]
@@ -407,6 +411,9 @@ class VixSrcExtractor:
                         pass
                 self.session = None
                 
+                if self.session_proxy:
+                    mark_proxy_dead(self.session_proxy)
+
                 if is_proxy_err and SELECTED_PROXY_CONTEXT.get():
                     logger.info("Clearing sticky proxy context due to ProxyError")
                     SELECTED_PROXY_CONTEXT.set(None)

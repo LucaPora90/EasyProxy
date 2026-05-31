@@ -310,6 +310,16 @@ class ManifestRewriter:
                 "Generic HLS: selected max bandwidth %s.",
                 highest_quality_stream["bandwidth"],
             )
+            # Warn if the CDN is serving an audio-only stream (no video codec)
+            _selected_inf = highest_quality_stream["inf"]
+            _has_video_codec = any(
+                vc in _selected_inf for vc in ("avc1", "hvc1", "dvh1", "hev1", "vp9", "av01")
+            )
+            if not _has_video_codec:
+                logger.warning(
+                    "HLS master manifest has no video codec in selected variant (CDN may be serving audio-only). "
+                    "STREAM-INF: %s", _selected_inf
+                )
             base_query = urllib.parse.urlparse(base_url).query
 
             header_params = "".join(
@@ -351,17 +361,32 @@ class ManifestRewriter:
                 proxy_variant_url += f"&proxy={urllib.parse.quote(selected_proxy, safe='')}"
 
             proxied_media_lines = []
+            is_dlstreams_or_premium = "dlstreams" in base_url.lower() or "dlhd" in base_url.lower() or "/premium" in base_url.lower()
+            # Track which group-ids survive filtering (have at least one proxied media line)
+            surviving_group_ids = set()
             for line in lines:
                 if not line.startswith("#EXT-X-MEDIA:"):
                     continue
                 if 'URI="' not in line:
+                    # Media without URI (e.g. closed-captions=NONE): keep as-is and track group
+                    group_match = re.search(r'GROUP-ID="([^"]+)"', line)
+                    if group_match:
+                        surviving_group_ids.add(group_match.group(1))
                     proxied_media_lines.append(line.strip())
                     continue
 
                 uri_start = line.find('URI="') + 5
                 uri_end = line.find('"', uri_start)
                 if uri_start <= 4 or uri_end <= uri_start:
+                    group_match = re.search(r'GROUP-ID="([^"]+)"', line)
+                    if group_match:
+                        surviving_group_ids.add(group_match.group(1))
                     proxied_media_lines.append(line.strip())
+                    continue
+                # Filter out unsigned/broken media tracks for DLStreams/premium streams.
+                # Tracks without explicit query parameters (e.g. ?md5=...) always return 403 Forbidden.
+                original_uri = line[uri_start:uri_end]
+                if is_dlstreams_or_premium and "?" not in original_uri:
                     continue
 
                 media_url = ManifestRewriter._inherit_query_if_missing(
@@ -377,6 +402,27 @@ class ManifestRewriter:
                         f"{proxy_base}/proxy/hls/manifest.m3u8?d={encoded_media_url}{header_params}"
                     )
                 proxied_media_lines.append(line[:uri_start] + proxy_media_url + line[uri_end:])
+                group_match = re.search(r'GROUP-ID="([^"]+)"', line)
+                if group_match:
+                    surviving_group_ids.add(group_match.group(1))
+
+            def _strip_empty_group_refs(inf_line: str, surviving: set) -> str:
+                """Remove SUBTITLES/AUDIO/CLOSED-CAPTIONS attributes that reference
+                group-ids which were completely filtered out. This prevents player
+                confusion (e.g. PotPlayer refusing video) when a STREAM-INF references
+                a group that has no matching EXT-X-MEDIA entries."""
+                for attr in ("SUBTITLES", "AUDIO", "CLOSED-CAPTIONS"):
+                    match = re.search(rf'{attr}="([^"]+)"', inf_line)
+                    if match and match.group(1) not in surviving:
+                        # Remove the attribute and any surrounding comma
+                        inf_line = re.sub(
+                            rf',?\s*{attr}="[^"]+"', "", inf_line
+                        ).strip().rstrip(",")
+                        logger.debug(
+                            "Stripped dangling %s group ref '%s' from STREAM-INF",
+                            attr, match.group(1),
+                        )
+                return inf_line
 
             rewritten_lines.append("#EXTM3U")
             skip_next_url = False
@@ -400,7 +446,9 @@ class ManifestRewriter:
                 rewritten_lines.append(stripped)
 
             rewritten_lines.extend([line for line in proxied_media_lines if line])
-            rewritten_lines.append(highest_quality_stream["inf"])
+            # Strip dangling group refs from STREAM-INF before appending
+            cleaned_inf = _strip_empty_group_refs(highest_quality_stream["inf"], surviving_group_ids)
+            rewritten_lines.append(cleaned_inf)
             rewritten_lines.append(proxy_variant_url)
 
             return "\n".join(rewritten_lines)

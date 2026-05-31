@@ -43,6 +43,7 @@ DLStreamsExtractor = None
 EmbedSportsExtractor = None
 StreamHGExtractor = None
 CinemaCityExtractor = None
+AdnExtractor = None
 DeltabitExtractor = None
 VidXgoExtractor = None
 
@@ -233,6 +234,13 @@ except Exception as e:
     CinemaCityExtractor = None
 
 try:
+    from extractors.adn import AdnExtractor
+    logger.info("✅ AdnExtractor module loaded.")
+except Exception as e:
+    logger.warning("⚠️ AdnExtractor module not found or failed to load: %s", e)
+    AdnExtractor = None
+
+try:
     from extractors.deltabit import DeltabitExtractor
     logger.info("✅ DeltabitExtractor module loaded.")
 except ImportError:
@@ -268,6 +276,7 @@ __all__ = [
     "EmbedSportsExtractor",
     "StreamHGExtractor",
     "CinemaCityExtractor",
+    "AdnExtractor",
     "DeltabitExtractor",
     "VidXgoExtractor",
 ]
