@@ -1004,6 +1004,39 @@ class DLStreamsExtractor:
             raise ExtractorError(f"Extraction failed: {str(e)}")
 
     async def close(self):
+        if self._watchdog_task:
+            self._watchdog_task.cancel()
+            try:
+                await self._watchdog_task
+            except asyncio.CancelledError:
+                pass
+        pending_tasks = list(self._refresh_tasks.values()) + list(self._inflight_extract_tasks.values())
+        for task in pending_tasks:
+            task.cancel()
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
+        self._refresh_tasks.clear()
+        self._inflight_extract_tasks.clear()
+        for page, _ in list(self._live_pages.values()):
+            try:
+                if not page.is_closed():
+                    await page.close()
+            except Exception:
+                pass
+        self._live_pages.clear()
+        self._browser_key_cache.clear()
+        self._browser_failure_cache.clear()
+        self._browser_channel_locks.clear()
+        self._last_working_player.clear()
+        self._last_session_refresh.clear()
+        self._dynamic_refresh_interval.clear()
+        self._captured_manifests.clear()
+        self._manifest_cache.clear()
+        if time.time() - self._get_shared_activity_time() > 10:
+            await close_shared_browser()
+            self._context = None
+            self._browser = None
+            self._playwright = None
         if self.session and not self.session.closed:
             await self.session.close()
             self.session = None

@@ -75,6 +75,7 @@ class HLSProxyCoreMixin:
             seen_sources.add(source_url)
             try:
                 proxy_token = SELECTED_PROXY_CONTEXT.set(forced_proxy)
+                strict_proxy_token = STRICT_PROXY_CONTEXT.set(bool(forced_proxy))
                 try:
                     extractor = await self.get_extractor(
                         source_url,
@@ -91,6 +92,7 @@ class HLSProxyCoreMixin:
                     )
                 finally:
                     SELECTED_PROXY_CONTEXT.reset(proxy_token)
+                    STRICT_PROXY_CONTEXT.reset(strict_proxy_token)
                 refreshed_headers = refreshed.get("request_headers", captured_headers)
                 refreshed_manifests = list((refreshed.get("captured_manifests") or {}).items())
                 if not refreshed_manifests and refreshed.get("captured_manifest"):
@@ -219,6 +221,7 @@ class HLSProxyCoreMixin:
                         seconds_left = entry_ttl - (now_ts - stored_at)
                     # Refresh proactively when <60s remain on the token.
                     if seconds_left > 60:
+                        await asyncio.sleep(min(seconds_left - 60, 60))
                         continue
                     # Hard GC only if the entry is long-dead AND no signed URL
                     # to consult (avoid evicting entries that still have valid e=).
@@ -300,7 +303,8 @@ class HLSProxyCoreMixin:
     async def start_tasks(self):
         """Starts background tasks for the proxy."""
         asyncio.create_task(self._update_latest_version())
-        asyncio.create_task(self._update_warp_status_loop())
+        if ENABLE_WARP:
+            asyncio.create_task(self._update_warp_status_loop())
         asyncio.create_task(self._cleanup_stale_sessions())
 
     async def _cleanup_stale_sessions(self):
@@ -321,6 +325,9 @@ class HLSProxyCoreMixin:
                     except Exception:
                         pass
                 logger.info("🧹 Cleaned stale extractor: %s", key)
+            for key, task in list(self.captured_hls_refresh_tasks.items()):
+                if task.done():
+                    self.captured_hls_refresh_tasks.pop(key, None)
             await try_shutdown_idle_flaresolverr()
 
     async def _update_warp_status_loop(self):
@@ -328,7 +335,10 @@ class HLSProxyCoreMixin:
         while True:
             try:
                 # We use the proxy session to check if the SOCKS5H proxy is working
-                session, _ = await self._get_proxy_session("https://www.cloudflare.com/cdn-cgi/trace")
+                session, _ = await self._get_proxy_session(
+                    "https://www.cloudflare.com/cdn-cgi/trace",
+                    forced_proxy=WARP_PROXY_URL,
+                )
                 async with session.get("https://www.cloudflare.com/cdn-cgi/trace", timeout=5) as resp:
                     if resp.status == 200:
                         text = await resp.text()
@@ -731,5 +741,10 @@ class HLSProxyCoreMixin:
                 if hasattr(extractor, "close"):
                     await extractor.close()
             self._extractor_atimes.clear()
+
+            for task in self.captured_hls_refresh_tasks.values():
+                task.cancel()
+            self.captured_hls_refresh_tasks.clear()
+            self.captured_hls_manifest_map.clear()
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")

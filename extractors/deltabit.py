@@ -32,6 +32,18 @@ settings = Settings()
 
 class DeltabitExtractor:
     _result_cache = {} # cache for final results: {url: (result, timestamp)}
+    _cache_ttl = 600
+    _cache_max_entries = 30
+
+    @classmethod
+    def _prune_result_cache(cls):
+        now = time.time()
+        expired = [key for key, (_, ts) in cls._result_cache.items() if now - ts >= cls._cache_ttl]
+        for key in expired:
+            cls._result_cache.pop(key, None)
+        while len(cls._result_cache) > cls._cache_max_entries:
+            oldest = min(cls._result_cache, key=lambda k: cls._result_cache[k][1])
+            cls._result_cache.pop(oldest, None)
 
     def __init__(self, request_headers: dict = None, proxies: list = None, bypass_warp: bool = False):
         self.request_headers = request_headers or {}
@@ -87,10 +99,11 @@ class DeltabitExtractor:
     async def extract(self, url: str, **kwargs) -> dict:
         # Normalize URL for cache
         normalized_url = url.strip()
+        DeltabitExtractor._prune_result_cache()
         # Check cache (10 minutes validity)
         if normalized_url in DeltabitExtractor._result_cache:
             res, ts = DeltabitExtractor._result_cache[normalized_url]
-            if time.time() - ts < 600:
+            if time.time() - ts < DeltabitExtractor._cache_ttl:
                 logger.info(f"🚀 [Cache Hit] Using cached extraction result for: {normalized_url}")
                 return res
         
@@ -146,6 +159,7 @@ class DeltabitExtractor:
                 if link_match: 
                     result = self._build_result(link_match.group(1), url, ua, proxy, cookies=cookies)
                     DeltabitExtractor._result_cache[normalized_url] = (result, time.time())
+                    DeltabitExtractor._prune_result_cache()
                     logger.info("✅ Extraction success (direct source found)")
                     return result
                 raise ExtractorError("Deltabit: Form not found")
@@ -164,6 +178,7 @@ class DeltabitExtractor:
             if not link_match: raise ExtractorError("Deltabit: Video source not found")
             result = self._build_result(link_match.group(1), url, ua, proxy, cookies=cookies)
             DeltabitExtractor._result_cache[normalized_url] = (result, time.time())
+            DeltabitExtractor._prune_result_cache()
             return result
         finally:
             if final_session_id:

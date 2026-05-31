@@ -17,7 +17,14 @@ class HLSProxyExtractorHandlerMixin:
 
         bypass_warp = request.query.get("warp", "").lower() == "off"
         token = BYPASS_WARP_CONTEXT.set(bypass_warp)
-        proxy_token = SELECTED_PROXY_CONTEXT.set(None)
+        selected_proxy = None
+        raw_proxy = request.query.get("proxy")
+        if raw_proxy:
+            selected_proxy = urllib.parse.unquote(raw_proxy)
+            if "://" not in selected_proxy and "%3a" in selected_proxy.lower():
+                selected_proxy = urllib.parse.unquote(selected_proxy)
+        proxy_token = SELECTED_PROXY_CONTEXT.set(selected_proxy)
+        strict_proxy_token = STRICT_PROXY_CONTEXT.set(bool(selected_proxy))
 
         try:
             # Supporta sia 'url' che 'd' come parametro
@@ -129,7 +136,14 @@ class HLSProxyExtractorHandlerMixin:
             captured_manifest = result.get("captured_manifest")
             captured_manifests = result.get("captured_manifests") or {}
             force_disable_ssl = result.get("disable_ssl", False)
-            selected_proxy = result.get("selected_proxy")
+            selected_proxy = result.get("selected_proxy") or selected_proxy
+            if not selected_proxy and extractor:
+                selected_proxy = (
+                    getattr(extractor, "last_used_proxy", None)
+                    or getattr(extractor, "selected_proxy", None)
+                    or getattr(extractor, "_session_proxy", None)
+                    or getattr(extractor, "session_proxy", None)
+                )
             force_direct = result.get("force_direct", False)
             bypass_warp = result.get("bypass_warp", bypass_warp)
 
@@ -304,6 +318,8 @@ class HLSProxyExtractorHandlerMixin:
             q_params = {}
             if api_password:
                 q_params["api_password"] = api_password
+            if selected_proxy:
+                q_params["proxy"] = selected_proxy
 
             response_data = {
                 "destination_url": stream_url,
@@ -345,3 +361,4 @@ class HLSProxyExtractorHandlerMixin:
         finally:
             BYPASS_WARP_CONTEXT.reset(token)
             SELECTED_PROXY_CONTEXT.reset(proxy_token)
+            STRICT_PROXY_CONTEXT.reset(strict_proxy_token)

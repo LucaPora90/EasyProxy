@@ -126,10 +126,13 @@ class MaxstreamExtractor:
         domain = parsed_url.netloc
         headers = kwargs.get("headers") or self.base_headers
         post_data = kwargs.get("data")
-        paths = [{"proxy": proxy, "use_ip": None} for proxy in self._get_proxies_for_url(url)]
-        paths.append({"proxy": None, "use_ip": None})
+        proxies = self._get_proxies_for_url(url)
+        allow_direct = should_allow_direct_fallback(proxies)
+        paths = [{"proxy": proxy, "use_ip": None} for proxy in proxies]
+        if allow_direct:
+            paths.append({"proxy": None, "use_ip": None})
 
-        if "maxstream" in domain:
+        if allow_direct and "maxstream" in domain:
             for ip in (await self._resolve_doh(domain))[:2]:
                 paths.append({"proxy": None, "use_ip": ip})
 

@@ -522,7 +522,7 @@ class HLSProxyStreamingMixin:
                     return None
 
             async def retry_with_different_proxy():
-                if not session_proxy:
+                if forced_proxy or not session_proxy:
                     return None
                 old_proxy = session_proxy
                 logger.info("Rotating proxy after upstream error on %s", old_proxy)

@@ -253,7 +253,7 @@ class HLSProxyDashMixin:
                         )
                     else:
                         logger.error(f"❌ Key fetch failed with status: {resp.status}")
-                        if proxy_used:
+                        if proxy_used and not forced_proxy:
                             mark_proxy_dead(proxy_used)
                             new_proxy = get_proxy_for_url(key_url, TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp)
                             if new_proxy and new_proxy != proxy_used:
@@ -308,7 +308,7 @@ class HLSProxyDashMixin:
                             text=f"Key fetch failed: {resp.status}", status=resp.status
                         )
             except Exception as e:
-                if proxy_used:
+                if proxy_used and not forced_proxy:
                     logger.warning(f"🔑 Key fetch failed with exception via proxy {proxy_used}: {e}. Marking dead and trying fallback...")
                     mark_proxy_dead(proxy_used)
                     new_proxy = get_proxy_for_url(key_url, TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp)
