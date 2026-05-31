@@ -171,7 +171,6 @@ class DLStreamsExtractor:
             },
             "mediaflow_endpoint": self.mediaflow_endpoint,
             "captured_manifest": manifest_text,
-            "bypass_warp": self.bypass_warp_active
         }
 
     @staticmethod
@@ -323,7 +322,6 @@ class DLStreamsExtractor:
                     "Origin": ref_origin,
                     "User-Agent": self.base_headers["User-Agent"],
                     "Accept": "*/*",
-                    "X-Direct-Connection": "1",
                     "Sec-Fetch-Dest": "empty",
                     "Sec-Fetch-Mode": "cors",
                     "Sec-Fetch-Site": "cross-site",
@@ -343,7 +341,6 @@ class DLStreamsExtractor:
                     "mediaflow_endpoint": self.mediaflow_endpoint,
                     "captured_manifest": None,
                     "captured_manifests": {stream_url: ""},
-                    "bypass_warp": self.bypass_warp_active
                 }
                 
             except Exception as e:
