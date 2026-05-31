@@ -370,16 +370,12 @@ def get_ssl_setting_for_url(url: str, transport_routes: list) -> bool:
     if "disable_ssl=1" in normalized_url:
         return True
 
-    if not url or not transport_routes:
-        return any(
-            domain in normalized_url
-            for domain in ("vavoo.to", "vavoo.tv", "lokke.app", "mediahubmx", "vixsrc.to", "vix-content.net")
-        )
+    vavoo_domains = ("vavoo.to", "vavoo.tv", "vavoo", "lokke.app", "mediahubmx", "vixsrc.to", "vix-content.net", "/sunshine/")
 
-    if any(
-        domain in normalized_url
-        for domain in ("vavoo.to", "vavoo.tv", "lokke.app", "mediahubmx", "vixsrc.to", "vix-content.net")
-    ):
+    if not url or not transport_routes:
+        return any(domain in normalized_url for domain in vavoo_domains)
+
+    if any(domain in normalized_url for domain in vavoo_domains):
         return True
 
     for route in transport_routes:
@@ -388,6 +384,7 @@ def get_ssl_setting_for_url(url: str, transport_routes: list) -> bool:
             return route.get("disable_ssl", False)
 
     return False
+
 
 
 ENABLE_WARP = os.environ.get("ENABLE_WARP", "false").lower() == "true"
@@ -447,7 +444,7 @@ MAX_RECORDING_DURATION = int(os.environ.get("MAX_RECORDING_DURATION", 28800))
 RECORDINGS_RETENTION_DAYS = int(os.environ.get("RECORDINGS_RETENTION_DAYS", 7))
 
 # --- Version/Mode Configuration ---
-APP_VERSION = "2.7.42"
+APP_VERSION = "2.7.52"
 
 _has_solvers = os.path.exists("flaresolverr")
 VERSION_MODE = "Full" if _has_solvers else "Light"
