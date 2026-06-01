@@ -492,15 +492,6 @@ class HLSProxyManifestHandlerMixin:
                                     error_text = await resp.text()
                                     logger.error(f"❌ Failed to fetch MPD (Status {resp.status}) at {stream_url}")
                                     if attempt == retries - 1:
-                                        if (mpd_proxy or selected_proxy) == WARP_PROXY_URL:
-                                            logger.warning("   [MPD] WARP returned %s, trying direct fallback", resp.status)
-                                            async with self.session.get(
-                                                stream_url, headers=stream_headers, ssl=ssl_context, allow_redirects=True
-                                            ) as direct_resp:
-                                                if direct_resp.status == 200:
-                                                    manifest_content = await direct_resp.text()
-                                                    final_mpd_url = str(direct_resp.url)
-                                                    break
                                         return web.Response(
                                             text=f"Failed to fetch MPD: {resp.status}\nResponse: {error_text[:1000]}",
                                             status=502,
@@ -536,41 +527,11 @@ class HLSProxyManifestHandlerMixin:
                             if attempt < retries - 1:
                                 logger.info("   [MPD] Retrying...")
                                 await asyncio.sleep(1)
-                            elif (mpd_proxy or selected_proxy) and (mpd_proxy or selected_proxy) != WARP_PROXY_URL:
-                                return web.Response(text=f"MPD unreachable via configured proxy: {e}", status=502)
                             else:
-                                logger.warning("   [MPD] All proxy attempts failed. Trying direct connection as final fallback...")
-                                try:
-                                    # Final fallback: direct connection
-                                    async with self.session.get(
-                                        stream_url, headers=stream_headers, ssl=ssl_context, allow_redirects=True
-                                    ) as resp:
-                                        if resp.status == 200:
-                                            manifest_content = await resp.text()
-                                            final_mpd_url = str(resp.url)
-                                            logger.info("   [MPD] Direct fallback successful!")
-                                            break
-                                        else:
-                                            raise Exception(f"Direct fallback failed with status {resp.status}")
-                                except Exception as fallback_err:
-                                    logger.error(f"❌ [MPD] Direct fallback failed: {fallback_err}")
-                                    return web.Response(text=f"MPD unreachable via proxy and direct: {e}", status=502)
+                                return web.Response(text=f"MPD unreachable: {e}", status=502)
                         except Exception as e:
                             logger.error(f"❌ [MPD] Unexpected error at attempt {attempt+1}: {e}")
                             if attempt == retries - 1:
-                                if (mpd_proxy or selected_proxy) and (mpd_proxy or selected_proxy) != WARP_PROXY_URL:
-                                    return web.Response(text=f"Unexpected error fetching MPD via configured proxy: {e}", status=500)
-                                # Try one last direct fallback even for unexpected errors
-                                try:
-                                    async with self.session.get(
-                                        stream_url, headers=stream_headers, ssl=ssl_context, allow_redirects=True
-                                    ) as resp:
-                                        if resp.status == 200:
-                                            manifest_content = await resp.text()
-                                            final_mpd_url = str(resp.url)
-                                            logger.info("   [MPD] Direct fallback successful after unexpected error!")
-                                            break
-                                except: pass
                                 return web.Response(text=f"Unexpected error fetching MPD: {e}", status=500)
                             await asyncio.sleep(1)
 

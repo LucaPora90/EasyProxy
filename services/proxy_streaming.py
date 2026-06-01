@@ -196,24 +196,7 @@ class HLSProxyStreamingMixin:
         session_proxy = None
 
         async def retry_direct_after_warp(reason):
-            active_proxy = session_proxy or forced_proxy
-            if (
-                force_direct
-                or not WARP_PROXY_URL
-                or active_proxy != WARP_PROXY_URL
-                or getattr(request, "_warp_direct_retried", False)
-            ):
-                return None
-            request._warp_direct_retried = True
-            logger.warning("WARP failed for %s, retrying direct: %s", stream_url, reason)
-            return await self._proxy_stream(
-                request,
-                stream_url,
-                stream_headers,
-                bypass_warp=True,
-                forced_proxy=None,
-                force_direct=True,
-            )
+            return None
         try:
             # Ping browser-based extractors to keep shared browser alive
             ext = get_browser_activity_extractor(self.extractors)

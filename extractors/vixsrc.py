@@ -166,8 +166,8 @@ class VixSrcExtractor:
         final_headers.pop("User-Agent", None)
         final_headers.pop("user-agent", None)
 
-        timeout = int(os.environ.get("VIXSRC_PROXY_TIMEOUT", str(PROXY_TEST_TIMEOUT)))
-        concurrency = max(1, int(os.environ.get("VIXSRC_PROXY_CONCURRENCY", str(PROXY_TEST_CONCURRENCY))))
+        timeout = PROXY_TEST_TIMEOUT
+        concurrency = PROXY_TEST_CONCURRENCY
 
         async def _try_one(proxy_value: str | None, imp: str):
             request_kwargs = {}

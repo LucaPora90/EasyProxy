@@ -28,7 +28,9 @@ LOG_LEVEL_MAP = {
 }
 LOG_LEVEL = LOG_LEVEL_MAP.get(LOG_LEVEL_STR, logging.WARNING)
 PROXY_TEST_TIMEOUT = int(os.environ.get("PROXY_TEST_TIMEOUT", "5"))
-PROXY_TEST_CONCURRENCY = max(1, int(os.environ.get("PROXY_TEST_CONCURRENCY", "60")))
+cpu_cores = os.cpu_count() or 4
+default_concurrency = 10 if cpu_cores == 1 else min(100, max(30, cpu_cores * 15))
+PROXY_TEST_CONCURRENCY = max(1, int(os.environ.get("PROXY_TEST_CONCURRENCY", str(default_concurrency))))
 
 logging.basicConfig(
     level=LOG_LEVEL,
@@ -209,11 +211,11 @@ def get_ordered_proxies_for_url(
 
 
 def should_allow_direct_fallback(proxies: list | None) -> bool:
-    """Allow direct fallback only when no proxy exists or the only proxy is WARP."""
+    """Allow direct fallback only when no proxy exists."""
     if getattr(proxies, "strict", False):
         return False
     active = [proxy for proxy in proxies or [] if proxy]
-    return not active or (len(active) == 1 and WARP_PROXY_URL and active[0] == WARP_PROXY_URL)
+    return not active
 
 
 def get_preferred_proxy_for_url(
@@ -497,7 +499,7 @@ MAX_RECORDING_DURATION = int(os.environ.get("MAX_RECORDING_DURATION", 28800))
 RECORDINGS_RETENTION_DAYS = int(os.environ.get("RECORDINGS_RETENTION_DAYS", 7))
 
 # --- Version/Mode Configuration ---
-APP_VERSION = "2.7.56"
+APP_VERSION = "2.7.58"
 
 _has_solvers = os.path.exists("flaresolverr")
 VERSION_MODE = "Full" if _has_solvers else "Light"
