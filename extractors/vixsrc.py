@@ -25,7 +25,8 @@ class ExtractorError(Exception):
 
 class VixSrcExtractor:
     """VixSrc URL extractor per risolvere link VixSrc."""
-    def __init__(self, request_headers: dict, proxies: list = None):
+    def __init__(self, request_headers: dict, proxies: list = None, bypass_warp: bool = None):
+        self.bypass_warp_active = True  # VixSrc always bypasses WARP by default (warp=off)
         self.request_headers = request_headers
         self.base_headers = self._default_headers()
         self.session = None
@@ -92,7 +93,7 @@ class VixSrcExtractor:
             alive = [proxy for proxy in dedicated if is_proxy_alive(proxy)]
             return alive or dedicated
 
-        return get_ordered_proxies_for_url(url, self.extractor_name, self.proxies)
+        return get_ordered_proxies_for_url(url, self.extractor_name, self.proxies, bypass_warp=self.bypass_warp_active)
 
     def _preferred_proxy(self, url: str, forced_proxy: str | None = None) -> str | None:
         candidates = self._proxy_candidates(url, forced_proxy)
@@ -625,6 +626,7 @@ class VixSrcExtractor:
                     "mediaflow_endpoint": self.mediaflow_endpoint,
                     "selected_proxy": selected_proxy,
                     "force_direct": bool(kwargs.get("force_direct")) or (selected_proxy is None and self.last_used_direct),
+                    "bypass_warp": self.bypass_warp_active,
                 }
 
             if "/embed/" in parsed_url.path:
@@ -759,6 +761,7 @@ class VixSrcExtractor:
                 "mediaflow_endpoint": self.mediaflow_endpoint,
                 "selected_proxy": self.last_used_proxy,
                 "force_direct": self.last_used_proxy is None and self.last_used_direct,
+                "bypass_warp": self.bypass_warp_active,
             }
 
         except Exception as e:
