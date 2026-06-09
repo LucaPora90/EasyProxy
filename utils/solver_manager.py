@@ -15,6 +15,7 @@ _flaresolverr_process: asyncio.subprocess.Process | None = None
 _flaresolverr_starting = False
 _flaresolverr_lock = asyncio.Lock()
 _flaresolverr_last_used: float = 0.0
+_flaresolverr_ready = asyncio.Event()
 _FLARESOLVERR_IDLE_TIMEOUT = 60  # secondi prima di spegnere FlareSolverr inutilizzato
 
 
@@ -56,6 +57,7 @@ async def ensure_flaresolverr() -> bool:
             wait_for_start = True
         elif await _is_flaresolverr_alive():
             _flaresolverr_last_used = time.time()
+            _flaresolverr_ready.set()
             return True
         elif _flaresolverr_process and _flaresolverr_process.returncode is None:
             _flaresolverr_last_used = time.time()
@@ -71,17 +73,16 @@ async def ensure_flaresolverr() -> bool:
             _flaresolverr_starting = True
 
     if wait_for_start:
-        for _ in range(30):
-            await asyncio.sleep(1)
-            if await _is_flaresolverr_alive():
-                _flaresolverr_last_used = time.time()
-                return True
-        return False
+        try:
+            await asyncio.wait_for(_flaresolverr_ready.wait(), timeout=30)
+            _flaresolverr_last_used = time.time()
+            return True
+        except asyncio.TimeoutError:
+            return False
 
-    # Sblocca il lock durante l'avvero (può richiedere secondi)
     try:
         _flaresolverr_process = await asyncio.create_subprocess_exec(
-            sys.executable, os.path.basename(script),
+            sys.executable, script,
             cwd=fs_dir,
             env={**os.environ, "PORT": "8191"},
             stdout=asyncio.subprocess.DEVNULL,
@@ -92,19 +93,22 @@ async def ensure_flaresolverr() -> bool:
             await asyncio.sleep(1)
             if _flaresolverr_process.returncode is not None:
                 logger.error("FlareSolverr exited prematurely (code %s)", _flaresolverr_process.returncode)
+                _flaresolverr_starting = False
                 return False
             if await _is_flaresolverr_alive():
                 logger.info("FlareSolverr is ready")
+                _flaresolverr_ready.set()
                 _flaresolverr_last_used = time.time()
+                _flaresolverr_starting = False
                 return True
 
         logger.warning("FlareSolverr failed to start within 30s")
+        _flaresolverr_starting = False
         return False
     except Exception as e:
         logger.error("FlareSolverr start failed: %s", e)
-        return False
-    finally:
         _flaresolverr_starting = False
+        return False
 
 
 async def _is_flaresolverr_alive() -> bool:
