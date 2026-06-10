@@ -2,6 +2,9 @@ import asyncio
 import json
 import logging
 import os
+import platform
+import signal
+import subprocess
 import sys
 import time
 
@@ -87,6 +90,7 @@ async def ensure_flaresolverr() -> bool:
             env={**os.environ, "PORT": "8191"},
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=True,
         )
 
         for attempt in range(30):
@@ -131,15 +135,39 @@ async def try_shutdown_idle_flaresolverr():
             await shutdown_flaresolverr()
 
 async def shutdown_flaresolverr():
-    """Ferma FlareSolverr se avviato da noi."""
+    """Ferma FlareSolverr e tutto il suo albero di processi (chromium/chromedriver)."""
     global _flaresolverr_process
-    if _flaresolverr_process and _flaresolverr_process.returncode is None:
-        _flaresolverr_process.terminate()
-        try:
-            await asyncio.wait_for(_flaresolverr_process.wait(), timeout=10)
-        except asyncio.TimeoutError:
-            _flaresolverr_process.kill()
+    proc = _flaresolverr_process
+    if not proc or proc.returncode is not None:
         _flaresolverr_process = None
+        return
+
+    pid = proc.pid
+    _flaresolverr_process = None
+
+    if platform.system() == "Windows":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                capture_output=True, timeout=10,
+            )
+        except Exception:
+            pass
+        return
+    else:
+        try:
+            pgid = os.getpgid(pid)
+            os.killpg(pgid, signal.SIGTERM)
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=10)
+                return
+            except asyncio.TimeoutError:
+                os.killpg(pgid, signal.SIGKILL)
+                await asyncio.wait_for(proc.wait(), timeout=5)
+        except ProcessLookupError:
+            pass
+        except Exception:
+            pass
 
 
 class SolverSessionManager:
