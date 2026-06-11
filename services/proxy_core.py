@@ -575,8 +575,8 @@ class HLSProxyCoreMixin:
             setattr(self, target_attr, session)
         return session
 
-    async def _check_dynamic_warp_bypass(self, url: str, force: bool = False):
-        """Dynamically adds domain to WARP bypass if it matches known patterns or if forced."""
+    async def _check_dynamic_warp_bypass(self, url: str):
+        """Dynamically adds domain to WARP bypass if it matches known patterns."""
         if not ENABLE_WARP:
             return
 
@@ -589,7 +589,7 @@ class HLSProxyCoreMixin:
             if not re.match(r'^[a-zA-Z0-9.\-*]+$', domain):
                 return
 
-            if is_dynamic_warp_bypass_candidate(domain, force=force):
+            if is_dynamic_warp_bypass_candidate(domain):
                 if domain not in BYPASSED_WARP_DOMAINS:
                     base_domain = ".".join(domain.split(".")[-2:])
                     logging.info(f"⚠️ [Dynamic Bypass] Adding {base_domain} (and {domain}) to WARP exclusion list...")
@@ -626,7 +626,7 @@ class HLSProxyCoreMixin:
         - session: The aiohttp ClientSession to use
         - proxy_url: The proxy URL being used, or None for direct connection
         """
-        await self._check_dynamic_warp_bypass(url, force=bypass_warp)
+        await self._check_dynamic_warp_bypass(url)
 
         # ✅ FIX: Decodifica il proxy se è URL-encoded
         if forced_proxy:

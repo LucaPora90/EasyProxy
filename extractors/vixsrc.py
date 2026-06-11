@@ -26,7 +26,7 @@ class ExtractorError(Exception):
 class VixSrcExtractor:
     """VixSrc URL extractor per risolvere link VixSrc."""
     def __init__(self, request_headers: dict, proxies: list = None, bypass_warp: bool = None):
-        self.bypass_warp_active = True  # VixSrc always bypasses WARP by default (warp=off)
+        self.bypass_warp_active = bypass_warp if bypass_warp is not None else False  # Use WARP by default
         self.request_headers = request_headers
         self.base_headers = self._default_headers()
         self.session = None
@@ -87,9 +87,14 @@ class VixSrcExtractor:
             proxy = self._normalize_proxy_url(forced_proxy)
             return [proxy]
 
+        # Filter out WARP from fallback proxies when bypass is active
+        fallback = self.proxies
+        if self.bypass_warp_active and WARP_PROXY_URL:
+            fallback = [p for p in (self.proxies or []) if p != WARP_PROXY_URL and p != self._normalize_proxy_url(WARP_PROXY_URL)]
+
         dedicated = self._dedicated_proxies()
         if not dedicated:
-            return get_ordered_proxies_for_url(url, self.extractor_name, self.proxies, bypass_warp=self.bypass_warp_active)
+            return get_ordered_proxies_for_url(url, self.extractor_name, fallback, bypass_warp=self.bypass_warp_active)
 
         # Skip socket check - rely on DEAD_PROXIES + curl_cffi rotation for liveness
         now = time.time()
@@ -97,7 +102,8 @@ class VixSrcExtractor:
             alive = [p for p in dedicated if p not in DEAD_PROXIES or now >= DEAD_PROXIES.get(p, 0)]
         if alive:
             return alive
-        return dedicated[:1] if getattr(dedicated, "strict", False) else []
+        # All dedicated proxies dead — fall back to general resolution (direct, WARP, etc.)
+        return get_ordered_proxies_for_url(url, self.extractor_name, fallback, bypass_warp=self.bypass_warp_active)
 
     async def _preferred_proxy(self, url: str, forced_proxy: str | None = None) -> str | None:
         candidates = await self._proxy_candidates(url, forced_proxy)
@@ -191,7 +197,7 @@ class VixSrcExtractor:
                     content = resp.text
                 if 200 <= resp.status_code < 300:
                     return True, proxy, MockResponse(content, resp.status_code, url), None, resp.status_code
-                if proxy_value and resp.status_code != 404:
+                if proxy_value and resp.status_code not in (403, 404):
                     mark_proxy_dead(proxy_value)
                 return False, proxy, None, None, resp.status_code
             except Exception as exc:
@@ -266,7 +272,7 @@ class VixSrcExtractor:
         timeout = ClientTimeout(total=60, connect=30, sock_read=30)
         if proxy:
             logger.debug("Using proxy %s for VixSrc session.", proxy)
-            connector = get_connector_for_proxy(proxy)
+            connector = get_connector_for_proxy(proxy, ssl=False)
         else:
             connector = TCPConnector(
                 limit=0,
@@ -275,13 +281,13 @@ class VixSrcExtractor:
                 enable_cleanup_closed=True,
                 force_close=False,
                 use_dns_cache=True,
+                ssl=False,
             )
         return ClientSession(
             timeout=timeout,
             connector=connector,
             headers=self._default_headers(),
             cookie_jar=aiohttp.CookieJar(),
-            ssl=False,
         )
 
     @staticmethod
@@ -511,9 +517,26 @@ class VixSrcExtractor:
                 raise ExtractorError(f"VixSrc API fetch failed: {robust_err}") from robust_err
 
         try:
+            logger.debug("VixSrc API raw response (first 500): %s", response.text[:500])
             payload = json.loads(response.text)
-        except json.JSONDecodeError as exc:
-            raise ExtractorError(f"Invalid API response from {api_url}: {exc}")
+        except json.JSONDecodeError:
+            text = None
+            # Try <pre> tag (Chrome JSON viewer wraps JSON in <pre>)
+            pre_match = re.search(r"<pre[^>]*>(.*?)</pre>", response.text, re.DOTALL)
+            if pre_match:
+                text = html.unescape(pre_match.group(1))
+            else:
+                # Try direct JSON with HTML entities decoded
+                stripped = response.text.strip()
+                if stripped.startswith("{"):
+                    text = html.unescape(stripped)
+            if text:
+                try:
+                    payload = json.loads(text)
+                except json.JSONDecodeError as exc2:
+                    raise ExtractorError(f"Invalid API response from {api_url}: {exc2}")
+            else:
+                raise ExtractorError(f"Invalid API response from {api_url}: response is not JSON")
 
         embed_path = payload.get("src")
         if not embed_path:
@@ -669,6 +692,7 @@ class VixSrcExtractor:
                         forced_proxy=forced_proxy,
                     )
                 except Exception as curl_err:
+                    logger.warning("curl_cffi failed for embed %s: %s", vix_url, curl_err)
                     raise ExtractorError(f"VixSrc embed fetch failed: {curl_err}") from curl_err
             elif "iframe" in url:
                 site_url = url.split("/iframe")[0]
@@ -703,7 +727,7 @@ class VixSrcExtractor:
                             forced_proxy=forced_proxy,
                         )
                     except Exception as curl_err:
-                        logger.warning("curl_cffi failed for embed %s, trying robust/FS: %s", embed_url, curl_err)
+                        logger.warning("curl_cffi failed for embed %s, trying robust: %s", embed_url, curl_err)
                         try:
                             response = await self._make_robust_request(
                                 embed_url,

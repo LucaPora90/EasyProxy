@@ -601,6 +601,7 @@ class HLSProxyManifestHandlerMixin:
         except ProxyDeadRetryError:
             if getattr(request, '_extraction_retried', False):
                 logger.warning("Re-extraction already attempted for %s, not retrying again", target_url)
+                raise
             else:
                 request._extraction_retried = True
                 extraction_url = request.query.get("orig_url") or target_url
@@ -609,41 +610,42 @@ class HLSProxyManifestHandlerMixin:
                     extractor2 = await self.get_extractor(extraction_url, combined_headers, bypass_warp=bypass_warp)
                     if not extractor2:
                         logger.warning("No extractor found for %s during re-extraction", extraction_url)
-                    else:
-                        extractor2.request_headers = combined_headers
-                        result2 = await extractor2.extract(
-                            extraction_url, force_refresh=True,
-                            request_headers=combined_headers, bypass_warp=bypass_warp,
-                            proxy=None,
+                        return web.Response(text="Re-extraction failed: no extractor found", status=502)
+                    extractor2.request_headers = combined_headers
+                    result2 = await extractor2.extract(
+                        extraction_url, force_refresh=True,
+                        request_headers=combined_headers, bypass_warp=bypass_warp,
+                        proxy=None,
+                    )
+                    stream_url2 = result2["destination_url"]
+                    stream_headers2 = result2.get("request_headers", {})
+                    selected_proxy2 = result2.get("selected_proxy")
+                    if not selected_proxy2 and extractor2:
+                        selected_proxy2 = (
+                            getattr(extractor2, "last_used_proxy", None)
+                            or getattr(extractor2, "selected_proxy", None)
+                            or getattr(extractor2, "_session_proxy", None)
+                            or getattr(extractor2, "session_proxy", None)
                         )
-                        stream_url2 = result2["destination_url"]
-                        stream_headers2 = result2.get("request_headers", {})
-                        selected_proxy2 = result2.get("selected_proxy")
-                        if not selected_proxy2 and extractor2:
-                            selected_proxy2 = (
-                                getattr(extractor2, "last_used_proxy", None)
-                                or getattr(extractor2, "selected_proxy", None)
-                                or getattr(extractor2, "_session_proxy", None)
-                                or getattr(extractor2, "session_proxy", None)
-                            )
-                        force_direct2 = result2.get("force_direct", force_direct)
-                        original_proxy = request.query.get("proxy")
-                        if original_proxy:
+                    force_direct2 = result2.get("force_direct", force_direct)
+                    original_proxy = request.query.get("proxy")
+                    if original_proxy:
+                        original_proxy = urllib.parse.unquote(original_proxy)
+                        if "://" not in original_proxy and "%3a" in original_proxy.lower():
                             original_proxy = urllib.parse.unquote(original_proxy)
-                            if "://" not in original_proxy and "%3a" in original_proxy.lower():
-                                original_proxy = urllib.parse.unquote(original_proxy)
-                        if not selected_proxy2 and original_proxy:
-                            new_proxy = get_proxy_for_url(stream_url2, TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp)
-                            if new_proxy and new_proxy != original_proxy:
-                                logger.info("Rotating to new proxy: %s", new_proxy)
-                                selected_proxy2 = new_proxy
-                            else:
-                                selected_proxy2 = original_proxy
-                                force_direct2 = False
-                        logger.info("Re-extraction success: %s", stream_url2[:80])
-                        return await self._proxy_stream(request, stream_url2, stream_headers2, bypass_warp=bypass_warp, forced_proxy=selected_proxy2, force_direct=force_direct2)
+                    if not selected_proxy2 and original_proxy:
+                        new_proxy = get_proxy_for_url(stream_url2, TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp)
+                        if new_proxy and new_proxy != original_proxy:
+                            logger.info("Rotating to new proxy: %s", new_proxy)
+                            selected_proxy2 = new_proxy
+                        else:
+                            selected_proxy2 = original_proxy
+                            force_direct2 = False
+                    logger.info("Re-extraction success: %s", stream_url2[:80])
+                    return await self._proxy_stream(request, stream_url2, stream_headers2, bypass_warp=bypass_warp, forced_proxy=selected_proxy2, force_direct=force_direct2)
                 except Exception as retry_err:
                     logger.error("Re-extraction failed: %s", retry_err)
+                    return web.Response(text="Re-extraction failed", status=502)
 
         except Exception as e:
             error_msg = str(e).lower()

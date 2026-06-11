@@ -357,7 +357,7 @@ class HLSProxyExtractorHandlerMixin:
                     "timeout",
                     "temporarily unavailable",
                 ]
-            )
+            ) or isinstance(e, (asyncio.TimeoutError, asyncio.CancelledError))
 
             if isinstance(e, asyncio.CancelledError):
                 logger.info("Extractor request cancelled (client disconnected)")
@@ -367,10 +367,12 @@ class HLSProxyExtractorHandlerMixin:
             else:
                 logger.error(f"❌ Error in extractor request: {e}")
                 import traceback
-
                 traceback.print_exc()
 
-            return web.Response(text=str(e), status=500)
+            return web.json_response(
+                {"error": str(e), "status": "error"},
+                status=500
+            )
         finally:
             BYPASS_WARP_CONTEXT.reset(token)
             SELECTED_PROXY_CONTEXT.reset(proxy_token)

@@ -27,7 +27,9 @@ def hls_url_ttl_for(url: str, default_ttl: int, extended_ttl: int) -> int:
 
 def is_dynamic_warp_bypass_candidate(domain: str, force: bool = False) -> bool:
     value = (domain or "").lower()
-    return force or any(pattern in value for pattern in DYNAMIC_WARP_BYPASS_DOMAINS)
+    if force:
+        return False
+    return any(pattern in value for pattern in DYNAMIC_WARP_BYPASS_DOMAINS)
 
 
 def prefer_default_family_for_url(url: str) -> bool:
