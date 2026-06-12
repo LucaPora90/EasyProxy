@@ -30,7 +30,7 @@ The Docker image includes EasyProxy plus integrated FlareSolverr for maximum com
 docker run -d -p 7860:7860 --name EasyProxy ghcr.io/realbestia1/easyproxy:latest
 
 # With Cloudflare WARP (Bypass IP blocks)
-docker run -d --name EasyProxy --cap-add=NET_ADMIN --device /dev/net/tun -e ENABLE_WARP=true -p 7860:7860 ghcr.io/realbestia1/easyproxy:latest
+docker run -d --name EasyProxy -p 7860:7860 ghcr.io/realbestia1/easyproxy:latest
 ```
 
 ### 🐍 Python (Local)
@@ -119,7 +119,7 @@ To function correctly, the container needs elevated network permissions:
 
 **Example command (Docker Run):**
 ```bash
-docker run -d --name easyproxy --cap-add=NET_ADMIN --device /dev/net/tun -e ENABLE_WARP=true -p 7860:7860 ghcr.io/realbestia1/easyproxy:latest
+docker run -d --name easyproxy -p 7860:7860 ghcr.io/realbestia1/easyproxy:latest
 ```
 
 For restricted Docker environments that cannot expose `/dev/net/tun`, build the image and run with `-e ENABLE_WARP=true -e WARP_MODE=wireproxy`.
