@@ -614,6 +614,10 @@
                         <span>Add <code>warp=off</code></span>
                     </label>
                     <label class="checkbox-label">
+                        <input id="proxyBypassProxy" type="checkbox">
+                        <span>Add <code>proxy=off</code></span>
+                    </label>
+                    <label class="checkbox-label">
                         <input id="proxyDisableSSL" type="checkbox">
                         <span>Add <code>disable_ssl=1</code></span>
                     </label>
@@ -707,6 +711,10 @@
                     <label class="checkbox-label">
                         <input id="extractorBypassWarp" type="checkbox">
                         <span>Add <code>warp=off</code></span>
+                    </label>
+                    <label class="checkbox-label">
+                        <input id="extractorBypassProxy" type="checkbox">
+                        <span>Add <code>proxy=off</code></span>
                     </label>
                     <label class="checkbox-label">
                         <input id="extractorDisableSSL" type="checkbox">
@@ -885,6 +893,7 @@
             const apiPassword = document.getElementById('apiPassword').value.trim();
             const redirectStream = document.getElementById('proxyRedirectStream').checked;
             const bypassWarp = document.getElementById('proxyBypassWarp').checked;
+            const bypassProxy = document.getElementById('proxyBypassProxy').checked;
             const disableSSL = document.getElementById('proxyDisableSSL').checked;
             const forceNativeMpd = document.getElementById('proxyNativeMpd').checked;
             const result = document.getElementById('proxyResult');
@@ -903,6 +912,7 @@
                     endpoint: endpoint,
                     request_headers: {},
                     warp: bypassWarp ? 'off' : 'on',
+                    proxy: bypassProxy ? 'off' : 'on',
                     disable_ssl: disableSSL ? '1' : '0'
                 }]
             };
@@ -927,11 +937,13 @@
 
                 const data = JSON.parse(text);
                 let urls = data.urls || [];
-                if (redirectStream || bypassWarp || disableSSL) {
+                const bypassProxy = document.getElementById('proxyBypassProxy').checked;
+                if (redirectStream || bypassWarp || bypassProxy || disableSSL) {
                     urls = urls.map(u => {
                         const urlObj = new URL(u);
                         if (redirectStream) urlObj.searchParams.set('redirect_stream', 'true');
                         if (bypassWarp) urlObj.searchParams.set('warp', 'off');
+                        if (bypassProxy) urlObj.searchParams.set('proxy', 'off');
                         if (disableSSL) urlObj.searchParams.set('disable_ssl', '1');
                         return urlObj.toString();
                     });
@@ -951,6 +963,7 @@
             const apiPassword = document.getElementById('apiPassword').value.trim();
             const redirectStream = document.getElementById('extractorRedirectStream').checked;
             const bypassWarp = document.getElementById('extractorBypassWarp').checked;
+            const bypassProxy = document.getElementById('extractorBypassProxy').checked;
             const disableSSL = document.getElementById('extractorDisableSSL').checked;
             const result = document.getElementById('extractorResult');
 
@@ -966,6 +979,7 @@
             params.set('d', url);
             if (redirectStream) params.set('redirect_stream', 'true');
             if (bypassWarp) params.set('warp', 'off');
+            if (bypassProxy) params.set('proxy', 'off');
             if (disableSSL) params.set('disable_ssl', '1');
             if (apiPassword) params.set('api_password', apiPassword);
 

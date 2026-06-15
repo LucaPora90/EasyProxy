@@ -46,6 +46,7 @@ from config import (
     VERSION_MODE,
     APP_VERSION,
     BYPASS_WARP_CONTEXT,
+    BYPASS_PROXIES_CONTEXT,
     SELECTED_PROXY_CONTEXT,
     STRICT_PROXY_CONTEXT,
     mark_proxy_dead,

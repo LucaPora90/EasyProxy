@@ -8,6 +8,7 @@ from services.proxy_shared import (
     web,
     check_password,
     BYPASS_WARP_CONTEXT,
+    BYPASS_PROXIES_CONTEXT,
     SELECTED_PROXY_CONTEXT,
     STRICT_PROXY_CONTEXT,
     ManifestRewriter,
@@ -43,9 +44,13 @@ class HLSProxyManifestHandlerMixin:
 
         bypass_warp = (request.query.get("warp", "").lower() == "off")
         token = BYPASS_WARP_CONTEXT.set(bypass_warp)
+        
+        bypass_proxies = (request.query.get("proxy", "").lower() == "off")
+        proxy_bypass_token = BYPASS_PROXIES_CONTEXT.set(bypass_proxies)
+        
         selected_proxy = None
         raw_proxy = request.query.get("proxy")
-        if raw_proxy:
+        if raw_proxy and raw_proxy.lower() != "off":
             selected_proxy = urllib.parse.unquote(raw_proxy)
             if "://" not in selected_proxy and "%3a" in selected_proxy.lower():
                 selected_proxy = urllib.parse.unquote(selected_proxy)
@@ -692,5 +697,6 @@ class HLSProxyManifestHandlerMixin:
             return web.Response(text=f"Proxy error: {str(e)}", status=500)
         finally:
             BYPASS_WARP_CONTEXT.reset(token)
+            BYPASS_PROXIES_CONTEXT.reset(proxy_bypass_token)
             SELECTED_PROXY_CONTEXT.reset(proxy_token)
             STRICT_PROXY_CONTEXT.reset(strict_proxy_token)

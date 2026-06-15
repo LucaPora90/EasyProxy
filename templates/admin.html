@@ -452,6 +452,13 @@
             <div id="warp-off-list" style="display:flex;flex-wrap:wrap;gap:6px"></div>
         </div>
 
+        <!-- Proxy Off per Extractor -->
+        <div class="card card-wide">
+            <h2><span class="icon">🚫</span> Proxy Off per Extractor</h2>
+            <p class="help-text">Toggle custom proxies off for specific extractors (they will bypass all custom proxies and use WARP/Direct)</p>
+            <div id="proxy-off-list" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+        </div>
+
         <!-- WARP Exclude Domains -->
         <div class="card card-wide">
             <h2><span class="icon">🚫</span> WARP Exclude Domains</h2>
@@ -644,6 +651,7 @@ async function loadConfig() {
         renderExtractorProxies();
         populateExtractorSelect(config.available_extractors || []);
         renderWarpOffToggles(config.available_extractors || [], config.warp_off_extractors || []);
+        renderProxyOffToggles(config.available_extractors || [], config.proxy_off_extractors || []);
         renderExcludeDomains();
         document.getElementById('mpd-mode').value = config.mpd_mode || 'legacy';
         setToggle('remux-toggle', config.enable_remuxing !== false);
@@ -730,6 +738,29 @@ function renderWarpOffToggles(available, warpOffList) {
             await saveField('warp_off_extractors', newList);
             config.warp_off_extractors = newList;
             renderWarpOffToggles(available, newList);
+        };
+        container.appendChild(btn);
+    }
+}
+
+function renderProxyOffToggles(available, proxyOffList) {
+    const container = document.getElementById('proxy-off-list');
+    container.innerHTML = '';
+    for (const name of available) {
+        const isOff = proxyOffList.includes(name);
+        const btn = document.createElement('span');
+        btn.className = 'warp-off-chip' + (isOff ? ' off' : '');
+        btn.textContent = name + (isOff ? ' 🚫' : ' ✅');
+        btn.onclick = async () => {
+            let newList;
+            if (proxyOffList.includes(name)) {
+                newList = proxyOffList.filter(x => x !== name);
+            } else {
+                newList = [...proxyOffList, name];
+            }
+            await saveField('proxy_off_extractors', newList);
+            config.proxy_off_extractors = newList;
+            renderProxyOffToggles(available, newList);
         };
         container.appendChild(btn);
     }
