@@ -58,6 +58,7 @@ def _read_proxy_source(source: str) -> list:
 
 # ContextVar for thread-safe/async-safe warp bypass state
 BYPASS_WARP_CONTEXT = contextvars.ContextVar("bypass_warp", default=False)
+BYPASS_PROXIES_CONTEXT = contextvars.ContextVar("bypass_proxies", default=False)
 SELECTED_PROXY_CONTEXT = contextvars.ContextVar("selected_proxy", default=None)
 STRICT_PROXY_CONTEXT = contextvars.ContextVar("strict_proxy", default=False)
 PROXY_SOURCE_LIST = contextvars.ContextVar("proxy_source_list", default=None)
@@ -256,6 +257,19 @@ def _is_warp_excluded(url: str) -> bool:
             return True
     return False
 
+def _get_dynamic_proxy_exclude_domains() -> list:
+    return _cfg_get("proxy_exclude_domains", [])
+
+def _is_proxy_excluded(url: str) -> bool:
+    if not url:
+        return False
+    normalized = url.lower()
+    for domain in PROXY_EXCLUDE_DOMAINS:
+        stripped = domain.lstrip("*.")
+        if stripped in normalized:
+            return True
+    return False
+
 def _get_dynamic_global_proxies() -> list:
     return _cfg_get("global_proxies", [])
 
@@ -274,8 +288,24 @@ def get_ordered_proxies_for_url(
     extractor_name: str = "",
     fallback_proxies: list | None = None,
     bypass_warp: bool | None = None,
+    bypass_proxies: bool | None = None,
 ) -> list[str]:
     """Build proxy priority: extractor-specific, TRANSPORT_ROUTES, fallback/global, WARP."""
+    if bypass_proxies is None:
+        bypass_proxies = BYPASS_PROXIES_CONTEXT.get() or _is_proxy_excluded(url or "")
+
+    _ENABLE_WARP = _get_dynamic_warp_enabled()
+    _WARP_PROXY_URL = WARP_PROXY_URL
+    
+    if bypass_proxies:
+        ordered = []
+        if bypass_warp is None:
+            bypass_warp = BYPASS_WARP_CONTEXT.get()
+        is_excluded = _is_warp_excluded(url or "")
+        if _ENABLE_WARP and not bypass_warp and not is_excluded:
+            ordered.append(_WARP_PROXY_URL)
+        return ProxyList(ordered, strict=False)
+
     ordered = []
 
     def build(candidates, strict: bool = False):
@@ -289,8 +319,6 @@ def get_ordered_proxies_for_url(
         if proxy and proxy not in ordered:
             ordered.append(proxy)
 
-    _ENABLE_WARP = _get_dynamic_warp_enabled()
-    _WARP_PROXY_URL = WARP_PROXY_URL
     _WARP_EXCLUDE_DOMAINS = _get_dynamic_warp_exclude_domains()
     _GLOBAL_PROXIES = _get_dynamic_global_proxies()
     _TRANSPORT_ROUTES = _get_dynamic_transport_routes()
@@ -538,16 +566,37 @@ def _next_from_source(current_proxy: str | None) -> str | None:
     return None
 
 
-def get_proxy_for_url(url: str, transport_routes: list = None, global_proxies: list = None, bypass_warp: bool = None) -> str:
+def get_proxy_for_url(
+    url: str,
+    transport_routes: list = None,
+    global_proxies: list = None,
+    bypass_warp: bool = None,
+    bypass_proxies: bool = None,
+) -> str:
     """Trova il proxy appropriato per un URL basato su TRANSPORT_ROUTES e impostazioni WARP.
     
     If transport_routes or global_proxies are None, reads from dynamic config_store.
     """
+    if bypass_proxies is None:
+        bypass_proxies = BYPASS_PROXIES_CONTEXT.get() or _is_proxy_excluded(url or "")
+
     if bypass_warp is None:
         bypass_warp = BYPASS_WARP_CONTEXT.get()
     
     _ENABLE_WARP = _get_dynamic_warp_enabled()
     _WARP_PROXY_URL = WARP_PROXY_URL
+
+    if bypass_proxies:
+        is_excluded = _is_warp_excluded(url) if url else False
+        if _ENABLE_WARP and not bypass_warp and not is_excluded:
+            warp_alive = is_proxy_alive(_WARP_PROXY_URL)
+            if warp_alive:
+                stream_key = _get_stream_key(url) if url else None
+                if stream_key:
+                    _proxy_affinity[stream_key] = (_WARP_PROXY_URL, time.time())
+                return _WARP_PROXY_URL
+        return None
+
     _WARP_EXCLUDE_DOMAINS = _get_dynamic_warp_exclude_domains()
     if transport_routes is None:
         transport_routes = _get_dynamic_transport_routes()
@@ -739,7 +788,7 @@ API_PASSWORD = os.environ.get("API_PASSWORD")
 PORT = int(os.environ.get("PORT", 7860))
 
 # --- Version/Mode Configuration ---
-APP_VERSION = "2.9.13"
+APP_VERSION = "2.9.14"
 
 _has_solvers = os.path.exists("flaresolverr")
 VERSION_MODE = "Full" if _has_solvers else "Light"
@@ -771,6 +820,7 @@ def reload_config():
     mod = sys.modules[__name__]
     mod.ENABLE_WARP = _get_dynamic_warp_enabled()
     mod.WARP_EXCLUDE_DOMAINS = _get_dynamic_warp_exclude_domains()
+    mod.PROXY_EXCLUDE_DOMAINS = _get_dynamic_proxy_exclude_domains()
     mod.GLOBAL_PROXIES = _get_dynamic_global_proxies()
     mod.TRANSPORT_ROUTES = _get_dynamic_transport_routes()
     mod.MPD_MODE = _cfg_get("mpd_mode", "legacy")
@@ -805,6 +855,7 @@ def __getattr__(name):
     _dynamic_attrs = {
         "ENABLE_WARP": _get_dynamic_warp_enabled,
         "WARP_EXCLUDE_DOMAINS": _get_dynamic_warp_exclude_domains,
+        "PROXY_EXCLUDE_DOMAINS": _get_dynamic_proxy_exclude_domains,
         "GLOBAL_PROXIES": _get_dynamic_global_proxies,
         "TRANSPORT_ROUTES": _get_dynamic_transport_routes,
         "MPD_MODE": lambda: _cfg_get("mpd_mode", "legacy"),

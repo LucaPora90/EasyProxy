@@ -452,6 +452,13 @@
             <div id="warp-off-list" style="display:flex;flex-wrap:wrap;gap:6px"></div>
         </div>
 
+        <!-- Proxy Off per Extractor -->
+        <div class="card card-wide">
+            <h2><span class="icon">🚫</span> Proxy Off per Extractor</h2>
+            <p class="help-text">Toggle custom proxies off for specific extractors (they will bypass all custom proxies and use WARP/Direct)</p>
+            <div id="proxy-off-list" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+        </div>
+
         <!-- WARP Exclude Domains -->
         <div class="card card-wide">
             <h2><span class="icon">🚫</span> WARP Exclude Domains</h2>
@@ -460,6 +467,17 @@
             <div class="add-row" style="margin-top:12px">
                 <input type="text" id="new-exclude-domain" placeholder="e.g. example.com or *.example.com" onkeydown="if(event.key==='Enter')addExcludeDomain()">
                 <button class="btn btn-primary btn-sm" onclick="addExcludeDomain()">+ Add</button>
+            </div>
+        </div>
+
+        <!-- Proxy Exclude Domains -->
+        <div class="card card-wide">
+            <h2><span class="icon">🚫</span> Proxy Exclude Domains</h2>
+            <p class="help-text">Domains that bypass all custom proxies. Add your custom domains here (they will run via WARP/Direct instead).</p>
+            <div id="proxy-exclude-domains-list"></div>
+            <div class="add-row" style="margin-top:12px">
+                <input type="text" id="new-proxy-exclude-domain" placeholder="e.g. example.com or *.example.com" onkeydown="if(event.key==='Enter')addProxyExcludeDomain()">
+                <button class="btn btn-primary btn-sm" onclick="addProxyExcludeDomain()">+ Add</button>
             </div>
         </div>
 
@@ -644,7 +662,9 @@ async function loadConfig() {
         renderExtractorProxies();
         populateExtractorSelect(config.available_extractors || []);
         renderWarpOffToggles(config.available_extractors || [], config.warp_off_extractors || []);
+        renderProxyOffToggles(config.available_extractors || [], config.proxy_off_extractors || []);
         renderExcludeDomains();
+        renderProxyExcludeDomains();
         document.getElementById('mpd-mode').value = config.mpd_mode || 'legacy';
         setToggle('remux-toggle', config.enable_remuxing !== false);
         setToggle('dvr-toggle', config.dvr_enabled || false);
@@ -730,6 +750,29 @@ function renderWarpOffToggles(available, warpOffList) {
             await saveField('warp_off_extractors', newList);
             config.warp_off_extractors = newList;
             renderWarpOffToggles(available, newList);
+        };
+        container.appendChild(btn);
+    }
+}
+
+function renderProxyOffToggles(available, proxyOffList) {
+    const container = document.getElementById('proxy-off-list');
+    container.innerHTML = '';
+    for (const name of available) {
+        const isOff = proxyOffList.includes(name);
+        const btn = document.createElement('span');
+        btn.className = 'warp-off-chip' + (isOff ? ' off' : '');
+        btn.textContent = name + (isOff ? ' 🚫' : ' ✅');
+        btn.onclick = async () => {
+            let newList;
+            if (proxyOffList.includes(name)) {
+                newList = proxyOffList.filter(x => x !== name);
+            } else {
+                newList = [...proxyOffList, name];
+            }
+            await saveField('proxy_off_extractors', newList);
+            config.proxy_off_extractors = newList;
+            renderProxyOffToggles(available, newList);
         };
         container.appendChild(btn);
     }
@@ -1081,6 +1124,45 @@ async function removeExcludeDomain(domain) {
     await saveField('warp_exclude_domains_custom', custom);
     config.warp_exclude_domains_custom = custom;
     renderExcludeDomains();
+}
+
+function renderProxyExcludeDomains() {
+    const custom = config.proxy_exclude_domains || [];
+    const container = document.getElementById('proxy-exclude-domains-list');
+    container.innerHTML = '';
+    if (custom.length === 0) {
+        container.innerHTML = '<div style="color:var(--text-muted);font-size:0.8rem;padding:8px">No custom domains added</div>';
+        return;
+    }
+    for (const domain of custom) {
+        const div = document.createElement('div');
+        div.className = 'extractor-row';
+        div.innerHTML = `<span>${domain}</span><button class="btn btn-danger btn-sm" onclick="removeProxyExcludeDomain('${domain}')">✕</button>`;
+        container.appendChild(div);
+    }
+}
+
+async function addProxyExcludeDomain() {
+    const input = document.getElementById('new-proxy-exclude-domain');
+    const val = input.value.trim();
+    if (!val) return;
+    const custom = [...(config.proxy_exclude_domains || [])];
+    if (!custom.includes(val)) {
+        custom.push(val);
+        await saveField('proxy_exclude_domains', custom);
+        config.proxy_exclude_domains = custom;
+        renderProxyExcludeDomains();
+    }
+    input.value = '';
+    input.focus();
+}
+
+async function removeProxyExcludeDomain(domain) {
+    let custom = [...(config.proxy_exclude_domains || [])];
+    custom = custom.filter(d => d !== domain);
+    await saveField('proxy_exclude_domains', custom);
+    config.proxy_exclude_domains = custom;
+    renderProxyExcludeDomains();
 }
 
 loadConfig();

@@ -93,6 +93,21 @@ def setup_recording_routes(app, recording_manager):
 
         name = data.get('name')
         duration = data.get('duration')
+        warp = data.get('warp')
+        proxy = data.get('proxy')
+        disable_ssl = data.get('disable_ssl')
+
+        # Append configuration parameters as query params to the URL
+        from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
+        parsed = urlparse(url)
+        qsl = parse_qsl(parsed.query)
+        if warp == 'off':
+            qsl.append(('warp', 'off'))
+        if proxy == 'off':
+            qsl.append(('proxy', 'off'))
+        if disable_ssl == '1':
+            qsl.append(('disable_ssl', '1'))
+        url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, urlencode(qsl), parsed.fragment))
 
         if duration:
             try:
