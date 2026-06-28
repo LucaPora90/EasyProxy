@@ -1,3 +1,4 @@
+import services.proxy_shared as _shared
 from services.proxy_shared import (
     logger,
     check_password,
@@ -192,6 +193,21 @@ class HLSProxyExtractorHandlerMixin:
                     or getattr(extractor, "_session_proxy", None)
                     or getattr(extractor, "session_proxy", None)
                 )
+                # ✅ FIX: Se bypass_warp è True e il proxy selezionato è WARP,
+                # ignoralo per evitare che un _session_proxy stantio su un estrattore
+                # cache-forzato (es. GenericHLSExtractor) prevalga su warp=off.
+                if bypass_warp and _shared.WARP_PROXY_URL and selected_proxy == _shared.WARP_PROXY_URL:
+                    logger.debug(
+                        "Extractor: ignoring stale WARP _session_proxy from extractor because bypass_warp=True"
+                    )
+                    selected_proxy = None
+
+                # ✅ FIX: Resetta SELECTED_PROXY_CONTEXT al valore effettivo.
+                # get_preferred_proxy_for_url (chiamato dall'estrattore in _get_session)
+                # setta questo context a un proxy, ma dopo aver deciso selected_proxy
+                # vogliamo che le chiamate successive PARTANO DA QUESTO STATO.
+                SELECTED_PROXY_CONTEXT.set(selected_proxy)
+
             force_direct = result.get("force_direct", False)
             bypass_warp = result.get("bypass_warp", bypass_warp)
 
