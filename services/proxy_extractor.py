@@ -81,7 +81,6 @@ class HLSProxyExtractorHandlerMixin:
                         "filelions",
                         "filemoon",
                         "lulustream",
-                        "maxstream",
                         "okru",
                         "streamwish",
                         "streamhg",
@@ -92,7 +91,6 @@ class HLSProxyExtractorHandlerMixin:
                         "vidoza",
                         "turbovidplay",
                          "livetv",
-                         "deltabit",
                          "f16px",
                     ],
                     "examples": [
@@ -153,9 +151,9 @@ class HLSProxyExtractorHandlerMixin:
             if extractor_key:
                 base_key = extractor_key.replace("_direct", "")
                 
-                # Check warp off
+                # Check warp off. embedst skips WARP by default (it needs direct/non-WARP routing).
                 warp_off_list = config_store.get("warp_off_extractors", [])
-                if base_key in warp_off_list:
+                if base_key in warp_off_list or base_key == "embedst":
                     bypass_warp = True
                     BYPASS_WARP_CONTEXT.set(True)
                     logger.debug(f"WARP off for extractor: {base_key}")
@@ -166,7 +164,7 @@ class HLSProxyExtractorHandlerMixin:
                     BYPASS_PROXIES_CONTEXT.set(True)
                     logger.debug(f"Proxy off for extractor: {base_key}")
                     
-                if base_key in warp_off_list or base_key in proxy_off_list:
+                if base_key in warp_off_list or base_key in proxy_off_list or base_key == "embedst":
                     # Re-resolve the extractor with updated context
                     extractor = await self.get_extractor(
                         url, dict(request.headers), host=host_param, bypass_warp=bypass_warp
@@ -366,19 +364,24 @@ class HLSProxyExtractorHandlerMixin:
                 ]
             ) or isinstance(e, (asyncio.TimeoutError, asyncio.CancelledError))
 
+            error_desc = str(e) or type(e).__name__
             if isinstance(e, asyncio.CancelledError):
                 logger.info("Extractor request cancelled (client disconnected)")
                 raise
             if is_expected_error:
-                logger.warning(f"⚠️ Extractor request failed (expected error): {e}")
+                logger.warning(f"⚠️ Extractor request failed (expected error): {error_desc}")
             else:
-                logger.error(f"❌ Error in extractor request: {e}")
+                logger.error(f"❌ Error in extractor request: {error_desc}")
                 import traceback
                 traceback.print_exc()
 
+            status_code = 500
+            if type(e).__name__ == "ExtractorError" or "not found" in error_message or "pick failed" in error_message:
+                status_code = 404
+
             return web.json_response(
-                {"error": str(e), "status": "error"},
-                status=500
+                {"error": error_desc, "status": "error"},
+                status=status_code
             )
         finally:
             BYPASS_WARP_CONTEXT.reset(token)

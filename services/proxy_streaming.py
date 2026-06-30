@@ -209,7 +209,7 @@ class HLSProxyStreamingMixin:
                         response_headers[header] = resp.headers[header]
 
                 # Forza il content-type e aggiunge Content-Disposition per .ts
-                set_response_header(response_headers, "Content-Type", "video/MP2T")
+                set_response_header(response_headers, "Content-Type", "video/mp2t")
                 set_response_header(
                     response_headers,
                     "Content-Disposition",
@@ -472,7 +472,11 @@ class HLSProxyStreamingMixin:
                         async def iter_any(self):
                             async for chunk in self.c_resp.aiter_content():
                                 yield chunk
-                        async def read(self): return await self.c_resp.acontent()
+                        async def read(self, n=-1):
+                            # curl_cffi's acontent() returns the full body and ignores size.
+                            # Match aiohttp's content.read(n) signature so error-path callers
+                            # (e.g. resp.content.read(4096)) don't raise TypeError.
+                            return await self.c_resp.acontent()
 
                     class MockResp:
                         def __init__(self, c_resp):
@@ -489,7 +493,8 @@ class HLSProxyStreamingMixin:
                         async def __aexit__(self, exc_type, exc_val, exc_tb): pass
 
                     if curl_resp.status_code in [502, 503, 504]:
-                        logger.warning(f"⚠️ [curl_cffi] {curl_resp.status_code} error for {final_curl_url[:50]}, falling back to standard aiohttp...")
+                        # curl_only: 503 = live offline. Non cascare MAI ad aiohttp.
+                        logger.warning(f"⚠️ [curl_cffi] {curl_resp.status_code} for {final_curl_url[:50]}: live offline o upstream errato")
                         goto_manifest_processing = False
                     else:
                         resp_ctx = MockResp(curl_resp)
@@ -501,16 +506,25 @@ class HLSProxyStreamingMixin:
                 goto_manifest_processing = False
 
             if not goto_manifest_processing:
-                if is_special_cdn:
-                    request_target = urllib.parse.unquote(stream_url)
+                _extractor_key = request.query.get("extractor_key", "")
+                _extractor = self.extractors.get(_extractor_key) if _extractor_key else None
+                _curl_only = getattr(_extractor, 'curl_only', False) if _extractor else False
+                if _curl_only and use_curl_cffi:
+                    # CDN backend funziona solo via curl_cffi (es. embedst). 
+                    # Mai aiohttp: dà 403 spurio o disconnessione TLS.
+                    logger.debug("curl_only: no aiohttp fallback, returning error directly")
+                    resp_ctx = None
                 else:
-                    request_target = yarl.URL(stream_url, encoded=True)
-                resp_ctx = session.get(
-                    request_target,
-                    headers=headers,
-                    ssl=not disable_ssl,
-                    timeout=segment_timeout if is_hls_segment_request else None,
-                )
+                    if is_special_cdn:
+                        request_target = urllib.parse.unquote(stream_url)
+                    else:
+                        request_target = yarl.URL(stream_url, encoded=True)
+                    resp_ctx = session.get(
+                        request_target,
+                        headers=headers,
+                        ssl=not disable_ssl,
+                        timeout=segment_timeout if is_hls_segment_request else None,
+                    )
 
             async def retry_with_different_proxy():
                 if forced_proxy or not session_proxy:
@@ -586,6 +600,15 @@ class HLSProxyStreamingMixin:
                         )
                 return None
 
+            if resp_ctx is None:
+                # curl_only (embedst): curl_cffi fallito, live offline → return 503 subito
+                logger.debug("curl_only: upstream offline, returning 503")
+                return web.Response(
+                    status=503,
+                    text="Stream offline",
+                    headers={"Access-Control-Allow-Origin": "*", "Content-Type": "text/plain; charset=utf-8"},
+                )
+
             async with resp_ctx as resp:
                 content_type = resp.headers.get("content-type", "").lower()
 
@@ -646,7 +669,7 @@ class HLSProxyStreamingMixin:
                 )
 
                 if is_direct_media_stream or is_segment_like:
-                    seg_content_type = "video/MP2T" if is_segment_like else content_type
+                    seg_content_type = "video/mp2t" if is_segment_like else content_type
                     response_headers = {
                         "Content-Type": seg_content_type,
                         "Access-Control-Allow-Origin": "*",
@@ -883,7 +906,7 @@ class HLSProxyStreamingMixin:
                 ) and "video/mp2t" not in response_headers.get(
                     "content-type", ""
                 ).lower():
-                    set_response_header(response_headers, "Content-Type", "video/MP2T")
+                    set_response_header(response_headers, "Content-Type", "video/mp2t")
                 elif (
                     stream_url.endswith(".vtt")
                     or stream_url.endswith(".webvtt")
@@ -1088,7 +1111,7 @@ class HLSProxyStreamingMixin:
                     )
                     return None
                 body = await fr_resp.read()
-                rh = {"Access-Control-Allow-Origin": "*", "Content-Type": "video/MP2T"}
+                rh = {"Access-Control-Allow-Origin": "*", "Content-Type": "video/mp2t"}
                 logger.info("✅ Segment recovered via re-extract: %s", seg_filename)
 
                 # Save refreshed CDN base URL for this stream_key so subsequent
@@ -1277,7 +1300,7 @@ class HLSProxyStreamingMixin:
                     ts_content = combined_content
                     content_type = "video/mp4"
                 else:
-                    content_type = "video/MP2T"
+                    content_type = "video/mp2t"
                     logger.info("⚡ Remuxed fMP4 -> TS")
             else:
                 logger.debug("⏩ Remuxing disabled, serving raw fMP4")
