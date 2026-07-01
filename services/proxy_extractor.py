@@ -379,6 +379,21 @@ class HLSProxyExtractorHandlerMixin:
             if type(e).__name__ == "ExtractorError" or "not found" in error_message or "pick failed" in error_message:
                 status_code = 404
 
+            # ⚡ Immediate cleanup for definitively-dead streams (offline / 404 / 503 / timeout).
+            # Don't wait 5 min: the channel returned a hard error, it won't recover.
+            # Paused-but-alive streams are NOT affected (they don't raise here).
+            if is_expected_error and extractor_key and extractor_key in self.extractors:
+                _dead_ext = self.extractors.pop(extractor_key, None)
+                self._extractor_atimes.pop(extractor_key, None)
+                for _sr in [r for r in self._extractor_stream_atimes if r[0] == extractor_key]:
+                    self._extractor_stream_atimes.pop(_sr, None)
+                if _dead_ext and hasattr(_dead_ext, "close"):
+                    try:
+                        await _dead_ext.close()
+                    except Exception:
+                        pass
+                logger.info(f"🧹 Immediate cleanup of dead extractor: {extractor_key} ({error_desc[:40]})")
+
             return web.json_response(
                 {"error": error_desc, "status": "error"},
                 status=status_code
