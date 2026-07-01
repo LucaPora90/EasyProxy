@@ -43,6 +43,7 @@ class HLSProxy(
         # This reuses connections for the same proxy to improve performance
         self.proxy_sessions = {}
         self._proxy_session_atimes = {}  # proxy_url -> last access time
+        self._proxy_session_lock = asyncio.Lock()
         self.curl_sessions = {}  # Registry for pooled curl_cffi sessions
 
         # Refreshed CDN tokens for live token substitution after re-extract on 403.

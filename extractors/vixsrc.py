@@ -32,7 +32,6 @@ class VixSrcExtractor:
         self.session = None
         self.session_proxy = None
         self.mediaflow_endpoint = "hls_manifest_proxy"
-        self._session_lock = asyncio.Lock()
         self.proxies = []
         for proxy in list(proxies or []) + list(_cfg.GLOBAL_PROXIES):
             if proxy and proxy not in self.proxies:

@@ -64,7 +64,6 @@ class SportsonlineExtractor:
         }
         self.session = None
         self.mediaflow_endpoint = "hls_manifest_proxy"
-        self._session_lock = asyncio.Lock()
         self.proxies = proxies or _cfg.GLOBAL_PROXIES
         self._session_proxy = None
 
