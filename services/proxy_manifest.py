@@ -650,3 +650,14 @@ class HLSProxyManifestHandlerMixin:
             BYPASS_PROXIES_CONTEXT.reset(proxy_bypass_token)
             SELECTED_PROXY_CONTEXT.reset(proxy_token)
             STRICT_PROXY_CONTEXT.reset(strict_proxy_token)
+            # 🚫 Cache disabilitata: chiudi sempre l'estrattore dopo l'uso.
+            if extractor_key and extractor_key in self.extractors:
+                _ext = self.extractors.pop(extractor_key, None)
+                self._extractor_atimes.pop(extractor_key, None)
+                for _sr in [r for r in self._extractor_stream_atimes if r[0] == extractor_key]:
+                    self._extractor_stream_atimes.pop(_sr, None)
+                if _ext and hasattr(_ext, "close"):
+                    try:
+                        await _ext.close()
+                    except Exception:
+                        pass

@@ -37,6 +37,16 @@ from services.proxy_shared import (
     ProxyDeadRetryError,
 )
 
+class _ParallelFallback(Exception):
+    """Raised when parallel range fetch is not applicable; falls back to single connection."""
+
+# Parallel range fetch thresholds: beat per-connection CDN throttling (e.g. vidsonic
+# ~1.7 Mbps/conn vs 2.4 Mbps video) by downloading one segment over K parallel
+# range requests. Only triggers for large segments on range-enabled CDNs.
+_PARALLEL_MIN_SIZE = 1_500_000  # 1.5 MB
+_PARALLEL_PARTS = 3
+
+
 class HLSProxyStreamingMixin:
 
     # Pre-compiled regex for segment URL parsing
@@ -102,6 +112,110 @@ class HLSProxyStreamingMixin:
         except Exception as e:
             logger.error(f"Error in .ts segment proxy: {str(e)}")
             return web.Response(text=f"Segment error: {str(e)}", status=500)
+
+    async def _proxy_segment_parallel(self, request, segment_url, headers, segment_name, bypass_warp, forced_proxy):
+        """Download one segment via K parallel range requests to beat per-connection
+        CDN throttling (e.g. vidsonic limits each TCP connection to ~1.7 Mbps while
+        the video is 2.4 Mbps; 3 parallel ranges -> ~5 Mbps aggregate).
+
+        Raises _ParallelFallback when not applicable so the caller falls back to the
+        single-connection streaming path.
+        """
+        # Only when the client wants the whole segment (no partial-range seek).
+        client_range = headers.get("range") or headers.get("Range")
+        if client_range and client_range.lower() != "bytes=0-":
+            raise _ParallelFallback("client requested a partial range")
+        if is_special_cdn_stream(segment_url):
+            raise _ParallelFallback("special CDN")
+
+        base_headers = {k: v for k, v in headers.items() if k.lower() != "range"}
+        disable_ssl = get_ssl_setting_for_url(segment_url) or check_vavoo_request(headers, request, segment_url)
+
+        # 1) Probe size + Accept-Ranges with a 1-byte range request.
+        probe_headers = {**base_headers, "Range": "bytes=0-0"}
+        session, _ = await self._get_proxy_session(
+            segment_url, bypass_warp=bypass_warp, forced_proxy=forced_proxy
+        )
+        total = None
+        try:
+            async with session.get(
+                yarl.URL(segment_url, encoded=True),
+                headers=probe_headers,
+                ssl=not disable_ssl,
+                timeout=ClientTimeout(total=15, connect=10, sock_connect=10, sock_read=15),
+            ) as probe:
+                if probe.status not in (200, 206):
+                    raise _ParallelFallback(f"probe status {probe.status}")
+                accept_ranges = (probe.headers.get("Accept-Ranges") or "").lower()
+                content_range = probe.headers.get("Content-Range") or ""
+                if "bytes" not in accept_ranges and not content_range:
+                    raise _ParallelFallback("no Accept-Ranges")
+                if content_range and "/" in content_range:
+                    try:
+                        total = int(content_range.rsplit("/", 1)[1])
+                    except ValueError:
+                        total = None
+                if not total and probe.status == 200:
+                    cl = probe.headers.get("Content-Length")
+                    if cl:
+                        try:
+                            total = int(cl)
+                        except ValueError:
+                            total = None
+        except _ParallelFallback:
+            raise
+        except Exception as e:
+            raise _ParallelFallback(f"probe error: {e}")
+
+        if not total or total < _PARALLEL_MIN_SIZE:
+            raise _ParallelFallback(f"segment too small ({total})")
+
+        # 2) Split into K ranges and fetch in parallel.
+        K = _PARALLEL_PARTS
+        chunk = total // K
+        ranges = []
+        for i in range(K):
+            start = i * chunk
+            end = total - 1 if i == K - 1 else (start + chunk - 1)
+            ranges.append((start, end))
+
+        async def _fetch_part(start, end):
+            h = {**base_headers, "Range": f"bytes={start}-{end}"}
+            s, _ = await self._get_proxy_session(
+                segment_url, bypass_warp=bypass_warp, forced_proxy=forced_proxy
+            )
+            async with s.get(
+                yarl.URL(segment_url, encoded=True),
+                headers=h,
+                ssl=not disable_ssl,
+                timeout=ClientTimeout(total=60, connect=10, sock_connect=10, sock_read=60),
+            ) as r:
+                r.raise_for_status()
+                return await r.read()
+
+        try:
+            parts = await asyncio.gather(*[_fetch_part(s, e) for s, e in ranges])
+        except Exception as e:
+            raise _ParallelFallback(f"parallel fetch error: {e}")
+
+        data = b"".join(parts)
+        if len(data) != total:
+            raise _ParallelFallback(f"size mismatch {len(data)} != {total}")
+
+        # 3) Stream the assembled segment to the client.
+        response_headers = {}
+        set_response_header(response_headers, "Content-Type", "video/mp2t")
+        set_response_header(response_headers, "Content-Length", str(total))
+        set_response_header(response_headers, "Content-Disposition", f'attachment; filename="{segment_name}"')
+        set_response_header(response_headers, "Access-Control-Allow-Origin", "*")
+        set_response_header(response_headers, "Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+        set_response_header(response_headers, "Access-Control-Allow-Headers", "Range, Content-Type")
+        response = web.StreamResponse(status=200, headers=response_headers)
+        await response.prepare(request)
+        await response.write(data)
+        await response.write_eof()
+        logger.info(f"⚡ Parallel fetch {segment_name}: {total} bytes via {K} ranges")
+        return response
 
     async def _proxy_segment(self, request, segment_url, stream_headers, segment_name):
         """✅ NUOVO: Proxy dedicato per segmenti .ts con Content-Disposition"""
@@ -423,12 +537,27 @@ class HLSProxyStreamingMixin:
                     f"📡 [Proxy Stream] {routing} - Using session ({session_kind}) for: {stream_url}"
                 )
 
+            is_hls_segment_request = request.path.startswith("/proxy/hls/segment.")
+
+            # ⚡ Parallel range fetch to beat per-connection CDN throttling (e.g. vidsonic:
+            # ~1.7 Mbps/conn vs 2.4 Mbps video -> 3 parallel ranges -> ~5 Mbps aggregate).
+            # Falls back transparently to the single-connection path when not applicable.
+            if is_hls_segment_request and stream_url.split("?", 1)[0].lower().endswith(".ts"):
+                _seg_name = stream_url.rsplit("/", 1)[-1].split("?")[0]
+                try:
+                    return await self._proxy_segment_parallel(
+                        request, stream_url, headers, _seg_name, bypass_warp, forced_proxy
+                    )
+                except _ParallelFallback as _pf:
+                    logger.debug(f"parallel fetch skipped for {_seg_name}: {_pf}")
+                except Exception as _pe:
+                    logger.debug(f"parallel fetch error for {_seg_name}: {_pe}")
+
             use_curl_cffi = should_use_curl_cffi(
                 stream_url,
                 is_special_cdn,
                 HAS_CURL_CFFI,
             )
-            is_hls_segment_request = request.path.startswith("/proxy/hls/segment.")
             # ✅ FIX BUFFERING: Use generous sock_read for segments via slow proxies.
             # sock_read=None prevents SocketTimeoutError mid-transfer on large 1080p
             # segments; the total timeout still caps the overall request duration.
@@ -1062,6 +1191,19 @@ class HLSProxyStreamingMixin:
         except Exception as exc:
             logger.debug("Re-extract for segment 403 failed: %s", exc)
             return None
+        finally:
+            # 🚫 Cache disabilitata: chiudi subito l'estrattore re-estratto.
+            _ek = self._extractor_key_for_instance(extractor) if extractor else None
+            if _ek and _ek in self.extractors:
+                _ext = self.extractors.pop(_ek, None)
+                self._extractor_atimes.pop(_ek, None)
+                for _sr in [r for r in self._extractor_stream_atimes if r[0] == _ek]:
+                    self._extractor_stream_atimes.pop(_sr, None)
+                if _ext and hasattr(_ext, "close"):
+                    try:
+                        await _ext.close()
+                    except Exception:
+                        pass
 
         captured_manifests = refreshed.get("captured_manifests") or {}
         master_url = refreshed.get("destination_url")

@@ -13,7 +13,7 @@ A powerful, lightweight proxy server designed to handle HLS, M3U8, and DASH (MPD
 
 - **🌐 Universal Proxy**: Seamlessly handles HLS, M3U8, MPD (DASH), and static video files.
 - **🔓 DRM Support**: ClearKey decryption via FFmpeg transcoding or legacy mode.
-- **🔐 Specialized Extractors**: Native support for Vavoo, DaddyliveHD, Sportsonline, VixSrc, DoodStream, MaxStream, and more.
+- **🔐 Specialized Extractors**: Native support for Vavoo, DaddyliveHD, Sportsonline, VixSrc, DoodStream, EmbedSports, and more.
 - **📼 Integrated DVR**: Record live streams while watching or schedule background recordings.
 - **🛠️ Playlist Builder**: Web interface to combine, manage, and proxy entire M3U playlists.
 - **☁️ Cloud Ready**: Optimized for HuggingFace, Render, Koyeb, and other free-tier platforms.

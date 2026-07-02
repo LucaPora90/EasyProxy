@@ -244,6 +244,12 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
                         request_headers, proxies=proxy_list, bypass_warp=bypass_warp
                     )
                 return self.extractors[key]
+            elif host == "vidsonic":
+                if key not in self.extractors:
+                    self.extractors[key] = VidSonicExtractor(
+                        request_headers, proxies=proxy_list
+                    )
+                return self.extractors[key]
 
         # 2. Auto-detection basata sull'URL
         # ✅ NUOVO: Salta estrattori specifici se l'URL sembra già un link diretto a un media
@@ -585,6 +591,15 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
             if key not in self.extractors:
                 self.extractors[key] = EmbedStExtractor(
                     request_headers, proxies=proxy_list, bypass_warp=bypass_warp
+                )
+            return self.extractors[key]
+        elif "vidsonic.net/" in url.lower() and re.search(r"/e/[A-Za-z0-9]+", url, re.IGNORECASE):
+            key = "vidsonic_direct" if bypass_warp else "vidsonic"
+            proxy = get_proxy_for_url("vidsonic", bypass_warp=bypass_warp)
+            proxy_list = _build_proxy_list(proxy, "vidsonic")
+            if key not in self.extractors:
+                self.extractors[key] = VidSonicExtractor(
+                    request_headers, proxies=proxy_list
                 )
             return self.extractors[key]
         else:

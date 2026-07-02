@@ -42,6 +42,7 @@ DLStreamsExtractor = None
 StreamHGExtractor = None
 VidXgoExtractor = None
 EmbedStExtractor = None
+VidSonicExtractor = None
 
 
 # Importazione condizionale degli estrattori
@@ -218,6 +219,13 @@ except Exception as e:
     logger.warning("⚠️ EmbedStExtractor failed to load: %s", e)
     EmbedStExtractor = None
 
+try:
+    from extractors.vidsonic import VidSonicExtractor
+    logger.info("✅ VidSonicExtractor module loaded.")
+except Exception as e:
+    logger.warning("⚠️ VidSonicExtractor failed to load: %s", e)
+    VidSonicExtractor = None
+
 
 __all__ = [
     "VavooExtractor",
@@ -248,4 +256,5 @@ __all__ = [
     "StreamHGExtractor",
     "VidXgoExtractor",
     "EmbedStExtractor",
+    "VidSonicExtractor",
 ]

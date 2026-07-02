@@ -701,6 +701,7 @@
                             <option value="f16px">F16Px</option>
                             <option value="sports99">Sports99 / CDNLiveTV</option>
                         <option value="embedst">EmbedSports / Streamed</option>
+                        <option value="vidsonic">VidSonic</option>
 
                         </select>
                     </div>
@@ -1119,8 +1120,12 @@
             if (isHls) {
                 if (Hls.isSupported()) {
                     hlsPlayer = new Hls({
-                        maxMaxBufferLength: 10,
-                        enableWorker: true
+                        maxBufferLength: 30,
+                        maxMaxBufferLength: 120,
+                        startFragPrefetch: true,
+                        enableWorker: true,
+                        lowLatencyMode: false,
+                        backBufferLength: 90
                     });
                     hlsPlayer.loadSource(streamUrl);
                     hlsPlayer.attachMedia(video);
