@@ -28,6 +28,7 @@ class BaseExtractor:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         }
         self.session = None
+        self._session_lock = asyncio.Lock()
         self.mediaflow_endpoint = "hls_proxy"
         self.proxies = proxies or []
         self.extractor_name = extractor_name
@@ -37,33 +38,34 @@ class BaseExtractor:
     async def _get_session(self, url: str = None):
         proxy = await get_preferred_proxy_for_url(url, self.extractor_name, self.proxies or _cfg.GLOBAL_PROXIES)
 
-        if (
-            self.session is None
-            or self.session.closed
-            or self._session_proxy != proxy
-        ):
-            if self.session and not self.session.closed:
-                await self.session.close()
+        async with self._session_lock:
+            if (
+                self.session is None
+                or self.session.closed
+                or self._session_proxy != proxy
+            ):
+                if self.session and not self.session.closed:
+                    await self.session.close()
 
-            timeout = ClientTimeout(total=60, connect=30, sock_read=30)
+                timeout = ClientTimeout(total=60, connect=30, sock_read=30)
 
-            if proxy:
-                connector = get_connector_for_proxy(proxy)
-            else:
-                connector = TCPConnector(
-                    limit=0, 
-                    limit_per_host=0, 
-                    keepalive_timeout=60, 
-                    enable_cleanup_closed=True, 
-                    use_dns_cache=True
+                if proxy:
+                    connector = get_connector_for_proxy(proxy)
+                else:
+                    connector = TCPConnector(
+                        limit=0, 
+                        limit_per_host=0, 
+                        keepalive_timeout=60, 
+                        enable_cleanup_closed=True, 
+                        use_dns_cache=True
+                    )
+                
+                self.session = ClientSession(
+                    timeout=timeout, 
+                    connector=connector, 
+                    headers={'User-Agent': self.base_headers["User-Agent"]}
                 )
-            
-            self.session = ClientSession(
-                timeout=timeout, 
-                connector=connector, 
-                headers={'User-Agent': self.base_headers["User-Agent"]}
-            )
-            self._session_proxy = proxy
+                self._session_proxy = proxy
         return self.session
 
     async def _make_request(self, url: str, method: str = "GET", headers: dict = None, retries: int = 2, **kwargs):
@@ -115,9 +117,10 @@ class BaseExtractor:
                 logger.warning(f"[{self.extractor_name}] Attempt {attempt+1} failed for {url}: {e}")
                 
                 # Reset session
-                if self.session and not self.session.closed:
-                    await self.session.close()
-                self.session = None
+                async with self._session_lock:
+                    if self.session and not self.session.closed:
+                        await self.session.close()
+                    self.session = None
                 
                 if is_proxy_err and SELECTED_PROXY_CONTEXT.get() and not STRICT_PROXY_CONTEXT.get():
                     proxy_to_mark = SELECTED_PROXY_CONTEXT.get()

@@ -1030,9 +1030,14 @@
                     <tbody>
                         <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/</code></td><td>Main page with server status</td></tr>
                         <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/info</code></td><td>Detailed information page (this page)</td></tr>
+                        <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/docs</code></td><td>Swagger UI interactive documentation</td></tr>
+                        <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/redoc</code></td><td>ReDoc alternative documentation view</td></tr>
+                        <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/openapi.json</code></td><td>OpenAPI 3.0.3 specification (JSON)</td></tr>
                         <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/builder</code></td><td>Playlist Builder web interface</td></tr>
+                        <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/url-generator</code></td><td>URL generator tool</td></tr>
                         <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/api/info</code></td><td>Server status JSON API</td></tr>
                         <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/proxy/ip</code></td><td>Returns the server's public IP address</td></tr>
+                        <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/health</code></td><td>Health check endpoint (JSON)</td></tr>
                         <tr><td><span class="endpoint-method method-post">POST</span></td><td><code>/generate_urls</code></td><td>Batch generate proxy URLs</td></tr>
                     </tbody>
                 </table>
@@ -1045,9 +1050,15 @@
                     <tbody>
                         <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/proxy/manifest.m3u8</code></td><td><strong>Main entry point</strong> &mdash; auto-detect HLS/DASH</td></tr>
                         <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/proxy/hls/manifest.m3u8</code></td><td>Specific alias for HLS streams</td></tr>
+                        <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/proxy/hls/segment.{format}</code></td><td>Serve HLS segments (ts, m4s, mp4, vtt)</td></tr>
                         <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/proxy/mpd/manifest.m3u8</code></td><td>Force DASH (MPD) input with HLS conversion</td></tr>
+                        <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/proxy/mpd/manifest.mpd</code></td><td>Proxy native MPD manifest</td></tr>
+                        <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/proxy/mpd/segment/{session_id}/{tail:.*}</code></td><td>Serve DASH conversion segments</td></tr>
                         <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/proxy/stream</code></td><td>Generic proxy for static/progressive files</td></tr>
                         <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/playlist</code></td><td>Dynamic M3U playlist generator</td></tr>
+                        <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/segment/{segment}</code></td><td>Legacy TS segment serving</td></tr>
+                        <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/decrypt/segment.{format}</code></td><td>Legacy ClearKey segment decryption (mp4, ts)</td></tr>
+                        <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/ffmpeg_stream/{stream_id}/{filename}</code></td><td>FFmpeg live transcoding segments</td></tr>
                     </tbody>
                 </table>
 
@@ -1057,7 +1068,9 @@
                         <tr><th width="100">Method</th><th>Endpoint</th><th>Description</th></tr>
                     </thead>
                     <tbody>
+                        <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/extractor</code></td><td>Generic extractor &mdash; resolve hoster URLs</td></tr>
                         <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/extractor/video</code></td><td>Extract direct links and headers. Returns JSON or redirect</td></tr>
+                        <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/extractor/video.{format}</code></td><td>Format-forced variants: m3u8, mp4, mpd, ts, m4s, vtt, aac, m4a, webm, mkv, avi, mov</td></tr>
                     </tbody>
                 </table>
 
@@ -1080,6 +1093,7 @@
                     <tbody>
                         <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/recordings</code></td><td>Web interface for recordings management</td></tr>
                         <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/record</code></td><td>Start recording and redirect to stream (Smart Mode)</td></tr>
+                        <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/record/stop/{id}</code></td><td>Stop recording via GET</td></tr>
                         <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/api/recordings</code></td><td>List all recordings (JSON)</td></tr>
                         <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/api/recordings/active</code></td><td>List active recordings</td></tr>
                         <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/api/recordings/{id}</code></td><td>Recording details</td></tr>
@@ -1087,7 +1101,30 @@
                         <tr><td><span class="endpoint-method method-post">POST</span></td><td><code>/api/recordings/{id}/stop</code></td><td>Stop active recording</td></tr>
                         <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/api/recordings/{id}/stream</code></td><td>Watch recording (live or VOD)</td></tr>
                         <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/api/recordings/{id}/download</code></td><td>Download recorded video file</td></tr>
+                        <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/api/recordings/{id}/delete</code></td><td>Delete recording via GET (legacy)</td></tr>
                         <tr><td><span class="endpoint-method method-delete">DEL</span></td><td><code>/api/recordings/{id}</code></td><td>Delete recording</td></tr>
+                        <tr><td><span class="endpoint-method method-delete">DEL</span></td><td><code>/api/recordings/all</code></td><td>Delete all recordings (optional ?status= filter)</td></tr>
+                    </tbody>
+                </table>
+
+                <div class="table-section-title">&#x1F510; Admin API</div>
+                <table class="api-table">
+                    <thead>
+                        <tr><th width="100">Method</th><th>Endpoint</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/admin</code></td><td>Admin configuration panel (web UI)</td></tr>
+                        <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/admin/login</code></td><td>Admin login page</td></tr>
+                        <tr><td><span class="endpoint-method method-post">POST</span></td><td><code>/api/admin/login</code></td><td>Admin login API</td></tr>
+                        <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/admin/logout</code></td><td>Admin logout</td></tr>
+                        <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/api/admin/config</code></td><td>Get server configuration (JSON)</td></tr>
+                        <tr><td><span class="endpoint-method method-post">POST</span></td><td><code>/api/admin/config</code></td><td>Update server configuration</td></tr>
+                        <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/api/admin/config/download</code></td><td>Download config as file</td></tr>
+                        <tr><td><span class="endpoint-method method-post">POST</span></td><td><code>/api/admin/config/upload</code></td><td>Upload config file</td></tr>
+                        <tr><td><span class="endpoint-method method-post">POST</span></td><td><code>/api/admin/warp/toggle</code></td><td>Toggle WARP on/off</td></tr>
+                        <tr><td><span class="endpoint-method method-post">POST</span></td><td><code>/api/admin/warp/reconnect</code></td><td>Force WARP reconnection</td></tr>
+                        <tr><td><span class="endpoint-method method-post">POST</span></td><td><code>/api/admin/extractor/proxy</code></td><td>Override extractor proxy</td></tr>
+                        <tr><td><span class="endpoint-method method-post">POST</span></td><td><code>/api/admin/speedtest</code></td><td>Run proxy speed test</td></tr>
                     </tbody>
                 </table>
             </section>
@@ -1107,12 +1144,12 @@
                     <div class="arch-card">
                         <div class="arch-icon">&#x1F40D;</div>
                         <div class="arch-title">Python 3.11+</div>
-                        <div class="arch-desc">FastAPI / aiohttp async runtime</div>
+                        <div class="arch-desc">aiohttp async runtime</div>
                     </div>
                     <div class="arch-card">
                         <div class="arch-icon">&#x26A1;</div>
-                        <div class="arch-title">ASGI Server</div>
-                        <div class="arch-desc">Uvicorn with HTTP/2 support</div>
+                        <div class="arch-title">HTTP Server</div>
+                        <div class="arch-desc">aiohttp web runner with HTTP/1.1</div>
                     </div>
                     <div class="arch-card">
                         <div class="arch-icon">&#x1F500;</div>
@@ -1141,10 +1178,8 @@
                 </p>
                 <div class="tag-grid">
                     <span class="tag tag-primary">Python 3.11+</span>
-                    <span class="tag tag-primary">FastAPI</span>
                     <span class="tag tag-primary">aiohttp</span>
-                    <span class="tag tag-success">Uvicorn</span>
-                    <span class="tag tag-info">HTTP/2</span>
+                    <span class="tag tag-info">HTTP/1.1</span>
                     <span class="tag tag-info">Connection Pooling</span>
                     <span class="tag tag-warning">AES-128</span>
                     <span class="tag tag-accent">ClearKey</span>

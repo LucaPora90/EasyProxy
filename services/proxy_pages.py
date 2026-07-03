@@ -301,20 +301,26 @@ class HLSProxyPagesMixin:
         }
         security = [{"ApiPasswordQuery": []}] if requires_password else []
 
+        version = APP_VERSION
+
         spec = {
             "openapi": "3.0.3",
             "info": {
                 "title": "EasyProxy API",
-                "version": "2.5.0",
+                "version": version,
                 "description": (
                     "Interactive documentation for EasyProxy. "
                     "Includes HLS/MPD proxying, extractor endpoints, key and license helpers, "
-                    "playlist generation, and compatibility endpoints inspired by MediaFlow Proxy."
+                    "playlist generation, admin API, DVR/recording management, "
+                    "and compatibility endpoints inspired by MediaFlow Proxy."
                 ),
             },
             "servers": [{"url": server_url}],
             "components": {"securitySchemes": security_schemes},
             "paths": {
+
+                # --- System & Public ---
+
                 "/api/info": {
                     "get": {
                         "summary": "Server information",
@@ -322,6 +328,46 @@ class HLSProxyPagesMixin:
                         "responses": {"200": {"description": "Server information JSON"}},
                     }
                 },
+                "/health": {
+                    "get": {
+                        "summary": "Health check",
+                        "description": "Simple health check endpoint returning OK status and app version.",
+                        "responses": {"200": {"description": "JSON with status and version"}},
+                    }
+                },
+                "/generate_urls": {
+                    "post": {
+                        "summary": "Generate proxy URLs",
+                        "description": "Generate one or multiple compatibility URLs for clients.",
+                        "requestBody": {
+                            "required": True,
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "mediaflow_proxy_url": {"type": "string"},
+                                            "api_password": {"type": "string"},
+                                            "urls": {"type": "array", "items": {"type": "object"}},
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                        "responses": {"200": {"description": "Generated URL list"}},
+                        **({"security": security} if requires_password else {}),
+                    }
+                },
+                "/proxy/ip": {
+                    "get": {
+                        "summary": "Resolve public IP",
+                        "description": "Returns the public IP as seen through the configured proxy route.",
+                        "responses": {"200": {"description": "Public IP response"}},
+                    }
+                },
+
+                # --- Proxy & Streaming ---
+
                 "/proxy/manifest.m3u8": {
                     "get": {
                         "summary": "Legacy proxy manifest",
@@ -346,6 +392,16 @@ class HLSProxyPagesMixin:
                         **({"security": security} if requires_password else {}),
                     }
                 },
+                "/proxy/hls/segment.{format}": {
+                    "get": {
+                        "summary": "HLS segment compatibility",
+                        "description": "Serve HLS segments (ts, m4s, mp4, vtt) through the proxy with proper headers.",
+                        "parameters": [
+                            {"name": "format", "in": "path", "schema": {"type": "string", "enum": ["ts", "m4s", "mp4", "vtt"]}, "required": True},
+                        ],
+                        "responses": {"200": {"description": "Segment data"}},
+                    }
+                },
                 "/proxy/mpd/manifest.m3u8": {
                     "get": {
                         "summary": "Proxy MPD as HLS",
@@ -360,6 +416,29 @@ class HLSProxyPagesMixin:
                         **({"security": security} if requires_password else {}),
                     }
                 },
+                "/proxy/mpd/manifest.mpd": {
+                    "get": {
+                        "summary": "Proxy MPD native",
+                        "description": "Proxy the native MPD manifest for DASH streams.",
+                        "parameters": [
+                            {"name": "d", "in": "query", "schema": {"type": "string"}, "required": True, "description": "Destination MPD URL"},
+                            {"name": "api_password", "in": "query", "schema": {"type": "string"}},
+                        ],
+                        "responses": {"200": {"description": "Proxied MPD manifest"}},
+                        **({"security": security} if requires_password else {}),
+                    }
+                },
+                "/proxy/mpd/segment/{session_id}/{tail:.*}": {
+                    "get": {
+                        "summary": "DASH segment serving",
+                        "description": "Serve DASH segments for an active MPD-to-HLS conversion session.",
+                        "parameters": [
+                            {"name": "session_id", "in": "path", "schema": {"type": "string"}, "required": True},
+                            {"name": "tail", "in": "path", "schema": {"type": "string"}, "required": True},
+                        ],
+                        "responses": {"200": {"description": "Segment data"}},
+                    }
+                },
                 "/proxy/stream": {
                     "get": {
                         "summary": "Generic stream proxy",
@@ -372,6 +451,52 @@ class HLSProxyPagesMixin:
                         **({"security": security} if requires_password else {}),
                     }
                 },
+                "/playlist": {
+                    "get": {
+                        "summary": "Build a playlist",
+                        "description": "Combine multiple source URLs into a generated playlist.",
+                        "parameters": [
+                            {"name": "url", "in": "query", "schema": {"type": "string"}, "required": True},
+                            {"name": "api_password", "in": "query", "schema": {"type": "string"}},
+                        ],
+                        "responses": {"200": {"description": "Generated playlist"}},
+                        **({"security": security} if requires_password else {}),
+                    }
+                },
+                "/segment/{segment}": {
+                    "get": {
+                        "summary": "Legacy TS segment serving",
+                        "description": "Serve TS segments by their segment identifier.",
+                        "parameters": [
+                            {"name": "segment", "in": "path", "schema": {"type": "string"}, "required": True},
+                        ],
+                        "responses": {"200": {"description": "Segment data"}},
+                    }
+                },
+                "/decrypt/segment.{format}": {
+                    "get": {
+                        "summary": "Legacy decrypt segment",
+                        "description": "Decrypt and serve segments using ClearKey (legacy mode).",
+                        "parameters": [
+                            {"name": "format", "in": "path", "schema": {"type": "string", "enum": ["mp4", "ts"]}, "required": True},
+                        ],
+                        "responses": {"200": {"description": "Decrypted segment"}},
+                    }
+                },
+                "/ffmpeg_stream/{stream_id}/{filename}": {
+                    "get": {
+                        "summary": "FFmpeg live stream",
+                        "description": "Serve segments generated by FFmpeg for live transcoding streams.",
+                        "parameters": [
+                            {"name": "stream_id", "in": "path", "schema": {"type": "string"}, "required": True},
+                            {"name": "filename", "in": "path", "schema": {"type": "string"}, "required": True},
+                        ],
+                        "responses": {"200": {"description": "Segment or playlist"}},
+                    }
+                },
+
+                # --- Extractors ---
+
                 "/extractor": {
                     "get": {
                         "summary": "Generic extractor",
@@ -398,24 +523,12 @@ class HLSProxyPagesMixin:
                         **({"security": security} if requires_password else {}),
                     }
                 },
-                "/extractor/video.m3u8": {
+                "/extractor/video.{format}": {
                     "get": {
-                        "summary": "Extractor compatibility endpoint with m3u8 suffix",
-                        "description": "Alias for host-forced extractor requests using an m3u8-style path.",
+                        "summary": "Extractor format-suffix variants",
+                        "description": "Format-forced extractor variants. Supported extensions: m3u8, mp4, mpd, ts, m4s, vtt, aac, m4a, webm, mkv, avi, mov. All share the same parameters and handler.",
                         "parameters": [
-                            {"name": "host", "in": "query", "schema": {"type": "string"}},
-                            {"name": "url", "in": "query", "schema": {"type": "string"}},
-                            {"name": "api_password", "in": "query", "schema": {"type": "string"}},
-                        ],
-                        "responses": {"200": {"description": "Extractor response"}},
-                        **({"security": security} if requires_password else {}),
-                    }
-                },
-                "/extractor/video.mp4": {
-                    "get": {
-                        "summary": "Extractor compatibility endpoint with mp4 suffix",
-                        "description": "Alias for host-forced extractor requests where the resolved media is typically a direct MP4 stream.",
-                        "parameters": [
+                            {"name": "format", "in": "path", "schema": {"type": "string"}, "required": True},
                             {"name": "host", "in": "query", "schema": {"type": "string"}},
                             {"name": "url", "in": "query", "schema": {"type": "string"}},
                             {"name": "d", "in": "query", "schema": {"type": "string"}},
@@ -425,6 +538,9 @@ class HLSProxyPagesMixin:
                         **({"security": security} if requires_password else {}),
                     }
                 },
+
+                # --- Keys & DRM ---
+
                 "/key": {
                     "get": {
                         "summary": "Fetch or transform decryption keys",
@@ -462,10 +578,13 @@ class HLSProxyPagesMixin:
                         **({"security": security} if requires_password else {}),
                     },
                 },
-                "/generate_urls": {
+
+                # --- Admin API ---
+
+                "/api/admin/login": {
                     "post": {
-                        "summary": "Generate proxy URLs",
-                        "description": "Generate one or multiple compatibility URLs for clients.",
+                        "summary": "Admin login",
+                        "description": "Authenticate as admin. Sets a session cookie on success.",
                         "requestBody": {
                             "required": True,
                             "content": {
@@ -473,35 +592,243 @@ class HLSProxyPagesMixin:
                                     "schema": {
                                         "type": "object",
                                         "properties": {
-                                            "mediaflow_proxy_url": {"type": "string"},
-                                            "api_password": {"type": "string"},
-                                            "urls": {"type": "array", "items": {"type": "object"}},
+                                            "password": {"type": "string"},
                                         },
                                     }
                                 }
                             },
                         },
-                        "responses": {"200": {"description": "Generated URL list"}},
+                        "responses": {"200": {"description": "Login success"}, "401": {"description": "Invalid password"}},
+                    }
+                },
+                "/api/admin/config": {
+                    "get": {
+                        "summary": "Get admin config",
+                        "description": "Retrieve the full server configuration as JSON.",
+                        "responses": {"200": {"description": "Configuration JSON"}},
+                        **({"security": security} if requires_password else {}),
+                    },
+                    "post": {
+                        "summary": "Update admin config",
+                        "description": "Update server configuration with a JSON payload.",
+                        "requestBody": {
+                            "required": True,
+                            "content": {
+                                "application/json": {
+                                    "schema": {"type": "object", "description": "Partial or full config update"},
+                                }
+                            },
+                        },
+                        "responses": {"200": {"description": "Config updated"}},
+                        **({"security": security} if requires_password else {}),
+                    },
+                },
+                "/api/admin/config/download": {
+                    "get": {
+                        "summary": "Download config as file",
+                        "description": "Download the current configuration as a downloadable file.",
+                        "responses": {"200": {"description": "Config file download"}},
                         **({"security": security} if requires_password else {}),
                     }
                 },
-                "/playlist": {
+                "/api/admin/config/upload": {
+                    "post": {
+                        "summary": "Upload config file",
+                        "description": "Upload a configuration file to replace the current server config.",
+                        "requestBody": {
+                            "required": True,
+                            "content": {
+                                "multipart/form-data": {
+                                    "schema": {"type": "object", "properties": {"file": {"type": "string", "format": "binary"}}},
+                                }
+                            },
+                        },
+                        "responses": {"200": {"description": "Config uploaded and reloaded"}},
+                        **({"security": security} if requires_password else {}),
+                    }
+                },
+                "/api/admin/warp/toggle": {
+                    "post": {
+                        "summary": "Toggle WARP",
+                        "description": "Enable or disable Cloudflare WARP proxy routing.",
+                        "responses": {"200": {"description": "WARP toggled"}},
+                        **({"security": security} if requires_password else {}),
+                    }
+                },
+                "/api/admin/warp/reconnect": {
+                    "post": {
+                        "summary": "Reconnect WARP",
+                        "description": "Force WARP to disconnect, re-register, and reconnect.",
+                        "responses": {"200": {"description": "WARP reconnected"}},
+                        **({"security": security} if requires_password else {}),
+                    }
+                },
+                "/api/admin/extractor/proxy": {
+                    "post": {
+                        "summary": "Set extractor proxy",
+                        "description": "Override the proxy used by a specific extractor for testing.",
+                        "requestBody": {
+                            "required": True,
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "extractor": {"type": "string"},
+                                            "proxy": {"type": "string"},
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                        "responses": {"200": {"description": "Extractor proxy updated"}},
+                        **({"security": security} if requires_password else {}),
+                    }
+                },
+                "/api/admin/speedtest": {
+                    "post": {
+                        "summary": "Run speed test",
+                        "description": "Test download speed through a specified proxy or direct connection.",
+                        "responses": {"200": {"description": "Speed test results"}},
+                        **({"security": security} if requires_password else {}),
+                    }
+                },
+
+                # --- DVR / Recordings ---
+
+                "/recordings": {
                     "get": {
-                        "summary": "Build a playlist",
-                        "description": "Combine multiple source URLs into a generated playlist.",
+                        "summary": "Recordings UI page",
+                        "description": "DVR/recording management web interface.",
+                        "responses": {"200": {"description": "HTML page"}},
+                    }
+                },
+                "/record": {
+                    "get": {
+                        "summary": "Start recording via GET",
+                        "description": "Quick-start a recording from a URL query parameter.",
                         "parameters": [
                             {"name": "url", "in": "query", "schema": {"type": "string"}, "required": True},
                             {"name": "api_password", "in": "query", "schema": {"type": "string"}},
                         ],
-                        "responses": {"200": {"description": "Generated playlist"}},
+                        "responses": {"200": {"description": "Recording started"}},
                         **({"security": security} if requires_password else {}),
                     }
                 },
-                "/proxy/ip": {
+                "/record/stop/{id}": {
                     "get": {
-                        "summary": "Resolve public IP",
-                        "description": "Returns the public IP as seen through the configured proxy route.",
-                        "responses": {"200": {"description": "Public IP response"}},
+                        "summary": "Stop recording via GET",
+                        "description": "Stop a recording by ID via GET request.",
+                        "parameters": [
+                            {"name": "id", "in": "path", "schema": {"type": "string"}, "required": True},
+                        ],
+                        "responses": {"200": {"description": "Recording stopped"}},
+                    }
+                },
+                "/api/recordings": {
+                    "get": {
+                        "summary": "List recordings",
+                        "description": "Get a paginated list of all recordings, with optional status filter.",
+                        "parameters": [
+                            {"name": "status", "in": "query", "schema": {"type": "string", "enum": ["active", "completed", "failed"]}},
+                        ],
+                        "responses": {"200": {"description": "Recordings list"}},
+                    }
+                },
+                "/api/recordings/active": {
+                    "get": {
+                        "summary": "Active recordings",
+                        "description": "Get a list of currently active recordings.",
+                        "responses": {"200": {"description": "Active recordings list"}},
+                    }
+                },
+                "/api/recordings/start": {
+                    "post": {
+                        "summary": "Start recording",
+                        "description": "Start a new DVR recording for a specified stream URL.",
+                        "requestBody": {
+                            "required": True,
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "url": {"type": "string"},
+                                            "stream_type": {"type": "string"},
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                        "responses": {"200": {"description": "Recording started"}, "400": {"description": "Invalid request"}},
+                    }
+                },
+                "/api/recordings/{id}": {
+                    "get": {
+                        "summary": "Get recording details",
+                        "description": "Retrieve metadata for a specific recording.",
+                        "parameters": [
+                            {"name": "id", "in": "path", "schema": {"type": "string"}, "required": True},
+                        ],
+                        "responses": {"200": {"description": "Recording metadata"}},
+                    },
+                    "delete": {
+                        "summary": "Delete recording",
+                        "description": "Delete a recording by ID.",
+                        "parameters": [
+                            {"name": "id", "in": "path", "schema": {"type": "string"}, "required": True},
+                        ],
+                        "responses": {"200": {"description": "Recording deleted"}},
+                    },
+                },
+                "/api/recordings/{id}/delete": {
+                    "get": {
+                        "summary": "Delete recording via GET",
+                        "description": "Delete a recording by ID using a GET request (legacy compatibility).",
+                        "parameters": [
+                            {"name": "id", "in": "path", "schema": {"type": "string"}, "required": True},
+                        ],
+                        "responses": {"200": {"description": "Recording deleted"}},
+                    }
+                },
+                "/api/recordings/{id}/stop": {
+                    "post": {
+                        "summary": "Stop recording",
+                        "description": "Stop an active recording by ID.",
+                        "parameters": [
+                            {"name": "id", "in": "path", "schema": {"type": "string"}, "required": True},
+                        ],
+                        "responses": {"200": {"description": "Recording stopped"}},
+                    }
+                },
+                "/api/recordings/{id}/download": {
+                    "get": {
+                        "summary": "Download recording",
+                        "description": "Download a completed recording file.",
+                        "parameters": [
+                            {"name": "id", "in": "path", "schema": {"type": "string"}, "required": True},
+                        ],
+                        "responses": {"200": {"description": "Recording file download"}},
+                    }
+                },
+                "/api/recordings/{id}/stream": {
+                    "get": {
+                        "summary": "Stream recording",
+                        "description": "Stream a completed recording as HLS.",
+                        "parameters": [
+                            {"name": "id", "in": "path", "schema": {"type": "string"}, "required": True},
+                        ],
+                        "responses": {"200": {"description": "HLS stream"}},
+                    }
+                },
+                "/api/recordings/all": {
+                    "delete": {
+                        "summary": "Delete all recordings",
+                        "description": "Delete all recordings, optionally filtering by status.",
+                        "parameters": [
+                            {"name": "status", "in": "query", "schema": {"type": "string", "enum": ["active", "completed", "failed"]}},
+                        ],
+                        "responses": {"200": {"description": "All matching recordings deleted"}},
                     }
                 },
             },
