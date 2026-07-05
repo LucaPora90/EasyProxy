@@ -1,8 +1,11 @@
 import base64
 import json
+import logging
 import re
 from urllib.parse import urljoin
 from extractors.base import BaseExtractor, ExtractorError
+
+logger = logging.getLogger(__name__)
 
 class VoeExtractor(BaseExtractor):
     def __init__(self, request_headers: dict, proxies: list = None):
@@ -22,10 +25,13 @@ class VoeExtractor(BaseExtractor):
 
         code_and_script_pattern = r'json">\["([^"]+)"]</script>\s*<script\s*src="([^"]+)'
         code_and_script_match = re.search(code_and_script_pattern, text, re.DOTALL)
-        if not code_and_script_match:
-            raise ExtractorError("VOE: unable to locate obfuscated payload or external script URL")
+        if code_and_script_match:
+            return await self._extract_obfuscated(url, text, code_and_script_match)
 
-        script_url = urljoin(url, code_and_script_match.group(2))
+        return await self._extract_direct(url, text)
+
+    async def _extract_obfuscated(self, url: str, text: str, match: re.Match) -> dict:
+        script_url = urljoin(url, match.group(2))
         resp_script = await self._make_request(script_url)
         script_text = resp_script.text
 
@@ -34,7 +40,7 @@ class VoeExtractor(BaseExtractor):
         if not luts_match:
             raise ExtractorError("VOE: unable to locate LUTs in external script")
 
-        data = self.voe_decode(code_and_script_match.group(1), luts_match.group(1))
+        data = self.voe_decode(match.group(1), luts_match.group(1))
 
         final_url = data.get('source')
         if not final_url:
@@ -46,6 +52,43 @@ class VoeExtractor(BaseExtractor):
             "request_headers": self.base_headers,
             "mediaflow_endpoint": "hls_proxy",
         }
+
+    async def _extract_direct(self, url: str, text: str) -> dict:
+        # Check for var source = '...' (direct mp4)
+        m = re.search(r"var\s+source\s*=\s*'([^']+)'", text)
+        if m:
+            final_url = m.group(1)
+            self.base_headers["referer"] = url
+            return {
+                "destination_url": final_url,
+                "request_headers": self.base_headers,
+                "mediaflow_endpoint": "hls_proxy",
+            }
+
+        # Check for hls source
+        m = re.search(r"""hls['"]:\s*['"]([^'"]+)""", text)
+        if m:
+            final_url = m.group(1)
+            self.base_headers["referer"] = url
+            return {
+                "destination_url": final_url,
+                "request_headers": self.base_headers,
+                "mediaflow_endpoint": "hls_proxy",
+            }
+
+        # Check for mp4 source with height label
+        m = re.search(r"""mp4['"]:\s*['"]([^'"]+)['"],\s*['"]video_height['"]:\s*(\d+)""", text)
+        if m:
+            final_url = m.group(1)
+            self.base_headers["referer"] = url
+            return {
+                "destination_url": final_url,
+                "request_headers": self.base_headers,
+                "mediaflow_endpoint": "hls_proxy",
+            }
+
+        logger.warning(f"VOE: no pattern matched, html length={len(text)}, first 500 chars: {text[:500]}")
+        raise ExtractorError("VOE: unable to locate obfuscated payload or external script URL")
 
     @staticmethod
     def voe_decode(ct: str, luts: str) -> dict:
