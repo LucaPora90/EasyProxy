@@ -2,15 +2,13 @@ import logging
 import asyncio
 import aiohttp
 from aiohttp import ClientSession, ClientTimeout, TCPConnector, ClientConnectionError
-from aiohttp_socks import ProxyError as AioProxyError
-from python_socks import ProxyError as PyProxyError
-
 from config import (
     get_connector_for_proxy,
     SELECTED_PROXY_CONTEXT,
     STRICT_PROXY_CONTEXT,
     mark_proxy_dead,
     get_preferred_proxy_for_url,
+    ALL_PROXY_ERRORS,
 )
 import config as _cfg
 
@@ -108,8 +106,8 @@ class BaseExtractor:
                                 return {}
                     
                     return MockResponse(content, response.status, response.headers, str(response.url), response.cookies)
-            except (AioProxyError, PyProxyError, asyncio.TimeoutError, ClientConnectionError, aiohttp.ClientResponseError) as e:
-                is_proxy_err = isinstance(e, (AioProxyError, PyProxyError))
+            except ALL_PROXY_ERRORS + (asyncio.TimeoutError, ClientConnectionError, aiohttp.ClientResponseError) as e:
+                is_proxy_err = isinstance(e, ALL_PROXY_ERRORS)
                 is_timeout = isinstance(e, asyncio.TimeoutError)
                 
                 # Check for 403 or network errors to trigger fallback
@@ -118,9 +116,10 @@ class BaseExtractor:
                 
                 # Reset session
                 async with self._session_lock:
-                    if self.session and not self.session.closed:
-                        await self.session.close()
-                    self.session = None
+                    if session and not session.closed:
+                        await session.close()
+                    if self.session is session:
+                        self.session = None
                 
                 if is_proxy_err and SELECTED_PROXY_CONTEXT.get() and not STRICT_PROXY_CONTEXT.get():
                     proxy_to_mark = SELECTED_PROXY_CONTEXT.get()

@@ -39,12 +39,7 @@ class HLSProxy(
         self.session = None
         self.flex_session = None
 
-        # Cache for proxy sessions (proxy_url -> session)
-        # This reuses connections for the same proxy to improve performance
-        self.proxy_sessions = {}
-        self._proxy_session_atimes = {}  # proxy_url -> last access time
-        self._proxy_session_lock = asyncio.Lock()
-        self.curl_sessions = {}  # Registry for pooled curl_cffi sessions
+        # Proxy sessions are created fresh per request — no caching
 
         # Refreshed CDN tokens for live token substitution after re-extract on 403.
         # stream_key -> (old_base_dir, new_base_dir, new_query_string_with_leading_question_mark)

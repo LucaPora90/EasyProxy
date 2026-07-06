@@ -11,9 +11,7 @@ from urllib.parse import parse_qs, parse_qsl, unquote, urlencode, urljoin, urlpa
 
 import aiohttp
 from aiohttp import ClientSession, ClientTimeout, TCPConnector
-from aiohttp_socks import ProxyError as AioProxyError
-from python_socks import ProxyError as PyProxyError
-from config import WARP_PROXY_URL, get_connector_for_proxy, SELECTED_PROXY_CONTEXT, STRICT_PROXY_CONTEXT, get_solver_proxy_url, get_extractor_proxies, get_ordered_proxies_for_url, should_allow_direct_fallback, mark_proxy_dead, DEAD_PROXIES, _proxy_lock
+from config import WARP_PROXY_URL, get_connector_for_proxy, SELECTED_PROXY_CONTEXT, STRICT_PROXY_CONTEXT, get_solver_proxy_url, get_extractor_proxies, get_ordered_proxies_for_url, should_allow_direct_fallback, mark_proxy_dead, DEAD_PROXIES, _proxy_lock, ALL_PROXY_ERRORS
 import config as _cfg
 
 logger = logging.getLogger(__name__)
@@ -398,17 +396,15 @@ class VixSrcExtractor:
                     logger.info("Request successful for %s at attempt %s", url, attempt + 1)
                     return MockResponse(content, response.status, response.headers, response.url)
 
-            except (
+            except ALL_PROXY_ERRORS + (
                 aiohttp.ClientConnectionError,
                 aiohttp.ServerDisconnectedError,
                 aiohttp.ClientPayloadError,
                 asyncio.TimeoutError,
                 OSError,
                 ConnectionResetError,
-                AioProxyError,
-                PyProxyError,
             ) as e:
-                is_proxy_err = isinstance(e, (AioProxyError, PyProxyError))
+                is_proxy_err = isinstance(e, ALL_PROXY_ERRORS)
                 is_timeout = isinstance(e, asyncio.TimeoutError)
                 err_type = "Proxy" if is_proxy_err else ("Timeout" if is_timeout else "Connection")
                 

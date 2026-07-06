@@ -18,8 +18,7 @@ from services.proxy_shared import (
     parse_clearkey_params,
     MPDToHLSConverter,
     get_ssl_setting_for_url,
-    AioProxyError,
-    PyProxyError,
+    ALL_PROXY_ERRORS,
     ClientConnectionError,
     ProxyDeadRetryError,
     get_proxy_for_url,
@@ -209,14 +208,18 @@ class HLSProxyManifestHandlerMixin:
 
                 # Fetch original manifest if not already captured
                 if not captured_manifest:
-                    mpd_session, _ = await self._get_proxy_session(
+                    mpd_session, mpd_proxy_used = await self._get_proxy_session(
                         stream_url, bypass_warp=bypass_warp, forced_proxy=selected_proxy
                     )
-                    async with mpd_session.get(stream_url, headers=stream_headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                        if resp.status != 200:
-                            return web.Response(text=f"Failed to fetch original MPD: {resp.status}", status=resp.status)
-                        captured_manifest = await resp.text()
-                        stream_url = str(resp.url)
+                    try:
+                        async with mpd_session.get(stream_url, headers=stream_headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                            if resp.status != 200:
+                                return web.Response(text=f"Failed to fetch original MPD: {resp.status}", status=resp.status)
+                            captured_manifest = await resp.text()
+                            stream_url = str(resp.url)
+                    finally:
+                        if mpd_proxy_used:
+                            await mpd_session.close()
 
                 # Encode DASH routing state into base64 token (stateless, no server-side session)
                 from services.proxy_dash import _encode_dash_state
@@ -426,6 +429,7 @@ class HLSProxyManifestHandlerMixin:
                     retries = 2
                     for attempt in range(retries):
                         mpd_proxy = None
+                        mpd_session = None
                         try:
                             # Use helper to get proxy-enabled session
                             mpd_session, mpd_proxy = await self._get_proxy_session(
@@ -461,8 +465,8 @@ class HLSProxyManifestHandlerMixin:
                                 manifest_content = await resp.text()
                                 break # Success
 
-                        except (AioProxyError, PyProxyError, asyncio.TimeoutError, ClientConnectionError, OSError) as e:
-                            is_proxy = isinstance(e, (AioProxyError, PyProxyError))
+                        except ALL_PROXY_ERRORS + (asyncio.TimeoutError, ClientConnectionError, OSError) as e:
+                            is_proxy = isinstance(e, ALL_PROXY_ERRORS)
                             # Consider ClientConnectionError/OSError as proxy errors if a proxy was used
                             if not is_proxy and mpd_proxy and isinstance(e, (ClientConnectionError, OSError)):
                                 is_proxy = True
@@ -476,11 +480,6 @@ class HLSProxyManifestHandlerMixin:
                                     mpd_proxy,
                                     extractor_key=request.query.get("extractor_key"),
                                 )
-                                # Also clear the cached session for this proxy
-                                if mpd_proxy in self.proxy_sessions:
-                                    logger.info(f"   [MPD] Removing broken proxy session from cache: {mpd_proxy}")
-                                    self.proxy_sessions.pop(mpd_proxy, None)
-
                             # Clear sticky context if it's a proxy error
                             if is_proxy and SELECTED_PROXY_CONTEXT.get() and not STRICT_PROXY_CONTEXT.get():
                                 logger.info("   [MPD] Clearing sticky proxy context due to ProxyError")
@@ -496,6 +495,9 @@ class HLSProxyManifestHandlerMixin:
                             if attempt == retries - 1:
                                 return web.Response(text=f"Unexpected error fetching MPD: {e}", status=500)
                             await asyncio.sleep(1)
+                        finally:
+                            if mpd_session and mpd_proxy:
+                                await mpd_session.close()
 
                     if manifest_content is None:
                          return web.Response(text="Failed to fetch MPD manifest after all attempts", status=502)
@@ -578,6 +580,7 @@ class HLSProxyManifestHandlerMixin:
                 request._extraction_retried = True
                 extraction_url = request.query.get("orig_url") or target_url
                 logger.warning("Proxy died during playlist fetch, re-extracting %s (orig URL: %s)", target_url, extraction_url)
+                extractor2 = None
                 try:
                     extractor2 = await self.get_extractor(extraction_url, combined_headers, bypass_warp=bypass_warp)
                     if not extractor2:
@@ -618,6 +621,18 @@ class HLSProxyManifestHandlerMixin:
                 except Exception as retry_err:
                     logger.error("Re-extraction failed: %s", retry_err)
                     return web.Response(text="Re-extraction failed", status=502)
+                finally:
+                    _ek2 = self._extractor_key_for_instance(extractor2) if extractor2 else None
+                    if _ek2 and _ek2 in self.extractors:
+                        _ext = self.extractors.pop(_ek2, None)
+                        self._extractor_atimes.pop(_ek2, None)
+                        for _sr in [r for r in self._extractor_stream_atimes if r[0] == _ek2]:
+                            self._extractor_stream_atimes.pop(_sr, None)
+                        if _ext and hasattr(_ext, "close"):
+                            try:
+                                await _ext.close()
+                            except Exception:
+                                pass
 
         except Exception as e:
             error_msg = str(e).lower()

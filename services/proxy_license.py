@@ -72,30 +72,34 @@ class HLSProxyLicenseHandlerMixin:
 
             # ✅ Use pooled session for better performance
             bypass_warp = request.query.get("warp", "").lower() == "off"
-            session, _ = await self._get_proxy_session(
+            session, proxy_used = await self._get_proxy_session(
                 license_url, bypass_warp=bypass_warp
             )
-            async with session.request(
-                request.method, license_url, headers=headers, data=body,
-                timeout=aiohttp.ClientTimeout(total=30)
-            ) as resp:
-                response_body = await resp.read()
-                logger.info(
-                    f"✅ License response: {resp.status} ({len(response_body)} bytes)"
-                )
+            try:
+                async with session.request(
+                    request.method, license_url, headers=headers, data=body,
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as resp:
+                    response_body = await resp.read()
+                    logger.info(
+                        f"✅ License response: {resp.status} ({len(response_body)} bytes)"
+                    )
 
-                response_headers = {
-                    "Access-Control-Allow-Origin": "*",
-                    "Access-Control-Allow-Headers": "*",
-                    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-                }
-                # Copia alcuni headers utili dalla risposta originale
-                if "Content-Type" in resp.headers:
-                    response_headers["Content-Type"] = resp.headers["Content-Type"]
+                    response_headers = {
+                        "Access-Control-Allow-Origin": "*",
+                        "Access-Control-Allow-Headers": "*",
+                        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+                    }
+                    # Copia alcuni headers utili dalla risposta originale
+                    if "Content-Type" in resp.headers:
+                        response_headers["Content-Type"] = resp.headers["Content-Type"]
 
-                return web.Response(
-                    body=response_body, status=resp.status, headers=response_headers
-                )
+                    return web.Response(
+                        body=response_body, status=resp.status, headers=response_headers
+                    )
+            finally:
+                if proxy_used:
+                    await session.close()
 
         except Exception as e:
             logger.error(f"❌ License proxy error: {str(e)}")

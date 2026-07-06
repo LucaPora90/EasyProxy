@@ -58,6 +58,14 @@ def _load():
                 data = json.load(f)
             merged = dict(DEFAULT_CONFIG)
             merged.update(data)
+            # ponytail: merge default list keys to ensure mandatory exclusions are always present
+            for list_key in ["warp_exclude_domains", "warp_off_extractors", "proxy_off_extractors"]:
+                if list_key in data and list_key in DEFAULT_CONFIG:
+                    combined = list(DEFAULT_CONFIG[list_key])
+                    for item in data[list_key]:
+                        if item not in combined:
+                            combined.append(item)
+                    merged[list_key] = combined
             _config_data = merged
             logger.info("Loaded config from %s", _CONFIG_FILE)
             return

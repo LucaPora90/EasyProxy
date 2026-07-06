@@ -167,7 +167,16 @@ class HLSProxyExtractorHandlerMixin:
                     logger.debug(f"Proxy off for extractor: {base_key}")
                     
                 if base_key in warp_off_list or base_key in proxy_off_list or base_key == "embedst":
-                    # Re-resolve the extractor with updated context
+                    if extractor_key and extractor_key in self.extractors:
+                        _old = self.extractors.pop(extractor_key, None)
+                        self._extractor_atimes.pop(extractor_key, None)
+                        for _sr in [r for r in self._extractor_stream_atimes if r[0] == extractor_key]:
+                            self._extractor_stream_atimes.pop(_sr, None)
+                        if _old and hasattr(_old, "close"):
+                            try:
+                                await _old.close()
+                            except Exception:
+                                pass
                     extractor = await self.get_extractor(
                         url, dict(request.headers), host=host_param, bypass_warp=bypass_warp
                     )

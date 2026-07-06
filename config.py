@@ -9,8 +9,28 @@ import contextvars
 import urllib.request
 from dotenv import load_dotenv
 from config_store import get as _cfg_get, set as _cfg_set, get_all as _cfg_get_all
+from aiohttp_socks import (
+    ProxyError as AioProxyError,
+    ProxyConnectionError as AioProxyConnectionError,
+    ProxyTimeoutError as AioProxyTimeoutError,
+)
+from python_socks import (
+    ProxyError as PyProxyError,
+    ProxyConnectionError as PyProxyConnectionError,
+    ProxyTimeoutError as PyProxyTimeoutError,
+)
 
-APP_VERSION = "2.9.45"
+ALL_PROXY_ERRORS = (
+    AioProxyError,
+    AioProxyConnectionError,
+    AioProxyTimeoutError,
+    PyProxyError,
+    PyProxyConnectionError,
+    PyProxyTimeoutError,
+)
+
+
+APP_VERSION = "2.9.57"
 
 
 def get_extractor_proxies(extractor_name: str) -> list:
@@ -397,10 +417,9 @@ async def get_preferred_proxy_for_url_async(
     return result
 
 
-_PROXY_STATUS_CACHE = {"alive": True, "last_check": 0}
 DEAD_PROXIES = {}  # proxy_url -> expire_time
-_proxy_lock = __import__('threading').Lock()  # sync access to DEAD_PROXIES + _PROXY_STATUS_CACHE
-_proxy_async_lock = asyncio.Lock()  # async access to the same structures
+_proxy_lock = __import__('threading').Lock()  # sync access to DEAD_PROXIES
+_proxy_async_lock = asyncio.Lock()
 
 
 def is_proxy_alive(proxy_url: str, force_check: bool = False) -> bool:
@@ -410,35 +429,16 @@ def is_proxy_alive(proxy_url: str, force_check: bool = False) -> bool:
 
     now = time.time()
     with _proxy_lock:
-        # Check if proxy is globally marked dead
         if proxy_url in DEAD_PROXIES:
             expire_time = DEAD_PROXIES[proxy_url]
             if now < expire_time:
                 return False
-            else:
-                DEAD_PROXIES.pop(proxy_url, None)
+            DEAD_PROXIES.pop(proxy_url, None)
 
-    force_check = force_check or (proxy_url not in _PROXY_STATUS_CACHE.get("_checked", {}))
-    with _proxy_lock:
-        if not force_check and now - _PROXY_STATUS_CACHE.get("last_check_" + proxy_url, 0) < 10:
-            return _PROXY_STATUS_CACHE.get("alive_" + proxy_url, True)
-
-        _PROXY_STATUS_CACHE["last_check_" + proxy_url] = now
-        _PROXY_STATUS_CACHE.setdefault("_checked", {})[proxy_url] = True
-    try:
-        from urllib.parse import urlparse
-        parsed = urlparse(proxy_url)
-        host = parsed.hostname or "127.0.0.1"
-        port = parsed.port or 1080
-        with socket.create_connection((host, port), timeout=5):
-            with _proxy_lock:
-                _PROXY_STATUS_CACHE["alive_" + proxy_url] = True
-            return True
-    except (socket.timeout, ConnectionRefusedError, OSError):
-        with _proxy_lock:
-            _PROXY_STATUS_CACHE["alive_" + proxy_url] = False
+    if not _socket_check(proxy_url, timeout=5):
         logging.warning(f"Proxy {proxy_url} is NOT reachable.")
         return False
+    return True
 
 
 async def is_proxy_alive_async(proxy_url: str, force_check: bool = False) -> bool:
@@ -451,23 +451,32 @@ async def is_proxy_alive_async(proxy_url: str, force_check: bool = False) -> boo
             expire_time = DEAD_PROXIES[proxy_url]
             if now < expire_time:
                 return False
-            else:
-                DEAD_PROXIES.pop(proxy_url, None)
-    async with _proxy_async_lock:
-        if not force_check and now - _PROXY_STATUS_CACHE.get("last_check_async_" + proxy_url, 0) < 10:
-            return _PROXY_STATUS_CACHE.get("alive_async_" + proxy_url, True)
-        _PROXY_STATUS_CACHE["last_check_async_" + proxy_url] = now
+            DEAD_PROXIES.pop(proxy_url, None)
+    loop = asyncio.get_event_loop()
     try:
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, _socket_check, proxy_url, 5)
-        async with _proxy_async_lock:
-            _PROXY_STATUS_CACHE["alive_async_" + proxy_url] = True
-        return True
+        alive = await loop.run_in_executor(None, _socket_check, proxy_url, 5)
+        if not alive:
+            raise OSError("Proxy check returned false")
     except (socket.timeout, ConnectionRefusedError, OSError):
-        async with _proxy_async_lock:
-            _PROXY_STATUS_CACHE["alive_async_" + proxy_url] = False
         logging.warning(f"Proxy {proxy_url} is NOT reachable.")
         return False
+    return True
+
+
+def _socks5_greeting(host: str, port: int, timeout: float = 5) -> bool:
+    """Perform SOCKS5 greeting handshake to verify proxy speaks SOCKS5."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        sock.connect((host, port))
+        # greeting: version=5, 1 auth method, no-auth=0
+        sock.sendall(bytes([0x05, 0x01, 0x00]))
+        resp = sock.recv(2)
+        return len(resp) == 2 and resp[0] == 0x05 and resp[1] == 0x00
+    except OSError:
+        return False
+    finally:
+        sock.close()
 
 
 def _socket_check(proxy_url: str, timeout: float = 5) -> bool:
@@ -476,6 +485,9 @@ def _socket_check(proxy_url: str, timeout: float = 5) -> bool:
     parsed = urlparse(proxy_url)
     host = parsed.hostname or "127.0.0.1"
     port = parsed.port or 1080
+    scheme = parsed.scheme.lower()
+    if scheme in ("socks5", "socks5h"):
+        return _socks5_greeting(host, port, timeout)
     with socket.create_connection((host, port), timeout=timeout):
         return True
 
@@ -487,9 +499,6 @@ def mark_proxy_dead(proxy_url: str, dead_duration: int = 300):
 
     _WARP_PROXY_URL = WARP_PROXY_URL
     if _WARP_PROXY_URL and proxy_url == _WARP_PROXY_URL:
-        if "127.0.0.1" in proxy_url:
-            with _proxy_lock:
-                _PROXY_STATUS_CACHE["last_check"] = 0
         logging.warning("WARP proxy %s failure observed; keeping it managed by socket health checks.", proxy_url)
         return
 
@@ -525,11 +534,6 @@ def mark_proxy_dead(proxy_url: str, dead_duration: int = 300):
     with _proxy_lock:
         DEAD_PROXIES[proxy_url] = now + dead_duration
     logging.warning(f"Proxy {proxy_url} marked as dead for {dead_duration} seconds.")
-
-    if "127.0.0.1" in proxy_url:
-        with _proxy_lock:
-            _PROXY_STATUS_CACHE["alive"] = False
-            _PROXY_STATUS_CACHE["last_check"] = now
 
 
 def clear_proxy_affinity():
