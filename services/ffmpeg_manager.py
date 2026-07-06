@@ -185,37 +185,40 @@ class FFmpegManager:
         log_file = open(os.path.join(stream_dir, "ffmpeg.log"), "w")
         log_file.write(f"Command: {cmd}\n\n")
         log_file.flush()
+        process = None
+        success = False
         try:
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-
-            self.processes[stream_id] = process
-            self.active_streams[stream_id] = url
-            
-            # Wait for the playlist to appear (up to 30 seconds) using asyncio.Event
-            playlist_ready = asyncio.Event()
-
-            async def _wait_for_playlist():
-                for _ in range(300):
-                    if os.path.exists(playlist_path):
-                        playlist_ready.set()
-                        return
-                    if process.returncode is not None:
-                        playlist_ready.set()
-                        return
-                    await asyncio.sleep(0.1)
-                playlist_ready.set()  # timeout
-
-            asyncio.create_task(_wait_for_playlist())
             try:
-                await asyncio.wait_for(playlist_ready.wait(), timeout=30)
-            except asyncio.TimeoutError:
-                playlist_ready.set()
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
 
-            log_file.close()
+                self.processes[stream_id] = process
+                self.active_streams[stream_id] = url
+                
+                # Wait for the playlist to appear (up to 30 seconds) using asyncio.Event
+                playlist_ready = asyncio.Event()
+
+                async def _wait_for_playlist():
+                    for _ in range(300):
+                        if os.path.exists(playlist_path):
+                            playlist_ready.set()
+                            return
+                        if process.returncode is not None:
+                            playlist_ready.set()
+                            return
+                        await asyncio.sleep(0.1)
+                    playlist_ready.set()  # timeout
+
+                asyncio.create_task(_wait_for_playlist())
+                try:
+                    await asyncio.wait_for(playlist_ready.wait(), timeout=30)
+                except asyncio.TimeoutError:
+                    playlist_ready.set()
+            finally:
+                log_file.close()
 
             if process.returncode is not None:
                 try:
@@ -230,17 +233,25 @@ class FFmpegManager:
 
             if not os.path.exists(playlist_path):
                  logger.error("Timeout waiting for playlist generation")
-                 try:
-                     process.terminate()
-                 except Exception:
-                    pass
                  return None
                 
+            success = True
             return f"{stream_id}/index.m3u8"
             
-        except Exception as e:
+        except BaseException as e:
             logger.error(f"Failed to start FFmpeg: {e}")
-            return None
+            raise
+        finally:
+            if not success:
+                if stream_id in self.processes:
+                    self.processes.pop(stream_id, None)
+                self.active_streams.pop(stream_id, None)
+                if process and process.returncode is None:
+                    try:
+                        process.kill()
+                        await process.wait()
+                    except Exception:
+                        pass
 
     async def cleanup_loop(self):
         """Periodically checks and terminates idle streams."""

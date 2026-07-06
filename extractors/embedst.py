@@ -57,6 +57,7 @@ class EmbedStExtractor(BaseExtractor):
         if kwargs.get("background_refresh") or kwargs.get("force_refresh"):
             env["EMBEDST_DEBUG"] = "1"
 
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 node, "--experimental-vm-modules", _RUNNER, url,
@@ -64,17 +65,19 @@ class EmbedStExtractor(BaseExtractor):
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
             )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
         except FileNotFoundError as exc:
             raise ExtractorError(f"EmbedSt: failed to spawn node: {exc}") from exc
-
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
         except asyncio.TimeoutError:
-            try:
-                proc.kill()
-            except Exception:
-                pass
             raise ExtractorError("EmbedSt: node runner timed out")
+        finally:
+            # ponytail: ensure subprocess and its pipe FDs are reaped and closed on timeout/cancel
+            if proc and proc.returncode is None:
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except Exception:
+                    pass
 
         out = stdout.decode("utf-8", errors="ignore").strip() if stdout else ""
         if proc.returncode != 0 or not out:

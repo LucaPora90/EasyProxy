@@ -1309,7 +1309,16 @@ class HLSProxyStreamingMixin:
                 stderr=asyncio.subprocess.PIPE,
             )
 
-            stdout, stderr = await proc.communicate(input=content)
+            try:
+                stdout, stderr = await proc.communicate(input=content)
+            finally:
+                # ponytail: prevent ffmpeg and pipe FD leaks if cancelled or failed
+                if proc.returncode is None:
+                    try:
+                        proc.kill()
+                        await proc.wait()
+                    except Exception:
+                        pass
 
             # Check for data presence regardless of return code (workaround for asyncio race condition on some platforms)
             if len(stdout) > 0:
