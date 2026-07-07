@@ -1,11 +1,17 @@
 from services.proxy_shared import PlaylistBuilder, logger
 import asyncio
 import os
+import contextvars
 from services.proxy_core import HLSProxyCoreMixin
 from services.proxy_dash import HLSProxyDashMixin
 from services.proxy_handlers import HLSProxyHandlersMixin
 from services.proxy_pages import HLSProxyPagesMixin
 from services.proxy_streaming import HLSProxyStreamingMixin
+
+# ContextVars to isolate extractor state per request/asyncio task to avoid concurrent request interference
+_extractors_var = contextvars.ContextVar("extractors", default=None)
+_extractor_atimes_var = contextvars.ContextVar("extractor_atimes", default=None)
+_extractor_stream_atimes_var = contextvars.ContextVar("extractor_stream_atimes", default=None)
 
 
 class HLSProxy(
@@ -16,6 +22,42 @@ class HLSProxy(
     HLSProxyPagesMixin,
 ):
     """Proxy HLS per stream, playlist, DASH e segmenti."""
+
+    @property
+    def extractors(self):
+        val = _extractors_var.get()
+        if val is None:
+            val = {}
+            _extractors_var.set(val)
+        return val
+
+    @extractors.setter
+    def extractors(self, value):
+        _extractors_var.set(value)
+
+    @property
+    def _extractor_atimes(self):
+        val = _extractor_atimes_var.get()
+        if val is None:
+            val = {}
+            _extractor_atimes_var.set(val)
+        return val
+
+    @_extractor_atimes.setter
+    def _extractor_atimes(self, value):
+        _extractor_atimes_var.set(value)
+
+    @property
+    def _extractor_stream_atimes(self):
+        val = _extractor_stream_atimes_var.get()
+        if val is None:
+            val = {}
+            _extractor_stream_atimes_var.set(val)
+        return val
+
+    @_extractor_stream_atimes.setter
+    def _extractor_stream_atimes(self, value):
+        _extractor_stream_atimes_var.set(value)
 
     def __init__(self, ffmpeg_manager=None):
         self.extractors = {}

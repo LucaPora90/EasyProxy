@@ -78,6 +78,15 @@ class HLSProxyPagesMixin:
             await response.write_eof()
             return response
 
+        except (ConnectionResetError, OSError) as e:
+            logger.info(f"Playlist download interrupted (client disconnected): {e}")
+            return web.Response(status=200)
+        except RuntimeError as e:
+            if "closing transport" in str(e).lower() or "closed response" in str(e).lower():
+                logger.info("Playlist download interrupted (closing transport)")
+                return web.Response(status=200)
+            logger.error(f"General error in playlist handler: {str(e)}")
+            return web.Response(text=f"Error: {str(e)}", status=500)
         except Exception as e:
             logger.error(f"General error in playlist handler: {str(e)}")
             return web.Response(text=f"Error: {str(e)}", status=500)
