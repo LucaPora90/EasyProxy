@@ -181,7 +181,9 @@ class HLSProxyStreamingMixin:
             end = total - 1 if i == K - 1 else (start + chunk - 1)
             ranges.append((start, end))
 
-        async def _fetch_part(start, end):
+        data = bytearray(total)
+
+        async def _fetch_part_into(start, end):
             h = {**base_headers, "Range": f"bytes={start}-{end}"}
             s, s_proxy = await self._get_proxy_session(
                 segment_url, bypass_warp=bypass_warp, forced_proxy=forced_proxy
@@ -194,31 +196,30 @@ class HLSProxyStreamingMixin:
                     timeout=ClientTimeout(total=60, connect=10, sock_connect=10, sock_read=60),
                 ) as r:
                     r.raise_for_status()
-                    return await r.read()
+                    chunk = await r.read()
+                    data[start:start + len(chunk)] = chunk
             finally:
                 if s_proxy:
                     await s.close()
 
         try:
-            parts = await asyncio.gather(*[_fetch_part(s, e) for s, e in ranges])
+            await asyncio.gather(*[_fetch_part_into(s, e) for s, e in ranges])
         except Exception as e:
             raise _ParallelFallback(f"parallel fetch error: {e}")
 
-        data = b"".join(parts)
         if len(data) != total:
             raise _ParallelFallback(f"size mismatch {len(data)} != {total}")
 
         # 3) Stream the assembled segment to the client.
         response_headers = {}
         set_response_header(response_headers, "Content-Type", "video/mp2t")
-        set_response_header(response_headers, "Content-Length", str(total))
         set_response_header(response_headers, "Content-Disposition", f'attachment; filename="{segment_name}"')
         set_response_header(response_headers, "Access-Control-Allow-Origin", "*")
         set_response_header(response_headers, "Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
         set_response_header(response_headers, "Access-Control-Allow-Headers", "Range, Content-Type")
         response = web.StreamResponse(status=200, headers=response_headers)
         await response.prepare(request)
-        await response.write(data)
+        await response.write(bytes(data))
         await response.write_eof()
         logger.info(f"⚡ Parallel fetch {segment_name}: {total} bytes via {K} ranges")
         return response
@@ -580,23 +581,21 @@ class HLSProxyStreamingMixin:
 
             if use_curl_cffi:
                 logger.info(f"🚀 [curl_cffi] Using browser impersonation for: {stream_url}")
+                curl_s = None
                 try:
                     curl_s = CurlAsyncSession(impersonate="chrome124")
                     curl_headers = prepare_curl_headers(stream_url, headers)
 
 
                     curl_proxies = None
-                    # ✅ DEBUG: Log final headers for comparison
                     logger.debug(f"🚀 [curl_cffi] Sending headers for {stream_url[:50]}: {curl_headers}")
 
                     curl_proxies = None
                     if session_proxy:
                         curl_proxies = {"http": session_proxy, "https": session_proxy}
 
-                    # ✅ CRITICAL FIX: Ensure commas are NOT encoded.
                     final_curl_url = final_curl_request_url(stream_url)
 
-                    # se curl_cffi diretto dovesse dare ancora 403.
                     curl_resp = await curl_s.get(
                         final_curl_url,
                         headers=curl_headers,
@@ -612,35 +611,43 @@ class HLSProxyStreamingMixin:
                             async for chunk in self.c_resp.aiter_content():
                                 yield chunk
                         async def read(self, n=-1):
-                            # curl_cffi's acontent() returns the full body and ignores size.
-                            # Match aiohttp's content.read(n) signature so error-path callers
-                            # (e.g. resp.content.read(4096)) don't raise TypeError.
                             return await self.c_resp.acontent()
 
                     class MockResp:
-                        def __init__(self, c_resp):
+                        def __init__(self, c_resp, curl_session=None):
                             self.status = c_resp.status_code
                             self.headers = c_resp.headers
                             self.url = yarl.URL(c_resp.url)
                             self.content = MockContent(c_resp)
+                            self._curl_session = curl_session
                         async def read(self): return await self.content.read()
                         async def text(self, errors='replace'):
                             content = await self.read()
                             return content.decode('utf-8', errors=errors)
-                        async def close(self): pass
+                        async def close(self):
+                            if self._curl_session:
+                                await self._curl_session.close()
+                                self._curl_session = None
                         async def __aenter__(self): return self
-                        async def __aexit__(self, exc_type, exc_val, exc_tb): pass
+                        async def __aexit__(self, exc_type, exc_val, exc_tb):
+                            await self.close()
 
                     if curl_resp.status_code in [502, 503, 504]:
-                        # curl_only: 503 = live offline. Non cascare MAI ad aiohttp.
                         logger.warning(f"⚠️ [curl_cffi] {curl_resp.status_code} for {final_curl_url[:50]}: live offline o upstream errato")
                         goto_manifest_processing = False
                     else:
-                        resp_ctx = MockResp(curl_resp)
+                        resp_ctx = MockResp(curl_resp, curl_s)
+                        curl_s = None
                         goto_manifest_processing = True
                 except Exception as e:
                     logger.error(f"❌ [curl_cffi] Error: {e}")
                     goto_manifest_processing = False
+                finally:
+                    if curl_s:
+                        try:
+                            await curl_s.close()
+                        except Exception:
+                            pass
             else:
                 goto_manifest_processing = False
 
@@ -1296,7 +1303,7 @@ class HLSProxyStreamingMixin:
                 "pipe:0",
                 "-c",
                 "copy",
-                "-copyts",  # Preserve timestamps to prevent freezing/gap issues
+                "-copyts",
                 "-f",
                 "mpegts",
                 "pipe:1",
@@ -1310,17 +1317,30 @@ class HLSProxyStreamingMixin:
             )
 
             try:
-                stdout, stderr = await proc.communicate(input=content)
-            finally:
-                # ponytail: prevent ffmpeg and pipe FD leaks if cancelled or failed
+                proc.stdin.write(content)
+                await proc.stdin.drain()
+                proc.stdin.close()
+
+                chunks = []
+                while True:
+                    chunk = await proc.stdout.read(65536)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+
+                stderr = await proc.stderr.read()
+                stdout = b"".join(chunks)
+
+                await proc.wait()
+            except Exception:
                 if proc.returncode is None:
                     try:
                         proc.kill()
                         await proc.wait()
                     except Exception:
                         pass
+                raise
 
-            # Check for data presence regardless of return code (workaround for asyncio race condition on some platforms)
             if len(stdout) > 0:
                 if proc.returncode != 0:
                     logger.debug(
@@ -1428,7 +1448,7 @@ class HLSProxyStreamingMixin:
                     fetch_init(), fetch_segment()
                 )
             finally:
-                if segment_session and not segment_session.closed:
+                if segment_session and segment_proxy and not segment_session.closed:
                     await segment_session.close()
 
             if init_content is None and init_url:

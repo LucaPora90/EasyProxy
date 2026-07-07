@@ -207,9 +207,7 @@ class HLSProxyDashMixin:
                 session, proxy_used = await self._get_proxy_session(
                     key_url, bypass_warp=bypass_warp, forced_proxy=forced_proxy
                 )
-                if proxy_used:
-                    session_need_close = True
-                # ✅ LOG CRITICO: Deve essere info per apparire nei log standard
+                session_need_close = proxy_used is not None
                 if proxy_used:
                     logger.info(f"🔐 [Key Proxy] Routing through: {proxy_used}")
                 elif (

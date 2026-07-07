@@ -63,11 +63,14 @@ class FFmpegManager:
                     finally:
                         playlist_ready.set()
 
-                asyncio.create_task(_wait_for_playlist())
+                wait_task = asyncio.create_task(_wait_for_playlist())
                 try:
                     await asyncio.wait_for(playlist_ready.wait(), timeout=10)
                 except asyncio.TimeoutError:
                     playlist_ready.set()
+                finally:
+                    if not wait_task.done():
+                        wait_task.cancel()
 
                 if os.path.exists(playlist_path):
                     return f"{stream_id}/index.m3u8"
@@ -183,10 +186,13 @@ class FFmpegManager:
         logger.debug(f"FFmpeg command for {stream_id}: {cmd}")
         
         log_file = open(os.path.join(stream_dir, "ffmpeg.log"), "w")
-        log_file.write(f"Command: {cmd}\n\n")
-        log_file.flush()
         process = None
         success = False
+        try:
+            log_file.write(f"Command: {cmd}\n\n")
+            log_file.flush()
+        except Exception:
+            pass
         try:
             try:
                 process = await asyncio.create_subprocess_exec(
@@ -198,7 +204,6 @@ class FFmpegManager:
                 self.processes[stream_id] = process
                 self.active_streams[stream_id] = url
                 
-                # Wait for the playlist to appear (up to 30 seconds) using asyncio.Event
                 playlist_ready = asyncio.Event()
 
                 async def _wait_for_playlist():
@@ -212,11 +217,14 @@ class FFmpegManager:
                         await asyncio.sleep(0.1)
                     playlist_ready.set()  # timeout
 
-                asyncio.create_task(_wait_for_playlist())
+                wait_task = asyncio.create_task(_wait_for_playlist())
                 try:
                     await asyncio.wait_for(playlist_ready.wait(), timeout=30)
                 except asyncio.TimeoutError:
                     playlist_ready.set()
+                finally:
+                    if not wait_task.done():
+                        wait_task.cancel()
             finally:
                 log_file.close()
 

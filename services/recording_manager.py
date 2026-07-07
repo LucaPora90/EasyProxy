@@ -52,6 +52,7 @@ class RecordingManager:
         self.processes: Dict[str, asyncio.subprocess.Process] = {}
         self.start_times: Dict[str, float] = {}
         self._session: Optional[aiohttp.ClientSession] = None
+        self._monitor_tasks: Dict[str, asyncio.Task] = {}
 
     @property
     def session(self) -> aiohttp.ClientSession:
@@ -65,6 +66,7 @@ class RecordingManager:
     async def close(self):
         if self._session and not self._session.closed:
             await self._session.close()
+        self._session = None
 
     # =========================================================================
     # Stream Type Detection
@@ -386,7 +388,8 @@ class RecordingManager:
                 pid=process.pid
             )
 
-            asyncio.create_task(self._monitor_recording(recording_id, process))
+            task = asyncio.create_task(self._monitor_recording(recording_id, process))
+            self._monitor_tasks[recording_id] = task
 
             return self.db.get_recording(recording_id)
 
@@ -409,7 +412,6 @@ class RecordingManager:
         if recording_id in self.processes:
             process = self.processes[recording_id]
             try:
-                # Send 'q' to FFmpeg for graceful shutdown
                 if process.stdin:
                     process.stdin.write(b'q')
                     await process.stdin.drain()
@@ -434,6 +436,9 @@ class RecordingManager:
             finally:
                 self.processes.pop(recording_id, None)
                 self.start_times.pop(recording_id, None)
+                task = self._monitor_tasks.pop(recording_id, None)
+                if task and not task.done():
+                    task.cancel()
         else:
             # Process in different worker - use PID from database
             pid = recording.get('pid')
@@ -503,6 +508,7 @@ class RecordingManager:
         finally:
             self.processes.pop(recording_id, None)
             self.start_times.pop(recording_id, None)
+            self._monitor_tasks.pop(recording_id, None)
 
     async def delete_recording(self, recording_id: str) -> bool:
         """Delete a recording and its file."""
@@ -586,6 +592,11 @@ class RecordingManager:
         logger.info("Shutting down RecordingManager...")
         for recording_id in list(self.processes.keys()):
             await self.stop_recording(recording_id)
+        for task in list(self._monitor_tasks.values()):
+            if not task.done():
+                task.cancel()
+        if self._monitor_tasks:
+            await asyncio.wait(list(self._monitor_tasks.values()), timeout=5)
         await self.close()
 
     # =========================================================================

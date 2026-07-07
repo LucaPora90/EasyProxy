@@ -6,7 +6,6 @@ HLS playlist. CDN signed URLs on the .ts segments have a ~5 min TTL. Always
 re-fetches the embed page on each extract() call to get fresh tokens.
 """
 
-import asyncio
 import base64
 import logging
 import re
@@ -237,20 +236,12 @@ class VidXgoExtractor:
                     if media_url not in variant_urls:
                         variant_urls.append(media_url)
 
-        async def _grab(v_url: str) -> tuple[str, str | None]:
+        for v_url in variant_urls:
             try:
-                txt = await self._fetch(v_url, playback_headers)
-                return v_url, txt
+                v_text = await self._fetch(v_url, playback_headers)
+                captured_map[v_url] = v_text
             except Exception as e:
                 logger.warning(f"vidxgo: variant fetch failed {v_url[:80]}...: {e}")
-                return v_url, None
-
-        if variant_urls:
-            results = await asyncio.gather(*[_grab(v) for v in variant_urls])
-            for v_url, v_text in results:
-                if not v_text:
-                    continue
-                captured_map[v_url] = v_text
 
         captured_map[m3u8_url] = master_text
 

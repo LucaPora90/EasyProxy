@@ -54,7 +54,14 @@ class UqloadExtractor(BaseExtractor):
         logger.debug(f"[Uqload] Page length: {len(text)} chars, final URL: {final_url}")
 
         # Check for common error pages
-        if "file was deleted" in text.lower() or "file not found" in text.lower() or "not found" in text.lower():
+        text_lower = text.lower()
+        if (
+            "file was deleted" in text_lower
+            or "file not found" in text_lower
+            or "not found" in text_lower
+            or "no longer available" in text_lower
+            or "has been deleted" in text_lower
+        ):
             raise ExtractorError(f"Uqload video removed/not found: {url}")
 
         video_url = None

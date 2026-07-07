@@ -372,6 +372,10 @@ class HLSProxyExtractorHandlerMixin:
                     "bad gateway",
                     "timeout",
                     "temporarily unavailable",
+                    "removed",
+                    "deleted",
+                    "expired",
+                    "no longer available",
                 ]
             ) or isinstance(e, (asyncio.TimeoutError, asyncio.CancelledError))
 
