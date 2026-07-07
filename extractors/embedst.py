@@ -81,8 +81,19 @@ class EmbedStExtractor(BaseExtractor):
 
         out = stdout.decode("utf-8", errors="ignore").strip() if stdout else ""
         if proc.returncode != 0 or not out:
-            err = stderr.decode("utf-8", errors="ignore")[-800:] if stderr else ""
-            raise ExtractorError(f"EmbedSt: runner failed (rc={proc.returncode}): {err}")
+            err_msg = ""
+            if out:
+                try:
+                    data = json.loads(out)
+                    err_msg = data.get("error", "")
+                except Exception:
+                    pass
+            if not err_msg:
+                err_msg = stderr.decode("utf-8", errors="ignore")[-800:] if stderr else f"Exit code {proc.returncode}"
+            
+            if "no m3u8 captured" in err_msg.lower():
+                raise ExtractorError("EmbedSt: video not found (no m3u8 captured)")
+            raise ExtractorError(f"EmbedSt: runner failed: {err_msg}")
 
         try:
             data = json.loads(out)
@@ -91,7 +102,7 @@ class EmbedStExtractor(BaseExtractor):
 
         m3u8 = data.get("m3u8")
         if not m3u8:
-            raise ExtractorError(f"EmbedSt: no m3u8 captured ({data.get('error', 'unknown')})")
+            raise ExtractorError(f"EmbedSt: video not found (no m3u8 captured)")
 
         headers = data.get("headers") or {}
         # The stream CDN (strmd.st) needs exactly these headers (UA/Referer/Origin).
