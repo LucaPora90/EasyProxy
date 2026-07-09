@@ -668,7 +668,7 @@ class VixSrcExtractor:
 
     async def extract(self, url: str, **kwargs) -> Dict[str, Any]:
         """Estrae URL VixSrc."""
-        url = url.replace("vixsrc.to", "calpezz8.space").replace("vixcloud.co", "calpezz8.space")
+        url = url.replace("vixsrc.to", "unitv.mom").replace("vixcloud.co", "unitv.mom")
         try:
             forced_proxy = kwargs.get("proxy")
             if forced_proxy:
@@ -821,9 +821,9 @@ class VixSrcExtractor:
             if not final_url:
                 raise ExtractorError("No playlist data found in response")
 
-            # Rewrite vixcloud.co/vixsrc.to → calpezz8.space in the final URL too
-            final_url = final_url.replace("vixcloud.co", "calpezz8.space").replace("vixsrc.to", "calpezz8.space")
-            stream_url = url.replace("vixcloud.co", "calpezz8.space").replace("vixsrc.to", "calpezz8.space")
+            # Rewrite vixcloud.co/vixsrc.to → unitv.mom in the final URL too
+            final_url = final_url.replace("vixcloud.co", "unitv.mom").replace("vixsrc.to", "unitv.mom")
+            stream_url = url.replace("vixcloud.co", "unitv.mom").replace("vixsrc.to", "unitv.mom")
 
             stream_headers = self._fresh_headers(Referer=stream_url)
 
