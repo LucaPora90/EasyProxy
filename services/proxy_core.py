@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import hmac
 import logging
 import os
@@ -122,10 +123,32 @@ class HLSProxyCoreMixin:
                         await self.flex_session.close()
                         logger.info("[NET] Closed idle flex session (idle %.0fs)", now - _session_atime)
                     self.flex_session = None
+
+                # 4. Compact Windows heap to release freed pages
+                await self._compact_heap()
+
             except Exception as e:
                 logger.error("Cleanup stale sessions error: %s", e)
                 await asyncio.sleep(10)
 
+    async def _compact_heap(self):
+        """Release freed heap pages back to the OS (Linux: malloc_trim, Windows: HeapCompact)."""
+        try:
+            gc.collect()
+            import ctypes
+            import platform
+            if platform.system() == "Windows":
+                ctypes.windll.kernel32.HeapCompact(
+                    ctypes.windll.kernel32.GetProcessHeap(), 0
+                )
+            else:
+                try:
+                    libc = ctypes.CDLL("libc.so.6")
+                    libc.malloc_trim(0)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
 
     async def _warp_keepalive(self):

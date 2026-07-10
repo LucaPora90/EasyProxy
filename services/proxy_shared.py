@@ -29,12 +29,19 @@ from aiohttp import (
 from aiohttp_socks import ProxyConnector, ProxyError as AioProxyError
 from python_socks import ProxyError as PyProxyError
 
-try:
-    from curl_cffi.requests import AsyncSession as CurlAsyncSession
-    HAS_CURL_CFFI = True
-except ImportError:
-    HAS_CURL_CFFI = False
-    CurlAsyncSession = None
+import importlib.util
+
+# Lazy check — find_spec does NOT load the module, so curl_cffi's Chromium DLLs
+# never get pulled in at import time. Actual load happens only at first call site.
+HAS_CURL_CFFI = importlib.util.find_spec('curl_cffi') is not None
+CurlAsyncSession = None
+
+def get_curl_async_session():
+    """Lazy import: returns CurlAsyncSession class or None."""
+    if not HAS_CURL_CFFI:
+        return None
+    from curl_cffi.requests import AsyncSession
+    return AsyncSession
 
 import config as _config
 from config import (

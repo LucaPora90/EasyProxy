@@ -17,7 +17,7 @@ from services.proxy_shared import (
     get_ssl_setting_for_url,
     get_proxy_for_url,
     HAS_CURL_CFFI,
-    CurlAsyncSession,
+    get_curl_async_session,
     ClientTimeout,
     ClientConnectionError,
     ServerDisconnectedError,
@@ -584,7 +584,7 @@ class HLSProxyStreamingMixin:
                 logger.info(f"🚀 [curl_cffi] Using browser impersonation for: {stream_url}")
                 curl_s = None
                 try:
-                    curl_s = CurlAsyncSession(impersonate="chrome124")
+                    curl_s = get_curl_async_session()(impersonate="chrome124")
                     curl_headers = prepare_curl_headers(stream_url, headers)
 
 

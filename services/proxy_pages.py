@@ -271,6 +271,11 @@ class HLSProxyPagesMixin:
                 "flex_session_active": bool(getattr(self, 'flex_session', None) and not self.flex_session.closed),
                 "session_idle_seconds": round(time.time() - getattr(self, '_session_atime', 0), 1) if getattr(self, '_session_atime', 0) else None,
                 "connection_count": sum(len(v) for v in self.session._connector._conns.values()) if self.session and not self.session.closed and hasattr(self.session, '_connector') and hasattr(self.session._connector, '_conns') else 0,
+                "proxy_connection_count": sum(
+                    sum(len(v) for v in s._connector._conns.values())
+                    for s in getattr(self, '_proxy_sessions', {}).values()
+                    if s and not s.closed and hasattr(s, '_connector') and hasattr(s._connector, '_conns')
+                ),
             },
             "memory": stats.get("proxy_ram", {}),
             "modules": {
