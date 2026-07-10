@@ -71,28 +71,26 @@ class HLSProxyDashMixin:
             is_init = "init" in path.lower() or "header" in path.lower()
 
             # Fetch segment
-            async with self.session.get(segment_url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+            _session = await self._get_session(url=segment_url)
+            async with _session.get(segment_url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
                 if resp.status not in [200, 206]:
                     return web.Response(status=resp.status)
 
-                content = await resp.read()
-
-                # For media segments with ClearKey, re-fetch init segment live (no cache)
+                # ClearKey path: must read full segment for decryption
                 if not is_init and kid and key and decrypt_segment:
-                    # Try to locate init segment URL by convention
+                    content = await resp.read()
                     init_url = None
                     dir_path = base_url.rstrip("/")
-                    # Common DASH init naming
                     for candidate in ("init.m4s", "init.mp4", "header.m4s", "header.mp4"):
                         candidate_url = urljoin(base_url, candidate)
-                        # Only try if it plausibly exists (same dir)
                         if candidate_url.startswith(dir_path):
                             init_url = candidate_url
                             break
 
                     if init_url:
                         try:
-                            async with self.session.get(init_url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as init_resp:
+                            _init_session = await self._get_session(url=init_url)
+                            async with _init_session.get(init_url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as init_resp:
                                 if init_resp.status in [200, 206]:
                                     init_segment = await init_resp.read()
                                     try:
@@ -103,7 +101,18 @@ class HLSProxyDashMixin:
                         except Exception as e:
                             logger.debug(f"DASH init re-fetch failed for {path}: {e}")
 
-                return web.Response(body=content, content_type=resp.content_type)
+                    return web.Response(body=content, content_type=resp.content_type)
+
+                # No ClearKey: stream chunk-by-chunk without buffering
+                response = web.StreamResponse(status=resp.status, headers={
+                    "Content-Type": resp.content_type or "video/mp4",
+                    "Access-Control-Allow-Origin": "*",
+                })
+                await response.prepare(request)
+                async for chunk in resp.content.iter_any():
+                    await response.write(chunk)
+                await response.write_eof()
+                return response
 
         except Exception as e:
             logger.error(f"Error proxying DASH segment {path}: {e}")
@@ -329,7 +338,8 @@ class HLSProxyDashMixin:
                             return web.Response(text="Proxy failed and strict mode prevents direct fallback", status=502)
                         logger.warning("🔐 Trying direct connection as final fallback for AES key...")
                         try:
-                            async with self.session.get(key_url, headers=headers, ssl=not disable_ssl, allow_redirects=False, timeout=10) as direct_resp:
+                            _key_session = await self._get_session(url=key_url)
+                            async with _key_session.get(key_url, headers=headers, ssl=not disable_ssl, allow_redirects=False, timeout=10) as direct_resp:
                                 if direct_resp.status in (200, 206):
                                     key_data = await direct_resp.read()
                                     return web.Response(

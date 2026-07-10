@@ -49,7 +49,7 @@ class VavooExtractor:
                 connector = TCPConnector(
                     limit=0,
                     limit_per_host=0,
-                    keepalive_timeout=60,
+                    keepalive_timeout=15,
                     enable_cleanup_closed=True,
                     force_close=False,
                     use_dns_cache=True,

@@ -17,6 +17,7 @@ from services.proxy_shared import (
 )
 from extractors.registry import *
 import config_store
+import config as _config
 from config import reload_config, clear_proxy_affinity, get_system_stats
 
 class HLSProxyPagesMixin:
@@ -265,6 +266,11 @@ class HLSProxyPagesMixin:
                 "active_stream_sessions": len(_shared.ACTIVE_STREAM_SESSIONS),
                 "bypassed_warp_domains": len(_shared.BYPASSED_WARP_DOMAINS),
                 "template_cache": len(getattr(self, '_template_cache', {})),
+                "dead_proxies": len(getattr(_config, 'DEAD_PROXIES', {})),
+                "shared_session_active": bool(self.session and not self.session.closed),
+                "flex_session_active": bool(getattr(self, 'flex_session', None) and not self.flex_session.closed),
+                "session_idle_seconds": round(time.time() - getattr(self, '_session_atime', 0), 1) if getattr(self, '_session_atime', 0) else None,
+                "connection_count": sum(len(v) for v in self.session._connector._conns.values()) if self.session and not self.session.closed and hasattr(self.session, '_connector') and hasattr(self.session._connector, '_conns') else 0,
             },
             "memory": stats.get("proxy_ram", {}),
             "modules": {

@@ -53,7 +53,7 @@ class BaseExtractor:
                     connector = TCPConnector(
                         limit=0, 
                         limit_per_host=0, 
-                        keepalive_timeout=60, 
+                        keepalive_timeout=15, 
                         enable_cleanup_closed=True, 
                         use_dns_cache=True
                     )
@@ -137,3 +137,4 @@ class BaseExtractor:
     async def close(self):
         if self.session and not self.session.closed:
             await self.session.close()
+

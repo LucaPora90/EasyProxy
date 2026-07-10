@@ -219,7 +219,8 @@ class HLSProxyStreamingMixin:
         set_response_header(response_headers, "Access-Control-Allow-Headers", "Range, Content-Type")
         response = web.StreamResponse(status=200, headers=response_headers)
         await response.prepare(request)
-        await response.write(bytes(data))
+        for i in range(0, len(data), 65536):
+            await response.write(bytes(data[i:i+65536]))
         await response.write_eof()
         logger.info(f"⚡ Parallel fetch {segment_name}: {total} bytes via {K} ranges")
         return response

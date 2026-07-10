@@ -110,6 +110,18 @@ class HLSProxyCoreMixin:
                         if p_sess and not p_sess.closed:
                             await p_sess.close()
                             logger.info(f"[NET] Closed idle proxy session: {p}")
+
+                # 3. Close shared session if idle >30s
+                _session_atime = getattr(self, "_session_atime", 0)
+                if _session_atime and now - _session_atime > 30:
+                    if self.session and not self.session.closed:
+                        await self.session.close()
+                        logger.info("[NET] Closed idle shared session (idle %.0fs)", now - _session_atime)
+                    self.session = None
+                    if self.flex_session and not self.flex_session.closed:
+                        await self.flex_session.close()
+                        logger.info("[NET] Closed idle flex session (idle %.0fs)", now - _session_atime)
+                    self.flex_session = None
             except Exception as e:
                 logger.error("Cleanup stale sessions error: %s", e)
                 await asyncio.sleep(10)
@@ -454,7 +466,7 @@ class HLSProxyCoreMixin:
             connector_kwargs = {
                 "limit": 0,
                 "limit_per_host": 0,
-                "keepalive_timeout": 60,
+                "keepalive_timeout": 15,
                 "enable_cleanup_closed": True,
                 "use_dns_cache": True,
             }
@@ -467,6 +479,7 @@ class HLSProxyCoreMixin:
                 connector=connector,
             )
             setattr(self, target_attr, session)
+        self._session_atime = time.time()
         return session
 
     async def _check_dynamic_warp_bypass(self, url: str):
@@ -570,7 +583,7 @@ class HLSProxyCoreMixin:
                         proxy,
                         limit=0,
                         limit_per_host=0,
-                        keepalive_timeout=60,
+                        keepalive_timeout=15,
                         family=socket.AF_INET,
                     )
                     timeout = ClientTimeout(total=None, connect=30, sock_connect=30, sock_read=30)
@@ -611,7 +624,7 @@ class HLSProxyCoreMixin:
                 retry_proxy,
                 limit=0,
                 limit_per_host=0,
-                keepalive_timeout=60,
+                keepalive_timeout=15,
                 family=socket.AF_INET,
                 rdns=True,
             )
