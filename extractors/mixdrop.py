@@ -90,17 +90,17 @@ class MixdropExtractor:
         proxy = await get_preferred_proxy_for_url(normalized_url, "mixdrop", self.proxies, self.bypass_warp_active)
         try:
             ua, cookies = self.base_headers.get("User-Agent"), {}
-            if "/f/" in url: url = url.replace("/f/", "/e/")
-            if "/mix/" in url: url = url.replace("/mix/", "/e/")
-            
-            mirrors = [
-                url,
-                url.replace("mixdrop.co", "mixdrop.vip"),
-                url.replace("mixdrop.co", "m1xdrop.bz"),
-                url.replace("mixdrop.co", "mixdrop.ch"),
-                url.replace("mixdrop.co", "mixdrop.ps"),
-                url.replace("mixdrop.co", "mixdrop.ag"),
+            parsed = urlparse(url)
+            path = parsed.path.rstrip("/")
+            for old in ("/f/", "/mix/", "/emb/"):
+                if old in path: path = path.replace(old, "/e/"); break
+            qs = f"?{parsed.query}" if parsed.query else ""
+
+            mixdrop_domains = [
+                "mixdrop.co", "mixdrop.vip", "m1xdrop.bz", "m1xdrop.net",
+                "mixdrop.ch", "mixdrop.ps", "mixdrop.ag",
             ]
+            mirrors = [f"{parsed.scheme}://{d}{path}{qs}" for d in mixdrop_domains]
             
             def _build_cs_proxies(pref_p):
                 if not pref_p:

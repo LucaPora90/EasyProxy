@@ -22,7 +22,7 @@ def _is_sportsonline_candidate(value: str) -> bool:
 
 def _resolve_sportsonline_proxy(url: str, bypass_warp: bool = False) -> str | None:
     # Priority requested: real URL first, then legacy aliases.
-    ordered_candidates = [url, "sportzsonline", "sportzonline", "sportsonline"]
+    ordered_candidates = [url, "sportzsonline", "sportzonline", "sportsonline", "sportsonlline", "sportsonlinne"]
     for candidate in ordered_candidates:
         if any(
             route.get("url") and route["url"] in candidate for route in _config.TRANSPORT_ROUTES

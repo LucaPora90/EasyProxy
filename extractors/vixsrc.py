@@ -769,7 +769,7 @@ class VixSrcExtractor:
                         except Exception as robust_err:
                             raise ExtractorError(f"VixSrc URL fetch failed: {robust_err}") from robust_err
             else:
-                raise ExtractorError("Unsupported VixSrc URL type")
+                raise ExtractorError(f"Unsupported VixSrc URL type: {parsed_url.path}")
 
             if response.status_code != 200:
                 raise ExtractorError("URL component extraction failed, invalid request")

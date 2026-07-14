@@ -83,7 +83,7 @@ class RecordingManager:
             return StreamType.VAVOO
         elif 'popcdn.day' in url_lower or 'freeshot' in url_lower:
             return StreamType.FREESHOT
-        elif any(d in url_lower for d in ['sportsonline', 'sportzonline']):
+        elif any(d in url_lower for d in ['sportsonline', 'sportzonline', 'sportsonlline', 'sportsonlinne']):
             return StreamType.SPORTSONLINE
 
         return StreamType.GENERIC

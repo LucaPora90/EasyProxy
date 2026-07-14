@@ -613,8 +613,8 @@ class HLSProxyManifestHandlerMixin:
                 logger.warning(f"📡 {extractor_name}: Service temporarily unavailable - {str(e)}")
                 return web.Response(text=f"Service temporarily unavailable: {str(e)}", status=503)
 
-            logger.critical(f"❌ Critical error with {extractor_name}: {e}")
-            logger.exception(f"Error in proxy request: {str(e)}")
+            logger.critical(f"❌ Critical error with {extractor_name} [{target_url}]: {e}")
+            logger.exception(f"Error in proxy request [{target_url}]: {str(e)}")
             return web.Response(text=f"Proxy error: {str(e)}", status=500)
         finally:
             BYPASS_WARP_CONTEXT.reset(token)

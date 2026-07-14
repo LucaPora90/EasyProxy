@@ -28,7 +28,8 @@ class HLSProxyExtractorHandlerMixin:
         logger.debug(f"📥 Extractor Request: {request.url}")
 
         if not check_password(request):
-            logger.warning("⛔ Unauthorized extractor request")
+            req_url = request.query.get("url") or request.query.get("d", "?")
+            logger.warning(f"⛔ Unauthorized extractor request [{req_url}]")
             return web.Response(status=401, text="Unauthorized: Invalid API Password")
 
         bypass_warp = request.query.get("warp", "").lower() == "off"
@@ -377,16 +378,16 @@ class HLSProxyExtractorHandlerMixin:
                     "expired",
                     "no longer available",
                 ]
-            ) or isinstance(e, (asyncio.TimeoutError, asyncio.CancelledError))
+            ) or isinstance(e, (asyncio.TimeoutError, asyncio.CancelledError)) or type(e).__name__ == "ExtractorError"  # ponytail: expected extractor failures shouldn't print a traceback
 
             error_desc = str(e) or type(e).__name__
             if isinstance(e, asyncio.CancelledError):
                 logger.info("Extractor request cancelled (client disconnected)")
                 raise
             if is_expected_error:
-                logger.warning(f"⚠️ Extractor request failed (expected error): {error_desc}")
+                logger.warning(f"⚠️ Extractor request failed (expected error) [{url}]: {error_desc}")
             else:
-                logger.error(f"❌ Error in extractor request: {error_desc}")
+                logger.error(f"❌ Error in extractor request [{url}]: {error_desc}")
                 import traceback
                 traceback.print_exc()
 
