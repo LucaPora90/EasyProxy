@@ -4,7 +4,7 @@ import re
 import time
 from urllib.parse import urlparse, urljoin
 
-import cloudscraper
+from curl_cffi.requests import AsyncSession
 from bs4 import BeautifulSoup
 
 from config import (
@@ -42,12 +42,6 @@ class MixdropExtractor:
         self.cookie_cache = CookieCache("universal")
         self.mediaflow_endpoint = "proxy_stream_endpoint"
         self.bypass_warp_active = bypass_warp
-        self._scraper = None
-
-    def _get_scraper(self):
-        if self._scraper is None:
-            self._scraper = cloudscraper.create_scraper(delay=5)
-        return self._scraper
 
     def _step_headers(self, ua: str, referer: str | None = None) -> dict:
         headers = {"User-Agent": ua}
@@ -116,17 +110,17 @@ class MixdropExtractor:
                     
                     async def fetch_page():
                         try:
-                            scraper = self._get_scraper()
-                            resp = await asyncio.to_thread(
-                                scraper.get, current_url,
-                                headers=m_headers,
-                                timeout=30,
-                                proxies=cs_proxies,
-                            )
-                            if resp.status_code == 200:
-                                t = resp.text
-                                if not any(m in t.lower() for m in ["cf-challenge", "robot", "checking your browser"]):
-                                    return t, str(resp.url), ua, dict(resp.cookies)
+                            async with AsyncSession(impersonate="chrome120") as s:
+                                resp = await s.get(
+                                    current_url,
+                                    headers=m_headers,
+                                    timeout=30,
+                                    proxies=cs_proxies,
+                                )
+                                if resp.status_code == 200:
+                                    t = resp.text
+                                    if not any(m in t.lower() for m in ["cf-challenge", "robot", "checking your browser"]):
+                                        return t, str(resp.url), ua, dict(resp.cookies)
                         except Exception as e:
                             logger.debug("Mixdrop fetch_page attempt failed: %s", e)
                             pass
@@ -198,4 +192,4 @@ class MixdropExtractor:
         return {"destination_url": video_url, "request_headers": headers, "mediaflow_endpoint": self.mediaflow_endpoint, "bypass_warp": self.bypass_warp_active}
 
     async def close(self):
-        self._scraper = None
+        pass

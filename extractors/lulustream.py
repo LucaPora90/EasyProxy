@@ -12,6 +12,19 @@ class LuluStreamExtractor(BaseExtractor):
         resp = await self._make_request(url)
         text = resp.text
 
+        # ponytail: unpack packed script if present, fallback to raw regex match
+        packed_match = re.search(
+            r"eval\(function\(p,a,c,k,e,d\)\{.*?\}\('(.*?)',(\d+|\[\]),(\d+),'(.*?)'\.split\('\|'\)",
+            text,
+            re.DOTALL,
+        )
+        if packed_match:
+            try:
+                from utils.packed import unpack
+                text = unpack(packed_match.group(0))
+            except Exception:
+                pass
+
         # See https://github.com/Gujal00/ResolveURL/blob/master/script.module.resolveurl/lib/resolveurl/plugins/lulustream.py
         pattern = r"""sources:\s*\[{file:\s*["'](?P<url>[^"']+)"""
         match = re.search(pattern, text, re.DOTALL)

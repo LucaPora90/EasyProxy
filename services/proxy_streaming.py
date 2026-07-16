@@ -254,6 +254,13 @@ class HLSProxyStreamingMixin:
                 headers.pop(h, None)
                 headers.pop(h.lower(), None)
 
+            # ponytail: strip Accept-Language for lulustream source to prevent 403 Forbidden
+            orig_url = request.query.get("orig_url", "")
+            extractor_key = request.query.get("extractor_key", "")
+            if "lulustream" in orig_url or "luluvdo" in orig_url or extractor_key == "lulustream":
+                headers.pop("accept-language", None)
+                headers.pop("Accept-Language", None)
+
             # Normalize critical headers to Title-Case
             for key in list(headers.keys()):
                 if key.lower() == "user-agent":
@@ -478,6 +485,13 @@ class HLSProxyStreamingMixin:
             for h in ["x-forwarded-for", "x-real-ip", "forwarded", "via"]:
                 if h in headers:
                     del headers[h]
+
+            # ponytail: strip Accept-Language for lulustream source to prevent 403 Forbidden
+            orig_url = request.query.get("orig_url", "")
+            extractor_key = request.query.get("extractor_key", "")
+            if "lulustream" in orig_url or "luluvdo" in orig_url or extractor_key == "lulustream":
+                headers.pop("accept-language", None)
+                headers.pop("Accept-Language", None)
 
             # ✅ FIX: Normalizza gli header critici (User-Agent, Referer) in Title-Case
             for key in list(headers.keys()):
