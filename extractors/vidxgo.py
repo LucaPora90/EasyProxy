@@ -41,7 +41,7 @@ DEFAULT_PLAYBACK_DOMAIN = "https://v.vidxgo.co"
 
 # Header used during the embed page fetch. The site is currently strict about
 # this referer; sending the playback origin instead yields an empty body.
-EMBED_FETCH_REFERER = "https://altadefinizione.you/"
+EMBED_FETCH_REFERER = "https://v.vidxgo.co/"
 
 # Pattern that locates the obfuscated block:
 #   var X='KEY',d=atob('B64PAYLOAD'),...
@@ -82,7 +82,8 @@ class VidXgoExtractor:
             "referer": EMBED_FETCH_REFERER,
             "sec-fetch-dest": "iframe",
             "sec-fetch-mode": "navigate",
-            "sec-fetch-site": "cross-site",
+            "sec-fetch-site": "same-origin",
+            "sec-fetch-storage-access": "active",
             "upgrade-insecure-requests": "1",
         }
 
@@ -113,7 +114,7 @@ class VidXgoExtractor:
     # ------------------------------------------------------------------ fetch
 
     async def _fetch(self, url: str, headers: dict) -> str:
-        """GET `url`; direct is allowed only when no proxy is configured."""
+        """GET `url`; ruota i Referer whitelistati se necessario."""
         paths = self._get_proxies_for_url(url)
         if should_allow_direct_fallback(paths):
             paths.append(None)
