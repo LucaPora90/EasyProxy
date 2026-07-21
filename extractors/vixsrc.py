@@ -668,7 +668,6 @@ class VixSrcExtractor:
 
     async def extract(self, url: str, **kwargs) -> Dict[str, Any]:
         """Estrae URL VixSrc."""
-        url = url.replace("vixsrc.to", "unitv.mom").replace("vixcloud.co", "unitv.mom")
         try:
             forced_proxy = kwargs.get("proxy")
             if forced_proxy:
@@ -703,11 +702,7 @@ class VixSrcExtractor:
 
             if "/embed/" in parsed_url.path:
                 self._raise_if_embed_expired(url)
-                if parsed_url.netloc.lower().endswith("vixcloud.co"):
-                    vix_url = url.replace("vixcloud.co", "vixsrc.to")
-                    logger.info("Rewrote URL to vixsrc.to: %s", vix_url)
-                else:
-                    vix_url = url
+                vix_url = url
                 try:
                     response = await self._make_curl_request(
                         vix_url,
@@ -821,9 +816,8 @@ class VixSrcExtractor:
             if not final_url:
                 raise ExtractorError("No playlist data found in response")
 
-            # Rewrite vixcloud.co/vixsrc.to → unitv.mom in the final URL too
-            final_url = final_url.replace("vixcloud.co", "unitv.mom").replace("vixsrc.to", "unitv.mom")
-            stream_url = url.replace("vixcloud.co", "unitv.mom").replace("vixsrc.to", "unitv.mom")
+            # Keep original domains
+            stream_url = url
 
             stream_headers = self._fresh_headers(Referer=stream_url)
 
