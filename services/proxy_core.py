@@ -183,6 +183,25 @@ class HLSProxyCoreMixin:
                 logger.error("WARP keepalive error: %s", e)
                 await asyncio.sleep(10)
 
+    async def is_warp_healthy(self, timeout_sec: float = 3.0) -> bool:
+        """Fast check if WARP proxy socket and HTTP connectivity are working."""
+        _ENABLE_WARP = _shared.ENABLE_WARP
+        _WARP_PROXY_URL = _shared.WARP_PROXY_URL
+        if not _ENABLE_WARP or not _WARP_PROXY_URL:
+            return False
+        try:
+            connector = get_connector_for_proxy(
+                _WARP_PROXY_URL, limit=0, family=socket.AF_INET
+            )
+            timeout = ClientTimeout(total=timeout_sec)
+            async with ClientSession(connector=connector, timeout=timeout) as session:
+                async with session.get("https://api.ipify.org?format=json") as resp:
+                    if resp.status == 200:
+                        return True
+        except Exception:
+            pass
+        return False
+
     async def get_warp_status(self) -> str:
         """Returns WARP status and fetches real external IP through WARP proxy."""
         _ENABLE_WARP = _shared.ENABLE_WARP

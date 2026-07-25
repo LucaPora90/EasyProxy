@@ -1137,10 +1137,13 @@ class HLSProxyStreamingMixin:
                     active_proxy,
                     extractor_key=request.query.get("extractor_key"),
                 )
-            # Reactive WARP reconnect: if WARP failed mid-stream, reconnect immediately
+            # Reactive WARP reconnect: only reconnect if WARP proxy itself is actually dead
             if active_proxy and getattr(_shared, 'WARP_PROXY_URL', None) and active_proxy == _shared.WARP_PROXY_URL:
-                logger.warning("WARP stream failure, triggering immediate reconnect...")
-                asyncio.create_task(self.reconnect_warp())
+                if not await self.is_warp_healthy():
+                    logger.warning("WARP proxy confirmed dead during stream failure, triggering reconnect...")
+                    asyncio.create_task(self.reconnect_warp())
+                else:
+                    logger.debug("WARP proxy is healthy; stream failure was due to upstream source.")
             logger.warning(f"⚠️ Connection lost with source: {stream_url} ({str(e)})")
             return web.Response(text=f"Upstream connection lost: {str(e)}", status=502)
 
