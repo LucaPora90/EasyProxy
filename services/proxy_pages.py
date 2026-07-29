@@ -302,7 +302,7 @@ class HLSProxyPagesMixin:
                 "/key": "Proxy chiavi AES-128 - ?key_url=<URL>",  # ✅ NUOVO
                 "/playlist": "Playlist builder - ?url=<definizioni>",
                 "/builder": "Interfaccia web per playlist builder",
-                "/segment/{segment}": "Proxy per segmenti .ts - ?base_url=<URL>",
+                "/segment/{tail:.*}": "Proxy per segmenti .ts - ?base_url=<URL>",
                 "/license": "Proxy licenze DRM (ClearKey/Widevine) - ?url=<URL> o ?clearkey=<id:key>",
                 "/info": "Pagina HTML con informazioni sul server",
                 "/api/info": "Endpoint JSON con informazioni sul server",
@@ -494,12 +494,12 @@ class HLSProxyPagesMixin:
                         **({"security": security} if requires_password else {}),
                     }
                 },
-                "/segment/{segment}": {
+                "/segment/{tail:.*}": {
                     "get": {
                         "summary": "Legacy TS segment serving",
                         "description": "Serve TS segments by their segment identifier.",
                         "parameters": [
-                            {"name": "segment", "in": "path", "schema": {"type": "string"}, "required": True},
+                            {"name": "tail", "in": "path", "schema": {"type": "string"}, "required": True},
                         ],
                         "responses": {"200": {"description": "Segment data"}},
                     }

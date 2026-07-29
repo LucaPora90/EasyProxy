@@ -190,6 +190,7 @@ class MP4Decrypter:
         self.encryption_overhead = 0
         self.track_kid_map = {}  # track_id -> KID (bytes) from tenc box
         self._last_extracted_kid = None  # temp storage during moov processing
+        self._default_sample_size = 0  # from tfhd, used when trun lacks sample-size-present
 
     def decrypt_segment(self, combined_segment: bytes, init_length: int = 0) -> bytes:
         """
@@ -298,17 +299,24 @@ class MP4Decrypter:
 
         return MP4Atom(b"moof", len(new_moof_data) + 8, new_moof_data)
 
+    @staticmethod
+    def _parse_tfhd_default_sample_size(tfhd: MP4Atom) -> int:
+        if len(tfhd.data) < 8:
+            return 0
+        flags = struct.unpack_from(">I", tfhd.data, 0)[0] & 0xFFFFFF
+        offset = 8
+        if flags & 0x000001:
+            offset += 8
+        if flags & 0x000002:
+            offset += 4
+        if flags & 0x000008:
+            offset += 4
+        if flags & 0x000010:
+            if offset + 4 <= len(tfhd.data):
+                return struct.unpack_from(">I", tfhd.data, offset)[0]
+        return 0
+
     def _process_traf(self, traf: MP4Atom) -> MP4Atom:
-        """
-        Processes the 'traf' (Track Fragment) atom, which contains information about a track fragment.
-        This includes sample information, sample encryption data, and other track-level metadata.
-
-        Args:
-            traf (MP4Atom): The 'traf' atom to process.
-
-        Returns:
-            MP4Atom: Processed 'traf' atom with updated sample information.
-        """
         parser = MP4Parser(traf.data)
         new_traf_data = bytearray()
         tfhd = None
@@ -317,19 +325,18 @@ class MP4Decrypter:
 
         atoms = parser.list_atoms()
 
-        # calculate encryption_overhead earlier to avoid dependency on trun
         self.encryption_overhead = sum(a.size for a in atoms if a.atom_type in {b"senc", b"saiz", b"saio", b"sbgp", b"sgpd"})
 
         for atom in atoms:
             if atom.atom_type == b"tfhd":
                 tfhd = atom
+                self._default_sample_size = self._parse_tfhd_default_sample_size(tfhd)
                 new_traf_data.extend(atom.pack())
             elif atom.atom_type == b"trun":
                 sample_count = self._process_trun(atom)
                 new_trun = self._modify_trun(atom)
                 new_traf_data.extend(new_trun.pack())
             elif atom.atom_type == b"senc":
-                # Parse senc but don't include it in the new decrypted traf data and similarly don't include saiz and saio
                 sample_info = self._parse_senc(atom, sample_count)
             elif atom.atom_type not in {b"saiz", b"saio", b"sbgp", b"sgpd"}:
                 new_traf_data.extend(atom.pack())
@@ -507,16 +514,17 @@ class MP4Decrypter:
             data_offset += 4
 
         self.trun_sample_sizes = array.array("I")
+        default_size = self._default_sample_size
 
         for _ in range(sample_count):
-            if trun_flags & 0x000100:  # sample-duration-present flag
+            if trun_flags & 0x000100:
                 data_offset += 4
-            if trun_flags & 0x000200:  # sample-size-present flag
+            if trun_flags & 0x000200:
                 sample_size = struct.unpack_from(">I", trun.data, data_offset)[0]
                 self.trun_sample_sizes.append(sample_size)
                 data_offset += 4
             else:
-                self.trun_sample_sizes.append(0)  # Using 0 instead of None for uniformity in the array
+                self.trun_sample_sizes.append(default_size)
             if trun_flags & 0x000400:  # sample-flags-present flag
                 data_offset += 4
             if trun_flags & 0x000800:  # sample-composition-time-offsets-present flag

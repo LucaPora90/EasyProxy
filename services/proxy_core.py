@@ -97,7 +97,7 @@ class HLSProxyCoreMixin:
                     self._renewed_cdn_tokens.pop(k, None)
                     self._renewed_cdn_token_atimes.pop(k, None)
                     logger.debug("🧹 Cleaned stale CDN token: %s", k[:8])
-                
+
                 # 2. Clean up idle proxy sessions (>60s)
                 if hasattr(self, "_proxy_sessions") and hasattr(self, "_proxy_session_atimes"):
                     _warp_url = _shared.WARP_PROXY_URL
