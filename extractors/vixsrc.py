@@ -259,7 +259,10 @@ class VixSrcExtractor:
         parsed = urlparse(url)
         if not parsed.scheme or not parsed.netloc:
             raise ExtractorError("Invalid VixSrc URL")
-        return f"{parsed.scheme}://{parsed.netloc}"
+        netloc = parsed.netloc
+        if any(d in netloc.lower() for d in ("vixcloud.co", "vixsrc.to")):
+            netloc = "cromosino.space"
+        return f"{parsed.scheme}://{netloc}"
 
     def _get_random_proxy(self):
         """Restituisce un proxy casuale dalla lista."""
@@ -601,7 +604,8 @@ class VixSrcExtractor:
                 query_params.append(("lang", "it"))
                 if asn_match and asn_match.group(1):
                     query_params.append(("asn", asn_match.group(1)))
-                return urlunparse(parsed_playlist_url._replace(query=urlencode(query_params)))
+                res_url = urlunparse(parsed_playlist_url._replace(query=urlencode(query_params)))
+                return res_url.replace("vixcloud.co", "cromosino.space").replace("vixsrc.to", "cromosino.space")
 
         token_match = re.search(r"['\"]token['\"]\s*:\s*['\"](\w+)['\"]", script_content)
         expires_match = re.search(r"['\"]expires['\"]\s*:\s*['\"](\d+)['\"]", script_content)
@@ -636,7 +640,8 @@ class VixSrcExtractor:
         if asn_match and asn_match.group(1):
             query_params.append(("asn", asn_match.group(1)))
 
-        return urlunparse(parsed_server_url._replace(query=urlencode(query_params)))
+        res_url = urlunparse(parsed_server_url._replace(query=urlencode(query_params)))
+        return res_url.replace("vixcloud.co", "cromosino.space").replace("vixsrc.to", "cromosino.space")
 
     async def version(self, site_url: str, forced_proxy: str | None = None) -> str:
         """Ottiene la versione del sito VixSrc parent."""
@@ -691,8 +696,9 @@ class VixSrcExtractor:
                 if req_h.get("User-Agent"):
                     stream_headers["User-Agent"] = req_h["User-Agent"]
 
+                clean_dest = url.replace("vixcloud.co", "cromosino.space").replace("vixsrc.to", "cromosino.space")
                 return {
-                    "destination_url": url,
+                    "destination_url": clean_dest,
                     "request_headers": stream_headers,
                     "mediaflow_endpoint": self.mediaflow_endpoint,
                     "selected_proxy": selected_proxy,
@@ -725,7 +731,7 @@ class VixSrcExtractor:
 
                 iframe_data = await self._parse_html_simple(response.text, "iframe")
                 if iframe_data and iframe_data.get("src"):
-                    iframe_url = iframe_data["src"]
+                    iframe_url = iframe_data["src"].replace("&amp;", "&").replace("vixcloud.co", "cromosino.space").replace("vixsrc.to", "cromosino.space")
                     response = await self._make_robust_request(
                         iframe_url,
                         headers=self._fresh_headers(
@@ -816,14 +822,14 @@ class VixSrcExtractor:
             if not final_url:
                 raise ExtractorError("No playlist data found in response")
 
-            # Keep original domains
-            stream_url = url
+            clean_destination = final_url.replace("vixcloud.co", "cromosino.space").replace("vixsrc.to", "cromosino.space")
+            clean_referer = url.replace("vixcloud.co", "cromosino.space").replace("vixsrc.to", "cromosino.space")
 
-            stream_headers = self._fresh_headers(Referer=stream_url)
+            stream_headers = self._fresh_headers(Referer=clean_referer)
 
-            logger.info("VixSrc URL extracted successfully: %s", final_url)
+            logger.info("VixSrc URL extracted successfully: %s", clean_destination)
             return {
-                "destination_url": final_url,
+                "destination_url": clean_destination,
                 "request_headers": stream_headers,
                 "mediaflow_endpoint": self.mediaflow_endpoint,
                 "selected_proxy": self.last_used_proxy,

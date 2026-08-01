@@ -30,7 +30,7 @@ ALL_PROXY_ERRORS = (
 )
 
 
-APP_VERSION = "2.9.84"
+APP_VERSION = "2.9.88"
 
 
 def get_extractor_proxies(extractor_name: str) -> list:
@@ -751,7 +751,7 @@ def get_ssl_setting_for_url(url: str, transport_routes: list = None) -> bool:
     if "disable_ssl=1" in normalized_url:
         return True
 
-    vavoo_domains = ("vavoo.to", "vavoo.tv", "vavoo", "lokke.app", "mediahubmx", "vixsrc.to", "vix-content.net", "/sunshine/", "unitv.mom")
+    vavoo_domains = ("vavoo.to", "vavoo.tv", "vavoo", "lokke.app", "mediahubmx", "vixsrc.to", "vix-content.net", "/sunshine/", "unitv.mom", "d2b.you", "vidxgo")
 
     if not url or not transport_routes:
         return any(domain in normalized_url for domain in vavoo_domains)

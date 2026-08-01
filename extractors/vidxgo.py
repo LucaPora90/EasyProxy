@@ -253,6 +253,7 @@ class VidXgoExtractor:
             "captured_manifests": captured_map,
             "mediaflow_endpoint": self.mediaflow_endpoint,
             "selected_proxy": self.selected_proxy,
+            "disable_ssl": True,
         }
         return result
 

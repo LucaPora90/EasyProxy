@@ -643,6 +643,20 @@ class HLSProxyCoreMixin:
         session = await self._get_session(prefer_default_family=prefer_default_family)
         return session, None
 
+    async def _invalidate_proxy_session(self, proxy_url: str | None) -> bool:
+        """Drop one pooled proxy session so the next request gets a new connector."""
+        if not proxy_url or not hasattr(self, "_proxy_sessions"):
+            return False
+        session = self._proxy_sessions.pop(proxy_url, None)
+        if hasattr(self, "_proxy_session_atimes"):
+            self._proxy_session_atimes.pop(proxy_url, None)
+        if not session:
+            return False
+        if not session.closed:
+            await session.close()
+        logger.warning("[NET] Invalidated pooled proxy session: %s", proxy_url)
+        return True
+
     async def _retry_special_cdn_request(self, request_target, headers, disable_ssl: bool):
         """Retry a provider-protected CDN once via an alternate aiohttp route."""
         _ENABLE_WARP = _shared.ENABLE_WARP
