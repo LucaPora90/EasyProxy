@@ -16,6 +16,10 @@ import config as _cfg
 
 logger = logging.getLogger(__name__)
 
+VIXSRC_CONFIG_URL = "https://raw.githubusercontent.com/realbestia1/EasyProxy/main/domains.json"
+_vixsrc_domain = None
+_vixsrc_config_loaded_at = 0.0
+
 
 class ExtractorError(Exception):
     """Eccezione personalizzata per errori di estrazione."""
@@ -44,6 +48,30 @@ class VixSrcExtractor:
             len(self._dedicated_proxies()),
             len(self.proxies or []),
         )
+
+    @staticmethod
+    async def _refresh_vixsrc_domain() -> None:
+        global _vixsrc_domain, _vixsrc_config_loaded_at
+        if time.monotonic() - _vixsrc_config_loaded_at < 60:
+            return
+        try:
+            timeout = ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(VIXSRC_CONFIG_URL) as response:
+                    response.raise_for_status()
+                    config = await response.json(content_type=None)
+            domain = str(config.get("vixsrc", "")).strip().lower()
+            if domain:
+                _vixsrc_domain = domain.removeprefix("https://").removeprefix("http://").rstrip("/")
+            _vixsrc_config_loaded_at = time.monotonic()
+        except Exception as exc:
+            logger.warning("Unable to refresh VixSrc domain config: %s", exc)
+
+    @staticmethod
+    def _replace_vixsrc_domain(url: str) -> str:
+        if not _vixsrc_domain:
+            raise ExtractorError("VixSrc domain config unavailable")
+        return url.replace("vixcloud.co", _vixsrc_domain).replace("vixsrc.to", _vixsrc_domain)
     @staticmethod
     def _normalize_proxy_url(proxy_value: str) -> str:
         proxy_value = unquote(proxy_value)
@@ -261,7 +289,9 @@ class VixSrcExtractor:
             raise ExtractorError("Invalid VixSrc URL")
         netloc = parsed.netloc
         if any(d in netloc.lower() for d in ("vixcloud.co", "vixsrc.to")):
-            netloc = "cromosino.space"
+            if not _vixsrc_domain:
+                raise ExtractorError("VixSrc domain config unavailable")
+            netloc = _vixsrc_domain
         return f"{parsed.scheme}://{netloc}"
 
     def _get_random_proxy(self):
@@ -605,7 +635,7 @@ class VixSrcExtractor:
                 if asn_match and asn_match.group(1):
                     query_params.append(("asn", asn_match.group(1)))
                 res_url = urlunparse(parsed_playlist_url._replace(query=urlencode(query_params)))
-                return res_url.replace("vixcloud.co", "cromosino.space").replace("vixsrc.to", "cromosino.space")
+                return self._replace_vixsrc_domain(res_url)
 
         token_match = re.search(r"['\"]token['\"]\s*:\s*['\"](\w+)['\"]", script_content)
         expires_match = re.search(r"['\"]expires['\"]\s*:\s*['\"](\d+)['\"]", script_content)
@@ -641,7 +671,7 @@ class VixSrcExtractor:
             query_params.append(("asn", asn_match.group(1)))
 
         res_url = urlunparse(parsed_server_url._replace(query=urlencode(query_params)))
-        return res_url.replace("vixcloud.co", "cromosino.space").replace("vixsrc.to", "cromosino.space")
+        return self._replace_vixsrc_domain(res_url)
 
     async def version(self, site_url: str, forced_proxy: str | None = None) -> str:
         """Ottiene la versione del sito VixSrc parent."""
@@ -674,6 +704,7 @@ class VixSrcExtractor:
     async def extract(self, url: str, **kwargs) -> Dict[str, Any]:
         """Estrae URL VixSrc."""
         try:
+            await self._refresh_vixsrc_domain()
             forced_proxy = kwargs.get("proxy")
             if forced_proxy:
                 forced_proxy = self._normalize_proxy_url(forced_proxy)
@@ -696,7 +727,7 @@ class VixSrcExtractor:
                 if req_h.get("User-Agent"):
                     stream_headers["User-Agent"] = req_h["User-Agent"]
 
-                clean_dest = url.replace("vixcloud.co", "cromosino.space").replace("vixsrc.to", "cromosino.space")
+                clean_dest = self._replace_vixsrc_domain(url)
                 return {
                     "destination_url": clean_dest,
                     "request_headers": stream_headers,
@@ -731,7 +762,7 @@ class VixSrcExtractor:
 
                 iframe_data = await self._parse_html_simple(response.text, "iframe")
                 if iframe_data and iframe_data.get("src"):
-                    iframe_url = iframe_data["src"].replace("&amp;", "&").replace("vixcloud.co", "cromosino.space").replace("vixsrc.to", "cromosino.space")
+                    iframe_url = self._replace_vixsrc_domain(iframe_data["src"].replace("&amp;", "&"))
                     response = await self._make_robust_request(
                         iframe_url,
                         headers=self._fresh_headers(
@@ -822,8 +853,8 @@ class VixSrcExtractor:
             if not final_url:
                 raise ExtractorError("No playlist data found in response")
 
-            clean_destination = final_url.replace("vixcloud.co", "cromosino.space").replace("vixsrc.to", "cromosino.space")
-            clean_referer = url.replace("vixcloud.co", "cromosino.space").replace("vixsrc.to", "cromosino.space")
+            clean_destination = self._replace_vixsrc_domain(final_url)
+            clean_referer = self._replace_vixsrc_domain(url)
 
             stream_headers = self._fresh_headers(Referer=clean_referer)
 
