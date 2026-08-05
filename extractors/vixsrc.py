@@ -70,7 +70,7 @@ class VixSrcExtractor:
     @staticmethod
     def _replace_vixsrc_domain(url: str) -> str:
         if not _vixsrc_domain:
-            raise ExtractorError("VixSrc domain config unavailable")
+            return url
         return url.replace("vixcloud.co", _vixsrc_domain).replace("vixsrc.to", _vixsrc_domain)
     @staticmethod
     def _normalize_proxy_url(proxy_value: str) -> str:
@@ -289,9 +289,8 @@ class VixSrcExtractor:
             raise ExtractorError("Invalid VixSrc URL")
         netloc = parsed.netloc
         if any(d in netloc.lower() for d in ("vixcloud.co", "vixsrc.to")):
-            if not _vixsrc_domain:
-                raise ExtractorError("VixSrc domain config unavailable")
-            netloc = _vixsrc_domain
+            if _vixsrc_domain:
+                netloc = _vixsrc_domain
         return f"{parsed.scheme}://{netloc}"
 
     def _get_random_proxy(self):
