@@ -36,8 +36,6 @@ DEFAULT_CONFIG = {
     "recordings_dir": "/data/recordings",
     "max_recording_duration": 28800,
     "recordings_retention_days": 7,
-    "flaresolverr_url": "http://localhost:8191",
-    "flaresolverr_timeout": 30,
     "proxy_test_timeout": 10,
     "proxy_test_concurrency": None,
     "log_level": "WARNING",

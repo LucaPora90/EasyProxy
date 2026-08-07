@@ -30,7 +30,7 @@ ALL_PROXY_ERRORS = (
 )
 
 
-APP_VERSION = "2.9.93"
+APP_VERSION = "2.9.98"
 
 
 def get_extractor_proxies(extractor_name: str) -> list:
@@ -720,7 +720,7 @@ def get_solver_proxy_url(proxy_url: str | None) -> str | None:
 def build_proxy_with_auth(proxy_url: str | None) -> dict | None:
     """Converte un proxy URL in dict con username/password separati.
 
-    Chromium (via Playwright/Scrapling/FlareSolverr) non supporta
+    Browser headless non supporta
     --proxy-server con credenziali nell'URL. Funziona solo se username
     e password sono campi separati.
     """
@@ -832,8 +832,6 @@ def reload_config():
     mod.RECORDINGS_DIR = _cfg_get("recordings_dir", "/data/recordings")
     mod.MAX_RECORDING_DURATION = _cfg_get("max_recording_duration", 28800)
     mod.RECORDINGS_RETENTION_DAYS = _cfg_get("recordings_retention_days", 7)
-    mod.FLARESOLVERR_URL = _cfg_get("flaresolverr_url", "http://localhost:8191")
-    mod.FLARESOLVERR_TIMEOUT = _cfg_get("flaresolverr_timeout", 30)
     mod.PROXY_TEST_TIMEOUT = _cfg_get("proxy_test_timeout", 10)
     mod.PROXY_TEST_CONCURRENCY = _get_dynamic_proxy_test_concurrency()
     mod.LOG_LEVEL_STR = _cfg_get("log_level", LOG_LEVEL_STR)
@@ -864,8 +862,6 @@ def __getattr__(name):
         "RECORDINGS_DIR": lambda: _cfg_get("recordings_dir", "/data/recordings"),
         "MAX_RECORDING_DURATION": lambda: _cfg_get("max_recording_duration", 28800),
         "RECORDINGS_RETENTION_DAYS": lambda: _cfg_get("recordings_retention_days", 7),
-        "FLARESOLVERR_URL": lambda: _cfg_get("flaresolverr_url", "http://localhost:8191"),
-        "FLARESOLVERR_TIMEOUT": lambda: _cfg_get("flaresolverr_timeout", 30),
         "WARP_LICENSE_KEY": lambda: _cfg_get("warp_license_key", ""),
         "PROXY_TEST_TIMEOUT": lambda: int(_cfg_get("proxy_test_timeout", 10)),
         "PROXY_TEST_CONCURRENCY": _get_dynamic_proxy_test_concurrency,

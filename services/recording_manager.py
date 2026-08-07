@@ -402,7 +402,7 @@ class RecordingManager:
         """
         Stop an active recording.
 
-        Supports multi-worker: if process not in local dict, use PID from DB.
+        If process not in local dict, use PID from DB.
         """
         recording = self.db.get_recording(recording_id)
         if not recording:

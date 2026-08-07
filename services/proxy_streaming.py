@@ -916,7 +916,11 @@ class HLSProxyStreamingMixin:
 
                 if manifest_content:
                     logger.info(f"📄 HLS manifest detected: {stream_url}")
-                    scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
+                    cf_visitor = request.headers.get("CF-Visitor", "")
+                    if '"scheme"' in cf_visitor and "https" in cf_visitor.lower():
+                        scheme = "https"
+                    else:
+                        scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
                     host = request.headers.get("X-Forwarded-Host", request.host)
                     proxy_base = f"{scheme}://{host}"
                     original_url = request.query.get("orig_url") or request.query.get("url") or request.query.get("d", "")
@@ -957,7 +961,11 @@ class HLSProxyStreamingMixin:
                     manifest_content = content_bytes.decode("utf-8", errors='replace')
 
                     # ✅ CORREZIONE: Rileva lo schema e l'host corretti quando dietro un reverse proxy
-                    scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
+                    cf_visitor = request.headers.get("CF-Visitor", "")
+                    if '"scheme"' in cf_visitor and "https" in cf_visitor.lower():
+                        scheme = "https"
+                    else:
+                        scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
                     host = request.headers.get("X-Forwarded-Host", request.host)
                     proxy_base = f"{scheme}://{host}"
 

@@ -47,7 +47,6 @@ The easiest way to get EasyProxy plus solvers on Windows:
 1. **Install dependencies**:
    ```bash
    pip install -r requirements.txt
-   python -m playwright install chromium
    ```
 2. **Start EasyProxy**:
    ```bash
@@ -56,6 +55,8 @@ The easiest way to get EasyProxy plus solvers on Windows:
 #### 📱 Termux (Android)
 EasyProxy plus solvers is fully supported on Android via Termux + Ubuntu proot.
 
+The setup supports proot-distro 5 and earlier releases, and installs Python dependencies in an isolated virtual environment at `/root/EasyProxy/.venv`.
+
 Android users can also install the APK build if they prefer a simpler app-style setup. The APK is convenient, but it is not as complete as the Python/Termux version, so Termux remains the recommended option for full functionality.
 
 For Termux, full functionality requires a 64-bit Android device. On 32-bit devices, some components and solvers may not work.
@@ -63,7 +64,7 @@ For Termux, full functionality requires a 64-bit Android device. On 32-bit devic
 1.  **Install Termux** from [F-Droid](https://f-droid.org/en/packages/com.termux/) (do NOT use Play Store version).
 2.  **Run the One-Shot Setup**:
     ```bash
-    curl -sL "https://raw.githubusercontent.com/realbestia1/EasyProxy/main/termux_setup.sh?$(date +%s)" | bash
+    curl -fsSL --retry 3 "https://raw.githubusercontent.com/realbestia1/EasyProxy/main/termux_setup.sh?$(date +%s)" | bash
     ```
 3.  **Prevent Termux from Sleeping**:
     - **Wake Lock**: Swipe down your notification bar and click **"Acquire wake-lock"** on the Termux notification.
@@ -72,6 +73,18 @@ For Termux, full functionality requires a 64-bit Android device. On 32-bit devic
     - `easyproxy`: Start the full stack.
     - `easyproxy-update`: Update code and dependencies.
     - `easyproxy-stop`: Stop all services.
+    - `easyproxy-logs`: Follow the EasyProxy application log (`Ctrl+C` exits without stopping EasyProxy).
+    - `easyproxy-logs --termux`: Follow the Termux/screen log.
+    - `easyproxy-logs --attach`: Attach to the running screen session (`Ctrl+A`, then `D` to detach).
+    - `easyproxy-logs --help`: Show all logging options.
+
+If `easyproxy-update` reports `CANNOT LINK EXECUTABLE "curl"`, repair the
+partially upgraded Termux packages first, then retry the update:
+
+```bash
+apt update && apt full-upgrade -y
+easyproxy-update
+```
 
 *Access the dashboard at `http://localhost:7860`*
 

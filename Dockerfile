@@ -1,5 +1,5 @@
 # Monolithic Dockerfile for EasyProxy
-# Optimized: Uses FlareSolverr v3 (Python)
+# Optimized EasyProxy runtime
 # Compatible with AMD64 and ARM64 (Oracle VPS)
 
 FROM python:3.12-slim-bookworm
@@ -7,7 +7,6 @@ FROM python:3.12-slim-bookworm
 # 1. Environment Settings
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1
-ENV FLARESOLVERR_URL=http://localhost:8191
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \

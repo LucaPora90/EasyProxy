@@ -238,9 +238,11 @@ async function fetchText(url) {
 }
 
 function extractProgram(bundle) {
-  const HEAD = 'Function("OoS1vi",';
-  let i = bundle.indexOf(HEAD) + HEAD.length;
-  if (bundle[i] !== '\'') throw new Error('program literal not found');
+  // EmbedSt rotates this obfuscator argument between bundle versions.
+  // Match the call shape instead of depending on one fixed identifier.
+  const match = /Function\("([^"]+)",'/.exec(bundle);
+  if (!match) throw new Error('program literal not found');
+  let i = match.index + match[0].length - 1;
   let j = i + 1, out = '';
   while (j < bundle.length) {
     const c = bundle[j];
@@ -249,7 +251,7 @@ function extractProgram(bundle) {
     out += c; j++;
   }
   const literal = "'" + out + "'";
-  return vm.runInContext('(' + literal + ')', ctx);
+  return { argName: match[1], source: vm.runInContext('(' + literal + ')', ctx) };
 }
 
 // ---------------------------------------------------------------------------
@@ -275,10 +277,11 @@ function finish() {
   try {
     const bundleUrl = ORIGIN + '/js/bundle-jw.js';
     const bundle = await fetchText(bundleUrl);
-    const programSource = extractProgram(bundle);
-    L('program len', programSource.length);
+    const program = extractProgram(bundle);
+    const programSource = program.source;
+    L('program len', programSource.length, 'arg', program.argName);
 
-    const runner = '(function(OoS1vi){\n' + programSource + '\n})(' + optsObj + ')';
+    const runner = '(function(' + program.argName + '){\n' + programSource + '\n})(' + optsObj + ')';
 
     vm.runInContext(runner, ctx, {
       timeout: 25000,

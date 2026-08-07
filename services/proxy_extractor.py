@@ -11,7 +11,6 @@ from services.proxy_shared import (
     ManifestRewriter,
 )
 import config_store
-from config import FLARESOLVERR_URL
 import asyncio
 import base64
 import urllib.parse
@@ -213,9 +212,8 @@ class HLSProxyExtractorHandlerMixin:
                         url, dict(request.headers), host=host_param, bypass_warp=bypass_warp
                     )
 
-            timeout = 60 if FLARESOLVERR_URL else 30
             result = await asyncio.wait_for(
-                extractor.extract(url, **extractor_kwargs), timeout=timeout
+                extractor.extract(url, **extractor_kwargs), timeout=30
             )
             result_query_params = _protected_extractor_params(result)
             extractor_key = self._extractor_key_for_instance(extractor)
@@ -268,7 +266,11 @@ class HLSProxyExtractorHandlerMixin:
             )
 
             # Costruisci l'URL del proxy per questo stream
-            scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
+            cf_visitor = request.headers.get("CF-Visitor", "")
+            if '"scheme"' in cf_visitor and "https" in cf_visitor.lower():
+                scheme = "https"
+            else:
+                scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
             host = request.headers.get("X-Forwarded-Host", request.host)
             proxy_base = f"{scheme}://{host}"
 

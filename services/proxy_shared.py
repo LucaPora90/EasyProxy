@@ -31,7 +31,7 @@ from python_socks import ProxyError as PyProxyError
 
 import importlib.util
 
-# Lazy check — find_spec does NOT load the module, so curl_cffi's Chromium DLLs
+# Lazy check — find_spec does NOT load module, preserving startup behavior.
 # never get pulled in at import time. Actual load happens only at first call site.
 HAS_CURL_CFFI = importlib.util.find_spec('curl_cffi') is not None
 CurlAsyncSession = None
@@ -158,7 +158,7 @@ _DYNAMIC_CONFIG_NAMES = {
     "GLOBAL_PROXIES", "TRANSPORT_ROUTES", "ENABLE_WARP", "WARP_PROXY_URL",
     "WARP_EXCLUDE_DOMAINS", "DVR_ENABLED",
     "RECORDINGS_DIR", "MAX_RECORDING_DURATION", "RECORDINGS_RETENTION_DAYS",
-    "FLARESOLVERR_URL", "FLARESOLVERR_TIMEOUT", "WARP_OFF_EXTRACTORS",
+    "WARP_OFF_EXTRACTORS",
     "WARP_LICENSE_KEY", "PROXY_TEST_TIMEOUT", "PROXY_TEST_CONCURRENCY",
     "LOG_LEVEL_STR",
 }

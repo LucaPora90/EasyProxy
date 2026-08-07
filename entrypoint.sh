@@ -105,5 +105,4 @@ fi
 
 echo "Starting EasyProxy..."
 cd /app
-WORKERS_COUNT=${WORKERS:-1}
-gunicorn --bind 0.0.0.0:${PORT:-7860} --workers $WORKERS_COUNT --worker-class aiohttp.worker.GunicornWebWorker --timeout 120 --graceful-timeout 120 app:app
+python app.py

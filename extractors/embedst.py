@@ -20,7 +20,7 @@ class EmbedStExtractor(BaseExtractor):
     embed.st gates the stream URL behind an obfuscated wasm-bindgen module
     (lock.js + lock.wasm) that runs in-page. A pure HTTP/regex extraction is
     not possible, so we execute the page's own JS+WASM in a headless Node vm
-    sandbox (no browser, no Playwright) and capture the .m3u8 URL the WASM
+    sandbox (no browser) and capture the .m3u8 URL the WASM
     computes and fetches at runtime.
 
     Requires Node.js (>= 18, for native fetch + WebAssembly) on PATH, invoked

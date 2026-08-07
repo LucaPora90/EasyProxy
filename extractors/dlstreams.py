@@ -112,7 +112,7 @@ class DLStreamsExtractor:
         ]
 
     async def _extract_directly(self, url: str, channel_id: str) -> Dict[str, Any] | None:
-        """Fast path direct HTTP M3U8 extraction without Playwright."""
+        """Fast path direct HTTP M3U8 extraction."""
         session = await self._get_session(url)
         player_urls = self._prioritize_player_urls(channel_id)
         

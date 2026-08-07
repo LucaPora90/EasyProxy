@@ -4,8 +4,8 @@ import json
 import uuid
 import time
 import asyncio
-import ctypes
-import multiprocessing as mp
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from urllib.parse import urlparse
 
 from Crypto.Hash import SHA256
@@ -93,55 +93,39 @@ def _lz_bits(words) -> int:
     return bits
 
 
-def _pow_worker(nonce_bytes: bytes, difficulty: int, start: int, step: int,
-                found_val, found_flag):
-    """Searches counter values start, start+step, start+2*step, ...
-    Writes the solution into found_val and sets found_flag to 1."""
-    colon = b":"
-    s = start
-    chunk = 2048
-    while not found_flag.value:
-        for _ in range(chunk):
-            if _lz_bits(_pow_hash(nonce_bytes + colon + str(s).encode())) >= difficulty:
-                if not found_flag.value:
-                    found_val.value = s
-                    found_flag.value = 1
-                return
-            s += step
-
-
-def _solve_pow(nonce: str, difficulty: int, timeout: float = 30.0,
-               workers: int = None):
-    """Parallel PoW solver — splits counter space across N worker processes."""
+def _solve_pow_worker(nonce: str, difficulty: int, start: int, step: int,
+                      timeout: float = 25.0):
     if difficulty <= 0:
         return "0"
 
-    n_workers = workers or mp.cpu_count()
-    nonce_bytes = nonce.encode("latin-1")
+    prefix = nonce + ":"
+    started = time.time()
+    s = start
 
-    found_val  = mp.Value(ctypes.c_longlong, -1)
-    found_flag = mp.Value(ctypes.c_bool, False)
+    while time.time() - started < timeout:
+        if _lz_bits(_pow_hash((prefix + str(s)).encode("latin-1"))) >= difficulty:
+            return str(s)
+        s += step
 
-    procs = [
-        mp.Process(target=_pow_worker,
-                   args=(nonce_bytes, difficulty, i, n_workers,
-                         found_val, found_flag))
-        for i in range(n_workers)
-    ]
-    for p in procs:
-        p.start()
+    return None
 
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if found_flag.value:
-            break
-        time.sleep(0.05)
 
-    for p in procs:
-        p.terminate()
-        p.join()
+def _solve_pow_parallel(nonce: str, difficulty: int, timeout: float = 25.0):
+    if difficulty <= 0:
+        return "0"
 
-    return str(found_val.value) if found_flag.value else None
+    workers = max(2, min(os.cpu_count() or 2, 8))
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        futures = [
+            executor.submit(_solve_pow_worker, nonce, difficulty, i, workers, timeout)
+            for i in range(workers)
+        ]
+        for future in as_completed(futures):
+            result = future.result()
+            if result is not None:
+                executor.shutdown(cancel_futures=True)
+                return result
+    return None
 
 
 class F16PxExtractor(BaseExtractor):
@@ -320,7 +304,7 @@ class F16PxExtractor(BaseExtractor):
             # solve off the event loop (difficulty 12 ~ several seconds in CPython;
             # PoW token TTL is 1800s so this is fine)
             loop = asyncio.get_event_loop()
-            solution = await loop.run_in_executor(None, _solve_pow, pow_nonce, pow_difficulty)
+            solution = await loop.run_in_executor(None, _solve_pow_parallel, pow_nonce, pow_difficulty)
             if solution is None:
                 raise ExtractorError("F16PX: PoW solve timed out")
 
