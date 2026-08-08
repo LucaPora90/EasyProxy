@@ -11,7 +11,6 @@ from services.proxy_shared import (
     logger,
     web,
     yarl,
-    get_browser_activity_extractor,
     set_response_header,
     check_vavoo_request,
     get_ssl_setting_for_url,
@@ -229,10 +228,6 @@ class HLSProxyStreamingMixin:
     async def _proxy_segment(self, request, segment_url, stream_headers, segment_name):
         """✅ NUOVO: Proxy dedicato per segmenti .ts con Content-Disposition"""
         try:
-            # Ping browser-based extractors to keep shared browser alive
-            ext = get_browser_activity_extractor(self.extractors)
-            if ext and hasattr(ext, "_update_shared_activity"):
-                ext._update_shared_activity()
             self._touch_extractor_activity(
                 request.query.get("extractor_key"),
                 request.query.get("stream_key"),
@@ -419,10 +414,6 @@ class HLSProxyStreamingMixin:
         session_proxy = None
 
         try:
-            # Ping browser-based extractors to keep shared browser alive
-            ext = get_browser_activity_extractor(self.extractors)
-            if ext and hasattr(ext, "_update_shared_activity"):
-                ext._update_shared_activity()
             self._touch_extractor_activity(
                 request.query.get("extractor_key"),
                 request.query.get("stream_key"),
@@ -820,7 +811,8 @@ class HLSProxyStreamingMixin:
                     return web.Response(body=error_body, status=resp.status, headers={"Content-Type": content_type, "Access-Control-Allow-Origin": "*"})
 
                 is_direct_media_stream = (
-                    "video/" in content_type or stream_url.lower().endswith((".mp4", ".mkv", ".avi", ".mov"))
+                    "video/" in content_type
+                    or stream_url.lower().endswith((".mp4", ".mkv", ".avi", ".mov", ".mts", ".ts", ".m2ts"))
                 )
 
                 # ✅ FIX BUFFERING: Stream HLS segments chunk-by-chunk

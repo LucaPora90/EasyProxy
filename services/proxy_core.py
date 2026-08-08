@@ -767,7 +767,7 @@ class HLSProxyCoreMixin:
     def _mark_proxy_dead_if_allowed(self, proxy_url: str | None, dead_duration: int = 300, extractor_key: str | None = None):
         if not proxy_url:
             return
-        normalized_key = (extractor_key or "").replace("_direct", "")
+        normalized_key = (extractor_key or "").replace("_direct", "").replace("_noproxy", "")
         extractor_proxies = get_extractor_proxies(normalized_key)
         if len(extractor_proxies) == 1 and urllib.parse.unquote(proxy_url) == urllib.parse.unquote(extractor_proxies[0]):
             logger.info(

@@ -1,7 +1,6 @@
 import logging
 import socket
 import re
-import time
 import asyncio
 import base64
 from urllib.parse import urlparse
@@ -38,30 +37,7 @@ class DLStreamsExtractor:
         self.mediaflow_endpoint = "hls_manifest_proxy"
         self.proxies = proxies or []
         self.bypass_warp_active = bypass_warp
-        self._last_activity = time.time()
         self._inflight_extract_tasks: dict[str, asyncio.Task] = {}
-
-    def _get_shared_activity_time(self) -> float:
-        import os
-        activity_file = os.path.join(os.getcwd(), "dlstreams_activity.txt")
-        try:
-            if os.path.exists(activity_file):
-                with open(activity_file, "r") as f:
-                    return float(f.read().strip())
-        except Exception:
-            pass
-        return self._last_activity
-
-    def _update_shared_activity(self):
-        import os
-        now = time.time()
-        self._last_activity = now
-        activity_file = os.path.join(os.getcwd(), "dlstreams_activity.txt")
-        try:
-            with open(activity_file, "w") as f:
-                f.write(str(now))
-        except Exception:
-            pass
 
     def _prioritize_player_urls(self, channel_id: str) -> list[str]:
         return self._build_player_urls(channel_id)
@@ -258,7 +234,6 @@ class DLStreamsExtractor:
 
     async def extract(self, url: str, **kwargs) -> Dict[str, Any]:
         """Extracts the M3U8 URL and headers bypassing the public watch page."""
-        self._update_shared_activity()
         self._sync_entry_origin_from_url(url)
         channel_id = self._extract_channel_id(url)
         channel_key = f"premium{channel_id}"

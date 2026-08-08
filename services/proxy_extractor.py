@@ -182,7 +182,7 @@ class HLSProxyExtractorHandlerMixin:
             # Check if this extractor should bypass WARP or proxies based on admin config
             extractor_key = self._extractor_key_for_instance(extractor)
             if extractor_key:
-                base_key = extractor_key.replace("_direct", "")
+                base_key = extractor_key.replace("_direct", "").replace("_noproxy", "")
                 
                 # Check warp off. embedst skips WARP by default (it needs direct/non-WARP routing).
                 warp_off_list = config_store.get("warp_off_extractors", [])

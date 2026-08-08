@@ -12,10 +12,6 @@ DYNAMIC_WARP_BYPASS_DOMAINS = (
 )
 PROTECTED_CURL_DOMAINS = ("cinemacity.cc", "torrentio", "strem.fun", "strmd.st")
 MANIFEST_ONLY_CURL_DOMAINS = ("torrentio", "strem.fun")
-BROWSER_ACTIVITY_KEYS = (
-    "dlstreams",
-    "dlstreams_direct",
-)
 
 
 def hls_url_ttl_for(url: str, default_ttl: int, extended_ttl: int) -> int:
@@ -32,14 +28,6 @@ def is_dynamic_warp_bypass_candidate(domain: str, force: bool = False) -> bool:
 
 def prefer_default_family_for_url(url: str) -> bool:
     return "ai.the-sunmoon.site/key/" in (url or "")
-
-
-def get_browser_activity_extractor(extractors: dict):
-    for key in BROWSER_ACTIVITY_KEYS:
-        extractor = extractors.get(key)
-        if extractor:
-            return extractor
-    return None
 
 
 def is_special_cdn_stream(url: str) -> bool:
@@ -167,7 +155,6 @@ __all__ = [
     "hls_url_ttl_for",
     "is_dynamic_warp_bypass_candidate",
     "prefer_default_family_for_url",
-    "get_browser_activity_extractor",
     "is_special_cdn_stream",
     "should_use_curl_cffi",
     "prepare_curl_headers",
