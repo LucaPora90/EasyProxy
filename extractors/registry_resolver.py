@@ -44,7 +44,7 @@ def _build_proxy_list(primary_proxy: str | None = None, extractor_name: str | No
     if selected_proxy and STRICT_PROXY_CONTEXT.get():
         return [selected_proxy]
     if BYPASS_PROXIES_CONTEXT.get():
-        return [primary_proxy] if primary_proxy else []
+        return []
     extractor_proxies = get_extractor_proxies(extractor_name or "")
     if extractor_proxies:
         return extractor_proxies

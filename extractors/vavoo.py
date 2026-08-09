@@ -10,7 +10,7 @@ import uuid
 from aiohttp import ClientSession, ClientTimeout, TCPConnector
 from typing import Optional, Dict, Any
 from urllib.parse import urlparse, parse_qs
-from config import get_connector_for_proxy
+from config import get_connector_for_proxy, BYPASS_PROXIES_CONTEXT
 import config as _cfg
 
 logger = logging.getLogger(__name__)
@@ -60,10 +60,15 @@ class VavooExtractor:
 
     async def _get_session(self):
         async with self._session_lock:
+            bypass_proxies = BYPASS_PROXIES_CONTEXT.get()
+            if bypass_proxies and self.session is not None and not self.session.closed:
+                await self.session.close()
+                self.session = None
+                self._proxy = None
             if self.session is not None and not self.session.closed:
                 return self.session
 
-            if self._proxy is None and self.proxies:
+            if not bypass_proxies and self._proxy is None and self.proxies:
                 self._proxy = random.choice(self.proxies)
 
             timeout = ClientTimeout(total=60, connect=30, sock_read=30)
@@ -213,7 +218,6 @@ class VavooExtractor:
         if m:
             url = f"https://vavoo.to/vavoo-iptv/play/{m.group(1)}"
 
-        session = await self._get_session()
         for attempt in range(2):
             if attempt > 0:
                 sig = await self._get_sig(force=True)
@@ -223,6 +227,9 @@ class VavooExtractor:
                 sig = await self._get_sig()
                 if not sig:
                     logger.warning("Vavoo no addonSig available, resolving without signature")
+
+            # _get_sig() may rebuild session when proxy bypass is active.
+            session = await self._get_session()
 
             headers = {
                 "Origin": "https://vavoo.to",
