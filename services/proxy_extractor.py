@@ -212,8 +212,9 @@ class HLSProxyExtractorHandlerMixin:
                         url, dict(request.headers), host=host_param, bypass_warp=bypass_warp
                     )
 
+            extractor_timeout = getattr(extractor, "REQUEST_TIMEOUT_TOTAL", 30)
             result = await asyncio.wait_for(
-                extractor.extract(url, **extractor_kwargs), timeout=30
+                extractor.extract(url, **extractor_kwargs), timeout=extractor_timeout
             )
             result_query_params = _protected_extractor_params(result)
             extractor_key = self._extractor_key_for_instance(extractor)

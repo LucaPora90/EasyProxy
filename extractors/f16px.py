@@ -94,7 +94,7 @@ def _lz_bits(words) -> int:
 
 
 def _solve_pow_worker(nonce: str, difficulty: int, start: int, step: int,
-                      timeout: float = 25.0):
+                      timeout: float = 60.0):
     if difficulty <= 0:
         return "0"
 
@@ -110,11 +110,11 @@ def _solve_pow_worker(nonce: str, difficulty: int, start: int, step: int,
     return None
 
 
-def _solve_pow_parallel(nonce: str, difficulty: int, timeout: float = 25.0):
+def _solve_pow_parallel(nonce: str, difficulty: int, timeout: float = 60.0):
     if difficulty <= 0:
         return "0"
 
-    workers = max(2, min(os.cpu_count() or 2, 8))
+    workers = max(2, min(os.cpu_count() or 2, 4))
     with ProcessPoolExecutor(max_workers=workers) as executor:
         futures = [
             executor.submit(_solve_pow_worker, nonce, difficulty, i, workers, timeout)
@@ -130,6 +130,9 @@ def _solve_pow_parallel(nonce: str, difficulty: int, timeout: float = 25.0):
 
 class F16PxExtractor(BaseExtractor):
     F16PX_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:149.0) Gecko/20100101 Firefox/149.0"
+    # Longer than the default 30s handler timeout: covers 6 sequential HTTP
+    # calls plus up to 60s for the PoW solve plus the final playback call.
+    REQUEST_TIMEOUT_TOTAL = 90
 
     def __init__(self, request_headers: dict, proxies: list = None):
         super().__init__(request_headers, proxies, extractor_name="f16px")
@@ -236,7 +239,7 @@ class F16PxExtractor(BaseExtractor):
                 "Origin": embed_origin,
             },
             method="GET",
-            retries=1,
+            retries=2,
         )
         details = json.loads(details_resp.text)
         frame = details.get("embed_frame_url") or embed_url
@@ -257,7 +260,7 @@ class F16PxExtractor(BaseExtractor):
         # 2) settings → captcha required?
         settings_resp = await self._make_request(
             f"{api_origin}/api/videos/{code}/embed/settings",
-            headers=common, method="GET", retries=1,
+            headers=common, method="GET", retries=2,
         )
         try:
             captcha_required = bool(json.loads(settings_resp.text).get("captcha_required"))
@@ -267,14 +270,14 @@ class F16PxExtractor(BaseExtractor):
         # 3) challenge
         challenge_resp = await self._make_request(
             f"{api_origin}/api/videos/access/challenge",
-            headers=common, method="POST", retries=1, json={},
+            headers=common, method="POST", retries=2, json={},
         )
         challenge = json.loads(challenge_resp.text)
 
         # 4) attest (sets viewer/device cookies)
         attest_resp = await self._make_request(
             f"{api_origin}/api/videos/access/attest",
-            headers=common, method="POST", retries=1,
+            headers=common, method="POST", retries=2,
             json=self._build_attest_payload(challenge),
         )
         attest = json.loads(attest_resp.text)
@@ -293,7 +296,7 @@ class F16PxExtractor(BaseExtractor):
         if captcha_required:
             captcha_resp = await self._make_request(
                 f"{api_origin}/api/videos/{code}/embed/captcha",
-                headers=with_cookie, method="POST", retries=1,
+                headers=with_cookie, method="POST", retries=2,
                 json={"fingerprint": fingerprint},
             )
             cap = json.loads(captcha_resp.text)
@@ -301,16 +304,18 @@ class F16PxExtractor(BaseExtractor):
             pow_difficulty = cap["pow_difficulty"]
             pow_token = cap["pow_token"]
 
-            # solve off the event loop (difficulty 12 ~ several seconds in CPython;
-            # PoW token TTL is 1800s so this is fine)
+            # solve off the event loop; 60s timeout confirmed sufficient for
+            # difficulty ~16 on Pi-class hardware. PoW token TTL is 1800s.
             loop = asyncio.get_event_loop()
-            solution = await loop.run_in_executor(None, _solve_pow_parallel, pow_nonce, pow_difficulty)
+            solution = await loop.run_in_executor(
+                None, _solve_pow_parallel, pow_nonce, pow_difficulty, 60.0
+            )
             if solution is None:
                 raise ExtractorError("F16PX: PoW solve timed out")
 
             verify_resp = await self._make_request(
                 f"{api_origin}/api/videos/{code}/embed/captcha/verify",
-                headers=with_cookie, method="POST", retries=1,
+                headers=with_cookie, method="POST", retries=2,
                 json={"pow_token": pow_token, "solution": solution, "fingerprint": fingerprint},
             )
             verify = json.loads(verify_resp.text)
@@ -325,7 +330,7 @@ class F16PxExtractor(BaseExtractor):
 
         playback_resp = await self._make_request(
             f"{api_origin}/api/videos/{code}/embed/playback",
-            headers=playback_headers, method="POST", retries=1,
+            headers=playback_headers, method="POST", retries=2,
             json={"fingerprint": fingerprint},
         )
         data = json.loads(playback_resp.text)
