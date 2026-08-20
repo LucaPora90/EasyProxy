@@ -14,7 +14,7 @@ class ExtractorError(Exception):
 
 class FreeshotExtractor:
     """
-    Extractor per Freeshot (popcdn.day).
+    Extractor per Freeshot (wideiptv.top).
     Risolve l'URL iframe e restituisce l'm3u8 finale.
     """
     MAX_RETRIES = 3
@@ -59,10 +59,11 @@ class FreeshotExtractor:
         """
         Estrae l'URL m3u8 da un link popcdn.day o da un codice canale.
         Input url può essere:
-        1. https://popcdn.day/player/CODICE (nuovo formato)
-        2. https://popcdn.day/go.php?stream=CODICE (vecchio formato - convertito)
-        3. freeshot://CODICE (se vogliamo supportare un custom scheme)
-        4. CODICE (se passato come parametro d=CODICE e host=freeshot)
+        1. https://wideiptv.top/player/CODICE (formato corrente)
+        2. https://popcdn.day/player/CODICE (formato legacy)
+        3. https://popcdn.day/go.php?stream=CODICE (formato legacy)
+        4. freeshot://CODICE (se vogliamo supportare un custom scheme)
+        5. CODICE (se passato come parametro d=CODICE e host=freeshot)
         """
         
         # Determina il codice canale
@@ -127,8 +128,8 @@ class FreeshotExtractor:
         # Rimuovi eventuali parametri residui
         channel_code = channel_code.split("?")[0].split("&")[0]
         
-        # Nuovo URL formato /player/
-        target_url = f"https://popcdn.day/player/{urllib.parse.quote(channel_code)}"
+        # Player corrente usato dall'embed Freeshot.
+        target_url = f"https://wideiptv.top/player/{urllib.parse.quote(channel_code)}"
 
         logger.debug(f"FreeshotExtractor: Risoluzione {target_url} (channel: {channel_code})")
         
@@ -137,7 +138,12 @@ class FreeshotExtractor:
         ua = self.base_headers["User-Agent"]
         
         try:
-            body = await self._fetch_text(target_url, self.base_headers)
+            player_headers = {
+                **self.base_headers,
+                "Referer": "https://freeshot.live/",
+                "Origin": "https://freeshot.live",
+            }
+            body = await self._fetch_text(target_url, player_headers)
         except Exception as e:
             raise ExtractorError(f"Freeshot extraction failed for {target_url}: {e}")
         
@@ -171,8 +177,8 @@ class FreeshotExtractor:
             "destination_url": m3u8_url,
             "request_headers": {
                 "User-Agent": ua,
-                "Referer": "https://popcdn.day/",
-                "Origin": "https://popcdn.day"
+                "Referer": "https://wideiptv.top/",
+                "Origin": "https://wideiptv.top"
             },
             "mediaflow_endpoint": "hls_proxy"
         }

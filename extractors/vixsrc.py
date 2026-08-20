@@ -16,7 +16,7 @@ import config as _cfg
 
 logger = logging.getLogger(__name__)
 
-VIXSRC_CONFIG_URL = "https://raw.githubusercontent.com/realbestia1/damains/refs/heads/main/damains.json"
+VIXSRC_CONFIG_URL = "https://raw.githubusercontent.com/realbestia1/domains/refs/heads/main/domains.json"
 _vixsrc_domain = None
 _vixsrc_config_loaded_at = 0.0
 
