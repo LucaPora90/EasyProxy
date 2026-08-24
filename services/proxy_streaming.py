@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import os
 import re
 import time
 import urllib.parse
@@ -34,6 +35,7 @@ from services.proxy_shared import (
     should_use_curl_cffi,
     is_special_cdn_stream,
     ProxyDeadRetryError,
+    get_public_base_url,
 )
 
 class _ParallelFallback(Exception):
@@ -275,6 +277,14 @@ class HLSProxyStreamingMixin:
                 if header in request.headers:
                     headers[header] = request.headers[header]
 
+            # Media segments must not be content-encoded in transit.  aiohttp
+            # transparently decodes gzip/br, while forwarding the upstream
+            # Content-Length would make Safari wait for bytes that no longer
+            # exist and repeatedly seek backwards.
+            segment_ext = os.path.splitext(segment_name.split("?", 1)[0].lower())[1]
+            if segment_ext in {".ts", ".m4s", ".mp4", ".m4a", ".m4v", ".m4i", ".aac"}:
+                headers["Accept-Encoding"] = "identity"
+
             if is_special_cdn:
                 headers["Accept-Encoding"] = "identity"
 
@@ -331,6 +341,7 @@ class HLSProxyStreamingMixin:
 
                 for header in [
                     "content-type",
+                    "content-length",
                     "content-range",
                     "accept-ranges",
                     "last-modified",
@@ -339,13 +350,28 @@ class HLSProxyStreamingMixin:
                     if header in resp.headers:
                         response_headers[header] = resp.headers[header]
 
-                # Forza il content-type e aggiunge Content-Disposition per .ts
-                set_response_header(response_headers, "Content-Type", "video/mp2t")
+                # Preserve the container type for fMP4/DASH segments. Marking
+                # every segment as MPEG-TS makes VLC download .m4s data without
+                # being able to demux it. Keep attachment semantics for legacy TS.
+                segment_path = segment_name.split("?", 1)[0].lower()
+                segment_ext = os.path.splitext(segment_path)[1]
+                is_fmp4 = segment_ext in {".m4s", ".mp4", ".m4a", ".m4v", ".m4i"}
+                requested_media_type = request.query.get("media_type", "").lower()
                 set_response_header(
                     response_headers,
-                    "Content-Disposition",
-                    f'attachment; filename="{segment_name}"',
+                    "Content-Type",
+                    (
+                        "audio/mp4"
+                        if is_fmp4 and requested_media_type == "audio"
+                        else ("video/mp4" if is_fmp4 else "video/mp2t")
+                    ),
                 )
+                if not is_fmp4:
+                    set_response_header(
+                        response_headers,
+                        "Content-Disposition",
+                        f'attachment; filename="{segment_name}"',
+                    )
                 set_response_header(
                     response_headers, "Access-Control-Allow-Origin", "*"
                 )
@@ -396,6 +422,7 @@ class HLSProxyStreamingMixin:
 
     async def _proxy_stream(self, request, stream_url, stream_headers, bypass_warp=None, forced_proxy=None, force_direct=None):
         """Effettua il proxy dello stream con gestione manifest e AES-128"""
+        is_hls_segment_request = request.path.startswith("/proxy/hls/segment.")
         if bypass_warp is None:
             bypass_warp = request.query.get("warp", "").lower() == "off"
         bypass_proxies = request.query.get("proxy", "").lower() == "off"
@@ -498,6 +525,12 @@ class HLSProxyStreamingMixin:
                 elif key.lower() == "cookie":
                     headers["Cookie"] = headers.pop(key)
 
+            # Never negotiate compression for binary HLS media.  aiohttp may
+            # decode it before relay, invalidating the upstream length/range
+            # that native iOS playback relies on.
+            if is_hls_segment_request:
+                headers["Accept-Encoding"] = "identity"
+
             for internal_header in ["X-Direct-Connection", "x-direct-connection", "X-Force-Direct", "x-force-direct"]:
                 if internal_header in headers:
                     del headers[internal_header]
@@ -559,8 +592,6 @@ class HLSProxyStreamingMixin:
                 logger.info(
                     f"📡 [Proxy Stream] {routing} - Using session ({session_kind}) for: {stream_url}"
                 )
-
-            is_hls_segment_request = request.path.startswith("/proxy/hls/segment.")
 
             # ⚡ Parallel range fetch to beat per-connection CDN throttling (e.g. vidsonic:
             # ~1.7 Mbps/conn vs 2.4 Mbps video -> 3 parallel ranges -> ~5 Mbps aggregate).
@@ -828,7 +859,18 @@ class HLSProxyStreamingMixin:
                 )
 
                 if is_direct_media_stream or is_segment_like:
-                    seg_content_type = "video/mp2t" if is_segment_like else content_type
+                    stream_ext = os.path.splitext(stream_url.split("?", 1)[0].lower())[1]
+                    is_fmp4_segment = stream_ext in {".m4s", ".mp4", ".m4a", ".m4v", ".m4i"}
+                    requested_media_type = request.query.get("media_type", "").lower()
+                    seg_content_type = (
+                        "audio/mp4"
+                        if is_segment_like and is_fmp4_segment and requested_media_type == "audio"
+                        else (
+                            "video/mp4"
+                            if is_segment_like and is_fmp4_segment
+                            else ("video/mp2t" if is_segment_like else content_type)
+                        )
+                    )
                     response_headers = {
                         "Content-Type": seg_content_type,
                         "Access-Control-Allow-Origin": "*",
@@ -908,13 +950,7 @@ class HLSProxyStreamingMixin:
 
                 if manifest_content:
                     logger.info(f"📄 HLS manifest detected: {stream_url}")
-                    cf_visitor = request.headers.get("CF-Visitor", "")
-                    if '"scheme"' in cf_visitor and "https" in cf_visitor.lower():
-                        scheme = "https"
-                    else:
-                        scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
-                    host = request.headers.get("X-Forwarded-Host", request.host)
-                    proxy_base = f"{scheme}://{host}"
+                    proxy_base = get_public_base_url(request)
                     original_url = request.query.get("orig_url") or request.query.get("url") or request.query.get("d", "")
                     use_short_hls_urls = should_use_short_manifest_urls(
                         original_url,
@@ -953,13 +989,7 @@ class HLSProxyStreamingMixin:
                     manifest_content = content_bytes.decode("utf-8", errors='replace')
 
                     # ✅ CORREZIONE: Rileva lo schema e l'host corretti quando dietro un reverse proxy
-                    cf_visitor = request.headers.get("CF-Visitor", "")
-                    if '"scheme"' in cf_visitor and "https" in cf_visitor.lower():
-                        scheme = "https"
-                    else:
-                        scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
-                    host = request.headers.get("X-Forwarded-Host", request.host)
-                    proxy_base = f"{scheme}://{host}"
+                    proxy_base = get_public_base_url(request)
 
                     # Recupera parametri
                     clearkey_param = parse_clearkey_params(request)
@@ -1523,9 +1553,14 @@ class HLSProxyStreamingMixin:
                     None, decrypt_segment, init_content, segment_content, key_id, key, skip_init
                 )
 
-            # Serve raw decrypted fMP4
+            # Serve raw decrypted fMP4.  DASH uses `.m4s` for both tracks, so
+            # preserve the track kind explicitly for Safari's native demuxer.
             ts_content = combined_content
-            content_type = "video/mp4"
+            media_type = request.query.get("media_type", "").lower()
+            if media_type not in {"audio", "video"}:
+                source_name = (url or init_url or "").lower()
+                media_type = "audio" if "track_audio" in source_name else "video"
+            content_type = "audio/mp4" if media_type == "audio" else "video/mp4"
 
             # Invia Risposta
             return web.Response(

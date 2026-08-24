@@ -14,6 +14,7 @@ from services.proxy_shared import (
     logger, web, APP_VERSION,
     check_password, get_client_ip, PlaylistBuilder, ClientSession, ClientTimeout,
     TCPConnector, ProxyConnector, get_connector_for_proxy, API_PASSWORD,
+    get_public_base_url,
 )
 from extractors.registry import *
 import config_store
@@ -46,10 +47,7 @@ class HLSProxyPagesMixin:
                     text="No valid playlist definition found", status=400
                 )
 
-            # ✅ CORREZIONE: Rileva lo schema e l'host corretti quando dietro un reverse proxy
-            scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
-            host = request.headers.get("X-Forwarded-Host", request.host)
-            base_url = f"{scheme}://{host}"
+            base_url = get_public_base_url(request)
 
             # ✅ FIX: Passa api_password al builder se presente
             api_password = request.query.get("api_password")
@@ -244,6 +242,7 @@ class HLSProxyPagesMixin:
         await self._refresh_latest_version()
 
         stats = get_system_stats()
+        active_streams = _shared.get_active_streams()
 
         info = {
             "proxy": "EasyProxy",
@@ -263,7 +262,8 @@ class HLSProxyPagesMixin:
                 "extractors_cached": len(self.extractors),
                 "cdn_tokens": len(getattr(self, '_renewed_cdn_tokens', {})),
                 "proxy_sessions_cached": len(getattr(self, '_proxy_sessions', {})),
-                "active_stream_sessions": len(_shared.ACTIVE_STREAM_SESSIONS),
+                "active_stream_sessions": len(active_streams),
+                "active_stream_sessions_window_seconds": 30,
                 "bypassed_warp_domains": len(_shared.BYPASSED_WARP_DOMAINS),
                 "template_cache": len(getattr(self, '_template_cache', {})),
                 "dead_proxies": len(getattr(_config, 'DEAD_PROXIES', {})),
@@ -319,7 +319,7 @@ class HLSProxyPagesMixin:
 
     async def handle_openapi(self, request):
         """Espone una specifica OpenAPI minimale per Swagger/ReDoc."""
-        server_url = f"{request.scheme}://{request.host}"
+        server_url = get_public_base_url(request)
         requires_password = bool(API_PASSWORD)
 
         security_schemes = {
@@ -898,9 +898,7 @@ class HLSProxyPagesMixin:
             generated_urls = []
 
             # Determina base URL del proxy
-            scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
-            host = request.headers.get("X-Forwarded-Host", request.host)
-            proxy_base = f"{scheme}://{host}"
+            proxy_base = get_public_base_url(request)
 
             for item in urls_to_process:
                 dest_url = item.get("destination_url")
