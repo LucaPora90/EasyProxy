@@ -7,6 +7,7 @@ from services.proxy_dash import HLSProxyDashMixin
 from services.proxy_handlers import HLSProxyHandlersMixin
 from services.proxy_pages import HLSProxyPagesMixin
 from services.proxy_streaming import HLSProxyStreamingMixin
+from services.proxy_dual import HLSProxyDualMixin
 
 # ContextVars to isolate extractor state per request/asyncio task to avoid concurrent request interference
 _extractors_var = contextvars.ContextVar("extractors", default=None)
@@ -15,6 +16,7 @@ _extractor_stream_atimes_var = contextvars.ContextVar("extractor_stream_atimes",
 
 
 class HLSProxy(
+    HLSProxyDualMixin,
     HLSProxyCoreMixin,
     HLSProxyHandlersMixin,
     HLSProxyDashMixin,
@@ -94,7 +96,6 @@ class HLSProxy(
         self.latest_version = "Checking..."
         self.warp_status = "Checking..."
         self._warp_ip = ""
-
 
 
 __all__ = ["HLSProxy"]
