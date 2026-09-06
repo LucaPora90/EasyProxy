@@ -113,9 +113,18 @@ Only basic environment variables need to be set in your `.env` file or container
 | `API_PASSWORD` | Password to protect the proxy API and admin panel | `ep` |
 
 ### 🛡️ Cloudflare WARP Integration
-The Docker image includes an integrated Cloudflare WARP client to bypass IP-based blocks.
+The Docker image includes `wgcf` + `wireproxy`, providing a userspace WireGuard SOCKS5 relay.
+It requires no `NET_ADMIN`, privileged mode, `/dev/net/tun`, kernel module, or
+sysctl.
 
 You can enable and configure WARP, customize the excluded domains list, and enter your license key directly from the **Admin Panel**.
+
+### 🧩 VixSrc FlareSolverr
+The Docker image also contains FlareSolverr, Chromium, and Xvfb. FlareSolverr is
+not started at EasyProxy startup: VixSrc launches it only after detecting a
+Cloudflare challenge, passes the currently selected proxy/WARP route, imports
+the returned cookies and User-Agent, then terminates the process immediately.
+When WARP is active, a missing solver route fails closed instead of using direct.
 
 ---
 

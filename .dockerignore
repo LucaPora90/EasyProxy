@@ -2,3 +2,7 @@
 .env
 __pycache__
 *.pyc
+scratch/
+.pytest_cache/
+data/
+.venv/

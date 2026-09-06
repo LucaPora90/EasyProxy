@@ -11,24 +11,33 @@ ENV PYTHONUNBUFFERED=1
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     git \
-    gnupg \
-    gpg \
     tar \
     nodejs \
-    && curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg \
-    && echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ bookworm main" | tee /etc/apt/sources.list.d/cloudflare-client.list \
-    && apt-get update && apt-get install -y --no-install-recommends \
-    cloudflare-warp \
     netcat-openbsd \
+    procps \
     ffmpeg \
     fonts-dejavu \
+    chromium \
+    chromium-common \
+    chromium-driver \
+    xvfb \
+    xauth \
+    dumb-init \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Optional userspace WARP tools. They allow WARP as a local SOCKS5 proxy
-# without NET_ADMIN or /dev/net/tun when WARP_MODE=wireproxy is selected.
+# FlareSolverr is part of this image, but EasyProxy starts it only on-demand
+# when VixSrc returns a Cloudflare challenge.
+ARG FLARESOLVERR_VERSION=3.5.0
+RUN set -eux; \
+    git clone --depth 1 --branch "v${FLARESOLVERR_VERSION}" \
+        https://github.com/FlareSolverr/FlareSolverr.git /opt/flaresolverr; \
+    pip install --no-cache-dir -r /opt/flaresolverr/requirements.txt; \
+    rm -rf /opt/flaresolverr/.git
+
+# WARP config generator and stable userspace SOCKS5 relay.
 ARG WGCF_VERSION=2.2.29
-ARG WIREPROXY_VERSION=1.0.9
+ARG WIREPROXY_VERSION=1.1.2
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
@@ -39,11 +48,15 @@ RUN set -eux; \
     esac; \
     curl -fL "https://github.com/ViRb3/wgcf/releases/download/v${WGCF_VERSION}/wgcf_${WGCF_VERSION}_linux_${wgcf_arch}" -o /usr/local/bin/wgcf; \
     chmod +x /usr/local/bin/wgcf; \
-    curl -fL "https://github.com/pufferffish/wireproxy/releases/download/v${WIREPROXY_VERSION}/wireproxy_linux_${wireproxy_arch}.tar.gz" -o /tmp/wireproxy.tar.gz; \
-    tar -xzf /tmp/wireproxy.tar.gz -C /tmp; \
-    find /tmp -type f -name wireproxy -exec mv {} /usr/local/bin/wireproxy \; ; \
+    curl -fL "https://github.com/windtf/wireproxy/releases/download/v${WIREPROXY_VERSION}/wireproxy_linux_${wireproxy_arch}.tar.gz" -o /tmp/wireproxy.tar.gz; \
+    curl -fL "https://github.com/windtf/wireproxy/releases/download/v${WIREPROXY_VERSION}/checksums.txt" -o /tmp/wireproxy.checksums; \
+    checksum="$(awk -v asset="wireproxy_linux_${wireproxy_arch}.tar.gz" '$2 == asset { print $1 }' /tmp/wireproxy.checksums)"; \
+    test -n "$checksum"; \
+    printf '%s  /tmp/wireproxy.tar.gz\n' "$checksum" | sha256sum -c -; \
+    tar -xzf /tmp/wireproxy.tar.gz -C /usr/local/bin wireproxy; \
     chmod +x /usr/local/bin/wireproxy; \
-    rm -f /tmp/wireproxy.tar.gz
+    rm -f /tmp/wireproxy.tar.gz /tmp/wireproxy.checksums; \
+    mkdir -p /etc/wireguard
 
 # Install Ookla Speedtest CLI for the admin panel speedtest
 ARG SPEEDTEST_VERSION=1.2.0
@@ -65,11 +78,18 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 # 3. Environment Settings
 ENV PYTHONPATH=/app
+ENV FLARESOLVERR_DIR=/opt/flaresolverr
+ENV FLARESOLVERR_LOG_LEVEL=error
 
 # Copia esplicita
 COPY . .
 
-RUN chmod +x entrypoint.sh
+# FlareSolverr uses this Docker marker to avoid downloading an
+# undetected_chromedriver binary for the wrong CPU architecture. Debian's
+# chromedriver comes from the same package set as Chromium above.
+RUN ln -sf "$(command -v chromedriver)" /app/chromedriver
+
+RUN chmod +x entrypoint.sh scripts/warp_userspace_ctl.sh
 
 # 5. Metadata & Ports
 LABEL org.opencontainers.image.title="EasyProxy Monolith"

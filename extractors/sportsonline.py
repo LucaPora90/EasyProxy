@@ -65,6 +65,7 @@ class SportsonlineExtractor:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
         }
         self.session = None
+        self._route_sessions = {}
         self.mediaflow_endpoint = "hls_manifest_proxy"
         self.proxies = proxies or _cfg.GLOBAL_PROXIES
         self._session_proxy = None
@@ -156,20 +157,26 @@ class SportsonlineExtractor:
 
     async def _get_session(self, url: str = None, force_direct: bool = False):
         if force_direct:
+            if not _cfg.is_direct_connection_allowed():
+                raise aiohttp.ClientConnectionError(
+                    "Sportsonline: implicit direct fallback disabled"
+                )
             proxy = None
         else:
             proxy = await get_preferred_proxy_for_url(url, "sportsonline", self.proxies)
-            if not proxy and not url:
-                proxy = self._get_random_proxy()
 
+        if proxy is None and not _cfg.is_direct_connection_allowed():
+            raise aiohttp.ClientConnectionError(
+                "Sportsonline: direct fallback disabled; no proxy route available"
+            )
+
+        self.session = self._route_sessions.get(proxy)
+        self._session_proxy = proxy
         if (
             self.session is None
             or self.session.closed
             or self._session_proxy != proxy
         ):
-            if self.session and not self.session.closed:
-                await self.session.close()
-
             timeout = ClientTimeout(total=60, connect=30, sock_read=30)
 
             if proxy:
@@ -185,6 +192,7 @@ class SportsonlineExtractor:
                 cookie_jar=aiohttp.CookieJar(),
             )
             self._session_proxy = proxy
+            self._route_sessions[proxy] = self.session
         return self.session
 
     async def _make_robust_request(
@@ -205,32 +213,34 @@ class SportsonlineExtractor:
                     return html, str(response.url)
 
             except (ssl.SSLError, ClientOSError) as e:
-                logger.warning(f"SSL/OS error attempt {attempt + 1} for {url}: {str(e)}")
+                logger.warning(
+                    "SSL/OS error attempt %s/%s for %s via %s: %s: %r",
+                    attempt + 1,
+                    retries,
+                    url,
+                    self._session_proxy or "direct",
+                    type(e).__name__,
+                    e,
+                )
                 if self._session_proxy:
-                    logger.info(f"SSL/OS error with proxy {self._session_proxy}, retrying direct...")
-                    if self.session and not self.session.closed:
-                        await self.session.close()
-                    self.session = None
-                    self._session_proxy = None
-                    session = await self._get_session(url, force_direct=True)
-                    try:
-                        async with session.get(url, headers=final_headers, timeout=timeout) as response:
-                            response.raise_for_status()
-                            html = await self._handle_response_content(response)
-                            if not html:
-                                raise ExtractorError(f"Empty response for {url}")
-                            logger.info(f"Direct connection succeeded for {url} after SSL error")
-                            return html, str(response.url)
-                    except Exception as direct_err:
-                        logger.warning(f"Direct connection also failed for {url}: {str(direct_err)}")
-                        raise ExtractorError(f"All request attempts failed for {url}: {str(e)}")
+                    logger.info(f"SSL/OS error with proxy {self._session_proxy}, retrying without direct fallback...")
+                    # Keep the shared session alive for concurrent requests.
+                    # aiohttp removes the failed connection from its pool.
                 if attempt < retries - 1:
                     await asyncio.sleep(initial_delay)
                 else:
                     raise ExtractorError(f"All request attempts failed for {url}: {str(e)}")
 
             except Exception as e:
-                logger.warning(f"Request attempt {attempt + 1} failed for {url}: {str(e)}")
+                logger.warning(
+                    "Request attempt %s/%s failed for %s via %s: %s: %r",
+                    attempt + 1,
+                    retries,
+                    url,
+                    self._session_proxy or "direct",
+                    type(e).__name__,
+                    e,
+                )
                 if attempt < retries - 1:
                     await asyncio.sleep(initial_delay)
                 else:
@@ -409,15 +419,23 @@ class SportsonlineExtractor:
             logger.debug(f"Found {len(packed_blocks)} packed blocks")
 
             if not packed_blocks:
-                logger.warning("No packed blocks found, trying direct m3u8 search")
-                # Fallback: try direct m3u8 search
-                direct_match = (
-                    self._extract_m3u8_candidate(iframe_html)
-                    or self._extract_econfig_m3u8(iframe_html)
+                # Current Sportzonline pages commonly use window._econfig
+                # instead of P.A.C.K.E.R.; this is a normal fallback path.
+                logger.debug(
+                    "No packed blocks found; trying inline/econfig M3U8 fallback"
                 )
+                direct_match = self._extract_m3u8_candidate(iframe_html)
+                fallback_source = "inline"
+                if not direct_match:
+                    direct_match = self._extract_econfig_m3u8(iframe_html)
+                    fallback_source = "econfig"
                 if direct_match:
                     m3u8_url = self._normalize_stream_url(direct_match, iframe_url)
-                    logger.debug(f"Found direct m3u8 URL: {m3u8_url}")
+                    logger.info(
+                        "Found M3U8 URL via %s fallback: %s",
+                        fallback_source,
+                        m3u8_url,
+                    )
 
                     return {
                         "destination_url": m3u8_url,
@@ -425,7 +443,9 @@ class SportsonlineExtractor:
                         "mediaflow_endpoint": self.mediaflow_endpoint,
                     }
                 else:
-                    raise ExtractorError("No packed blocks or direct m3u8 URL found")
+                    raise ExtractorError(
+                        "No packed blocks, inline M3U8, or _econfig stream URL found"
+                    )
 
             # Choose block: if >=2 use second (index 1), else first (index 0)
             chosen_idx = 1 if len(packed_blocks) > 1 else 0
@@ -489,9 +509,11 @@ class SportsonlineExtractor:
             raise ExtractorError(f"Extraction failed: {str(e)}")
 
     async def close(self):
-        if self.session and not self.session.closed:
-            await self.session.close()
-            self.session = None
+        for session in self._route_sessions.values():
+            if not session.closed:
+                await session.close()
+        self._route_sessions.clear()
+        self.session = None
 
 
 def extract_unpack(packed_js):

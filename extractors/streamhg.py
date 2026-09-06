@@ -84,5 +84,4 @@ class StreamHGExtractor(BaseExtractor):
         raise ExtractorError(f"STREAMHG extraction failed for {url}")
 
     async def close(self):
-        if self.session and not self.session.closed:
-            await self.session.close()
+        await super().close()

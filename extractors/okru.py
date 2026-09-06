@@ -39,5 +39,4 @@ class OkruExtractor(BaseExtractor):
         raise ExtractorError("Failed to parse OK.ru page")
 
     async def close(self):
-        if self.session and not self.session.closed:
-            await self.session.close()
+        await super().close()

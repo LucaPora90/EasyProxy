@@ -35,6 +35,10 @@ class FreeshotExtractor:
 
     async def _get_session(self, url: str = None):
         proxy = await get_preferred_proxy_for_url(url, "freeshot", self.proxies)
+        if proxy is None and not _cfg.is_direct_connection_allowed():
+            raise aiohttp.ClientConnectionError(
+                "Freeshot: direct fallback disabled; no proxy route available"
+            )
         if (
             self.session is None
             or self.session.closed

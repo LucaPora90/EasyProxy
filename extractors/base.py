@@ -17,6 +17,28 @@ logger = logging.getLogger(__name__)
 class ExtractorError(Exception):
     pass
 
+
+class MockResponse:
+    """Small response adapter shared by text and binary extractor results."""
+
+    def __init__(self, text, status, headers, url, cookies):
+        self.text = text
+        self.status = status
+        self.status_code = status
+        self.headers = headers
+        self.url = url
+        self.cookies = cookies
+
+    @property
+    def json(self):
+        import json
+
+        try:
+            return json.loads(self.text)
+        except Exception:
+            return {}
+
+
 class BaseExtractor:
     """Base class for extractors with robust networking and proxy fallback."""
     
@@ -31,20 +53,24 @@ class BaseExtractor:
         self.proxies = proxies or []
         self.extractor_name = extractor_name
         self._session_proxy = None
+        self._route_sessions = {}
         
 
     async def _get_session(self, url: str = None):
         proxy = await get_preferred_proxy_for_url(url, self.extractor_name, self.proxies or _cfg.GLOBAL_PROXIES)
 
         async with self._session_lock:
+            self.session = self._route_sessions.get(proxy)
+            self._session_proxy = proxy
+            if proxy is None and not _cfg.is_direct_connection_allowed():
+                raise ClientConnectionError(
+                    "No proxy route available; direct fallback disabled"
+                )
             if (
                 self.session is None
                 or self.session.closed
                 or self._session_proxy != proxy
             ):
-                if self.session and not self.session.closed:
-                    await self.session.close()
-
                 timeout = ClientTimeout(total=60, connect=30, sock_read=30)
 
                 if proxy:
@@ -64,6 +90,7 @@ class BaseExtractor:
                     headers={'User-Agent': self.base_headers["User-Agent"]}
                 )
                 self._session_proxy = proxy
+                self._route_sessions[proxy] = self.session
         return self.session
 
     async def _make_request(self, url: str, method: str = "GET", headers: dict = None, retries: int = 2, **kwargs):
@@ -71,7 +98,8 @@ class BaseExtractor:
         final_headers = headers or {}
         if "User-Agent" not in final_headers:
             final_headers["User-Agent"] = self.base_headers["User-Agent"]
-            
+
+        session = None
         for attempt in range(retries):
             try:
                 session = await self._get_session(url)
@@ -88,23 +116,7 @@ class BaseExtractor:
                         return MockResponse("", response.status, response.headers, str(response.url), response.cookies)
 
                     content = await response.text()
-                    
-                    class MockResponse:
-                        def __init__(self, text, status, headers, url, cookies):
-                            self.text = text
-                            self.status = status
-                            self.headers = headers
-                            self.url = url
-                            self.cookies = cookies
-                        
-                        @property
-                        def json(self):
-                            import json
-                            try:
-                                return json.loads(self.text)
-                            except Exception:
-                                return {}
-                    
+
                     return MockResponse(content, response.status, response.headers, str(response.url), response.cookies)
             except ALL_PROXY_ERRORS + (asyncio.TimeoutError, ClientConnectionError, aiohttp.ClientResponseError) as e:
                 is_proxy_err = isinstance(e, ALL_PROXY_ERRORS)
@@ -114,12 +126,8 @@ class BaseExtractor:
                 status = getattr(e, 'status', None)
                 logger.warning(f"[{self.extractor_name}] Attempt {attempt+1} failed for {url}: {e}")
                 
-                # Reset session
-                async with self._session_lock:
-                    if session and not session.closed:
-                        await session.close()
-                    if self.session is session:
-                        self.session = None
+                # aiohttp discards failed connections itself. Closing the shared
+                # session here would abort unrelated concurrent requests.
                 
                 if is_proxy_err and SELECTED_PROXY_CONTEXT.get() and not STRICT_PROXY_CONTEXT.get():
                     proxy_to_mark = SELECTED_PROXY_CONTEXT.get()
@@ -135,6 +143,11 @@ class BaseExtractor:
         raise ExtractorError(f"Request failed for {url}")
 
     async def close(self):
-        if self.session and not self.session.closed:
-            await self.session.close()
-
+        sessions = set(self._route_sessions.values())
+        if self.session is not None:
+            sessions.add(self.session)
+        for session in sessions:
+            if not session.closed:
+                await session.close()
+        self._route_sessions.clear()
+        self.session = None

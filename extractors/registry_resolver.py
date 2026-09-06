@@ -7,6 +7,7 @@ from config import (
     SELECTED_PROXY_CONTEXT,
     STRICT_PROXY_CONTEXT,
     BYPASS_PROXIES_CONTEXT,
+    BYPASS_WARP_CONTEXT,
     get_proxy_for_url,
     get_extractor_proxies,
 )
@@ -38,20 +39,48 @@ def _resolve_sportsonline_proxy(url: str, bypass_warp: bool = False) -> str | No
 
 
 def _build_proxy_list(primary_proxy: str | None = None, extractor_name: str | None = None) -> list[str]:
-    """Build proxy list; explicit/extractor proxies are strict and exclude globals."""
+    """Build the extractor's fallback list without enabling direct implicitly."""
     proxies = []
     selected_proxy = SELECTED_PROXY_CONTEXT.get()
     if selected_proxy and STRICT_PROXY_CONTEXT.get():
-        return [selected_proxy]
+        # A relay URL may carry a WARP proxy selected before the admin switch
+        # changed. Never freeze that stale route into a cached extractor.
+        if not (
+            _config.is_warp_proxy_url(selected_proxy)
+            and (
+                BYPASS_WARP_CONTEXT.get()
+                or not _config._get_dynamic_warp_enabled()
+            )
+        ):
+            return [selected_proxy]
+        selected_proxy = None
     if BYPASS_PROXIES_CONTEXT.get():
         return []
     extractor_proxies = get_extractor_proxies(extractor_name or "")
-    if extractor_proxies:
-        return extractor_proxies
     _GLOBAL_PROXIES = _config.GLOBAL_PROXIES
-    for proxy in ([selected_proxy] if selected_proxy else []) + ([primary_proxy] if primary_proxy else []) + list(_GLOBAL_PROXIES):
+
+    # The URL-aware resolver applies the exact route priority on every request.
+    # Keep this cached list complete so extractor implementations that retain
+    # their own session can still fail over to global/WARP.
+    candidates = (
+        ([selected_proxy] if selected_proxy else [])
+        + list(extractor_proxies)
+        + ([primary_proxy] if primary_proxy else [])
+        + list(_GLOBAL_PROXIES)
+    )
+    for proxy in candidates:
+        if _config.is_warp_proxy_url(proxy):
+            continue
         if proxy and proxy not in proxies:
             proxies.append(proxy)
+
+    if (
+        _config._get_dynamic_warp_enabled()
+        and not BYPASS_WARP_CONTEXT.get()
+        and not _config._is_warp_excluded(extractor_name or "")
+        and not any(_config.is_warp_proxy_url(proxy) for proxy in proxies)
+    ):
+        proxies.append(_config.WARP_PROXY_URL)
     return proxies
 
 
@@ -99,6 +128,17 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
                         request_headers, proxies=proxy_list, bypass_warp=bypass_warp
                     )
                 return self.extractors[key]
+            elif host == "ads":
+                key = _cache_key("ads", bypass_warp)
+                if ADSExtractor is None:
+                    raise RuntimeError("ADSExtractor module not available")
+                proxy = get_proxy_for_url(url, bypass_warp=bypass_warp)
+                proxy_list = _build_proxy_list(proxy, "ads")
+                if key not in self.extractors:
+                    self.extractors[key] = ADSExtractor(
+                        request_headers, proxies=proxy_list
+                    )
+                return self.extractors[key]
             elif _is_sportsonline_candidate(host):
                 key = _cache_key("sportsonline", bypass_warp)
                 if key not in self.extractors:
@@ -109,7 +149,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
             elif host in {"mixdrop", "m1xdrop"}:
                 if key not in self.extractors:
                     self.extractors[key] = MixdropExtractor(
-                        request_headers, proxies=proxy_list
+                        request_headers, proxies=proxy_list, bypass_warp=bypass_warp
                     )
                 return self.extractors[key]
             elif host == "voe":
@@ -275,6 +315,23 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
                         request_headers, proxies=proxy_list
                     )
                 return self.extractors[key]
+            elif host in {"vidfast", "vidfast.vc"}:
+                if VidFastExtractor is None:
+                    raise RuntimeError("VidFastExtractor module not available")
+                if key not in self.extractors:
+                    self.extractors[key] = VidFastExtractor(
+                        request_headers, proxies=proxy_list
+                    )
+                return self.extractors[key]
+            elif host in {"cinejoy", "cinejoy.to"}:
+                key = _cache_key("cinejoy", bypass_warp)
+                if CinejoyExtractor is None:
+                    raise RuntimeError("CinejoyExtractor module not available")
+                if key not in self.extractors:
+                    self.extractors[key] = CinejoyExtractor(
+                        request_headers, proxies=proxy_list, bypass_warp=bypass_warp
+                    )
+                return self.extractors[key]
             elif host in {"mediaset", "mediasetinfinity"}:
                 key = _cache_key("mediaset", bypass_warp)
                 if MediasetExtractor is None:
@@ -304,6 +361,25 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
                 return self.extractors[key]
 
         # 2. Auto-detection basata sull'URL
+        parsed_url = urllib.parse.urlparse(url)
+        if (
+            parsed_url.hostname in {"altadefinizionestreaming.tv", "www.altadefinizionestreaming.tv"}
+            and (
+                parsed_url.path.startswith("/api/player-sources/")
+                or re.fullmatch(r"/film/.+-\d+/?", parsed_url.path)
+            )
+        ):
+            key = _cache_key("ads", bypass_warp)
+            if ADSExtractor is None:
+                raise RuntimeError("ADSExtractor module not available")
+            proxy = get_proxy_for_url(url, bypass_warp=bypass_warp)
+            proxy_list = _build_proxy_list(proxy, "ads")
+            if key not in self.extractors:
+                self.extractors[key] = ADSExtractor(
+                    request_headers, proxies=proxy_list
+                )
+            return self.extractors[key]
+
         # ✅ NUOVO: Salta estrattori specifici se l'URL sembra già un link diretto a un media
         # (evita di provare a estrarre un .mp4 come se fosse una pagina HTML)
         path_lower = url.split('?')[0].lower()
@@ -384,7 +460,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
             return self.extractors[key]
         elif _is_sportsonline_candidate(url):
             key = _cache_key("sportsonline", bypass_warp)
-            proxy = _resolve_sportsonline_proxy(url)
+            proxy = _resolve_sportsonline_proxy(url, bypass_warp=bypass_warp)
             proxy_list = _build_proxy_list(proxy, "sportsonline")
             if key not in self.extractors:
                 self.extractors[key] = SportsonlineExtractor(
@@ -418,7 +494,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
             proxy_list = _build_proxy_list(proxy, "mixdrop")
             if key not in self.extractors:
                 self.extractors[key] = MixdropExtractor(
-                    request_headers, proxies=proxy_list
+                    request_headers, proxies=proxy_list, bypass_warp=bypass_warp
                 )
             return self.extractors[key]
         elif any(
@@ -701,6 +777,28 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
             if key not in self.extractors:
                 self.extractors[key] = VidLinkExtractor(
                     request_headers, proxies=proxy_list
+                )
+            return self.extractors[key]
+        elif re.search(r"(?:www\.)?vidfast\.vc/(?:movie/|tv/)", url, re.IGNORECASE):
+            key = _cache_key("vidfast", bypass_warp)
+            proxy = get_proxy_for_url("vidfast.vc", bypass_warp=bypass_warp)
+            proxy_list = _build_proxy_list(proxy, "vidfast")
+            if VidFastExtractor is None:
+                raise RuntimeError("VidFastExtractor module not available")
+            if key not in self.extractors:
+                self.extractors[key] = VidFastExtractor(
+                    request_headers, proxies=proxy_list
+                )
+            return self.extractors[key]
+        elif re.search(r"(?:www\.)?cinejoy\.to/", url, re.IGNORECASE):
+            key = _cache_key("cinejoy", bypass_warp)
+            proxy = get_proxy_for_url("cinejoy.to", bypass_warp=bypass_warp)
+            proxy_list = _build_proxy_list(proxy, "cinejoy")
+            if CinejoyExtractor is None:
+                raise RuntimeError("CinejoyExtractor module not available")
+            if key not in self.extractors:
+                self.extractors[key] = CinejoyExtractor(
+                    request_headers, proxies=proxy_list, bypass_warp=bypass_warp
                 )
             return self.extractors[key]
         else:

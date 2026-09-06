@@ -17,6 +17,7 @@ import ssl
 logger = logging.getLogger("services.proxy")
 import yarl
 import aiohttp
+from aiohttp_socks import ProxyConnector
 from aiohttp import (
     web,
     ClientSession,
@@ -26,9 +27,6 @@ from aiohttp import (
     ServerDisconnectedError,
     ClientConnectionError,
 )
-from aiohttp_socks import ProxyConnector, ProxyError as AioProxyError
-from python_socks import ProxyError as PyProxyError
-
 import importlib.util
 
 # Lazy check — find_spec does NOT load module, preserving startup behavior.
@@ -44,6 +42,7 @@ def get_curl_async_session():
     return AsyncSession
 
 import config as _config
+import config_store as _config_store
 from config import (
     get_proxy_for_url,
     get_ssl_setting_for_url,
@@ -64,6 +63,72 @@ from extractors.registry import *
 from extractors.provider_hooks import *
 from services.manifest_rewriter import ManifestRewriter
 from services.secure_state import open_state, seal_state
+
+
+def safe_log_endpoint(value: str | None) -> str:
+    """Return URL endpoint without query tokens or credentials."""
+    parsed = urlparse(str(value or ""))
+    if not parsed.netloc:
+        return "unknown"
+    path = parsed.path or "/"
+    if len(path) > 160:
+        path = path[:157] + "..."
+    return f"{parsed.scheme}://{parsed.netloc}{path}"
+
+
+def extractor_log_name(request=None, extractor=None, fallback: str = "unknown") -> str:
+    """Resolve a stable, human-readable extractor label for request logs."""
+    if extractor is not None:
+        value = getattr(extractor, "extractor_name", None) or type(extractor).__name__
+        if value:
+            return str(value).replace("_direct", "").replace("_noproxy", "")
+    if request is not None:
+        query = getattr(request, "query", {})
+        value = query.get("extractor_key") or query.get("host")
+        if value:
+            return str(value).replace("_direct", "").replace("_noproxy", "")
+    return fallback
+
+
+def request_log_context(request=None, target_url: str | None = None, route: str | None = None, extractor=None) -> str:
+    """Build consistent extractor/request context for service-level logs."""
+    query = getattr(request, "query", {}) if request is not None else {}
+    path = getattr(request, "path", "") or ""
+    if "segment" in path:
+        request_type = "segment"
+    elif "manifest" in path or path.endswith(".mpd"):
+        request_type = "manifest"
+    else:
+        request_type = "request"
+    if query.get("direct_hls") == "1":
+        extractor_fallback = "direct_hls"
+    elif path.startswith("/proxy/hls/") or path.startswith("/proxy/mpd/"):
+        extractor_fallback = "generic_hls"
+    else:
+        extractor_fallback = "unknown"
+    requested = query.get("orig_url") or query.get("original_channel_url") or query.get("url") or query.get("d")
+    route_text = route or "unknown"
+    return (
+        f"extractor={extractor_log_name(request, extractor, extractor_fallback)} "
+        f"type={request_type} route={route_text} "
+        f"requested={safe_log_endpoint(requested)} target={safe_log_endpoint(target_url)}"
+    )
+
+
+def safe_log_route(proxy_url: str | None) -> str:
+    """Return route identity without proxy credentials."""
+    if not proxy_url:
+        return "DIRECT"
+    if str(proxy_url).upper() in {"WARP", "DIRECT", "BYPASS"}:
+        return str(proxy_url).upper()
+    if _config.is_warp_proxy_url(str(proxy_url)):
+        return "WARP"
+    parsed = urlparse(str(proxy_url))
+    if parsed.hostname:
+        port = f":{parsed.port}" if parsed.port else ""
+        return f"PROXY({parsed.scheme or 'unknown'}://{parsed.hostname}{port})"
+    return "PROXY"
+
 
 # Global registry for domains already bypassed in WARP to avoid redundant os.system calls
 BYPASSED_WARP_DOMAINS = set()
@@ -150,6 +215,24 @@ def parse_clearkey_params(request) -> str | None:
 
 def seal_clearkey(clearkey: str) -> str:
     return seal_state({"clearkey": clearkey}, "clearkey")
+
+
+def get_extractor_routing_overrides(extractor_key: str | None) -> tuple[bool, bool]:
+    """Return admin WARP/proxy bypass flags for an extractor relay chain."""
+    key = str(extractor_key or "").strip().lower()
+    if not key:
+        return False, False
+
+    base_key = key.replace("_direct", "").replace("_noproxy", "")
+
+    def configured(name: str) -> set[str]:
+        values = _config_store.get(name, [])
+        return {str(value).strip().lower() for value in values if value}
+
+    return (
+        base_key in configured("warp_off_extractors"),
+        base_key in configured("proxy_off_extractors"),
+    )
 
 def check_vavoo_request(headers: dict, request: web.Request, url: str) -> bool:
     return (

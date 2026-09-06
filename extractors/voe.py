@@ -253,5 +253,4 @@ class VoeExtractor(BaseExtractor):
         return json.loads(txt)
 
     async def close(self):
-        if self.session and not self.session.closed:
-            await self.session.close()
+        await super().close()

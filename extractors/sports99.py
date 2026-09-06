@@ -197,5 +197,4 @@ class Sports99Extractor(BaseExtractor):
             return None
 
     async def close(self):
-        if self.session and not self.session.closed:
-            await self.session.close()
+        await super().close()

@@ -7,10 +7,10 @@ import re
 import socket
 import time
 import uuid
-from aiohttp import ClientSession, ClientTimeout, TCPConnector
+from aiohttp import ClientConnectionError, ClientSession, ClientTimeout, TCPConnector
 from typing import Optional, Dict, Any
 from urllib.parse import urlparse, parse_qs
-from config import get_connector_for_proxy, BYPASS_PROXIES_CONTEXT
+from config import BYPASS_WARP_CONTEXT, get_connector_for_proxy, get_preferred_proxy_for_url
 import config as _cfg
 
 logger = logging.getLogger(__name__)
@@ -60,31 +60,74 @@ class VavooExtractor:
 
     async def _get_session(self):
         async with self._session_lock:
-            bypass_proxies = BYPASS_PROXIES_CONTEXT.get()
-            if bypass_proxies and self.session is not None and not self.session.closed:
-                await self.session.close()
-                self.session = None
-                self._proxy = None
-            if self.session is not None and not self.session.closed:
+            bypass_warp = BYPASS_WARP_CONTEXT.get()
+            warp_enabled = bool(_cfg._get_dynamic_warp_enabled())
+            warp_excluded = bool(_cfg._is_warp_excluded(self._resolve_url))
+            # Re-evaluate on every call: the admin WARP toggle can change while
+            # this cached extractor is still alive.
+            selected_proxy = await get_preferred_proxy_for_url(
+                self._resolve_url,
+                "vavoo",
+                self.proxies,
+                bypass_warp,
+            )
+
+            # Guard against a stale/empty route result: with WARP enabled, Vavoo
+            # must never silently fall back to a direct socket.
+            if (
+                selected_proxy is None
+                and warp_enabled
+                and not bypass_warp
+                and not warp_excluded
+            ):
+                selected_proxy = _cfg.WARP_PROXY_URL
+
+            direct_allowed = _cfg.is_direct_connection_allowed(bypass_warp)
+            logger.debug(
+                "Vavoo routing: proxy=%s warp_enabled=%s excluded=%s "
+                "bypass_warp=%s direct_allowed=%s ipv4_only=yes",
+                selected_proxy or "DIRECT",
+                warp_enabled,
+                warp_excluded,
+                bypass_warp,
+                direct_allowed,
+            )
+
+            if (
+                self.session is not None
+                and not self.session.closed
+                and self._proxy == selected_proxy
+            ):
                 return self.session
 
-            if not bypass_proxies and self._proxy is None and self.proxies:
-                self._proxy = random.choice(self.proxies)
+            if self.session is not None and not self.session.closed:
+                await self.session.close()
+            self.session = None
+            self._proxy = selected_proxy
+
+            if self._proxy is None and not direct_allowed:
+                raise ClientConnectionError(
+                    "Vavoo: direct fallback disabled; no proxy route available"
+                )
 
             timeout = ClientTimeout(total=60, connect=30, sock_read=30)
 
             if self._proxy:
                 logger.debug(f"Using proxy for Vavoo session: {self._proxy}")
-                connector = get_connector_for_proxy(self._proxy, family=socket.AF_INET)
+                connector = get_connector_for_proxy(
+                    self._proxy,
+                    force_ipv4=True,
+                    rdns=False,
+                )
             else:
                 connector = TCPConnector(
+                    family=socket.AF_INET,
                     limit=0,
                     limit_per_host=0,
                     keepalive_timeout=15,
                     enable_cleanup_closed=True,
                     force_close=False,
                     use_dns_cache=True,
-                    family=socket.AF_INET
                 )
 
             self.session = ClientSession(
@@ -184,7 +227,13 @@ class VavooExtractor:
                     else:
                         logger.warning(f"Vavoo ping {url}: status {resp.status}")
             except Exception as e:
-                logger.warning(f"Vavoo ping {url} failed: {e}")
+                logger.warning(
+                    "Vavoo ping %s failed via %s: %s: %r",
+                    url,
+                    self._proxy or "direct",
+                    type(e).__name__,
+                    e,
+                )
         return None
 
     async def _get_sig(self, force: bool = False) -> Optional[str]:

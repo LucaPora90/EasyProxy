@@ -8,6 +8,7 @@ from urllib.parse import urljoin, urlparse
 
 from curl_cffi.requests import AsyncSession
 from config import get_preferred_proxy_for_url
+import config as _cfg
 from utils.cookie_cache import CookieCache
 
 logger = logging.getLogger(__name__)
@@ -40,8 +41,9 @@ class DoodStreamExtractor:
 
     @staticmethod
     def _normalize_proxy_url(proxy_url: str) -> str:
+        # Keep local-DNS SOCKS5 for WARP; remote DNS via wireproxy can stall.
         if proxy_url.startswith("socks5://"):
-            return proxy_url.replace("socks5://", "socks5h://", 1)
+            return proxy_url
         if "://" not in proxy_url:
             return f"socks5h://{proxy_url}"
         return proxy_url
@@ -114,15 +116,26 @@ class DoodStreamExtractor:
         compact_html = re.sub(r"\s+", " ", html[:1200]).strip()
         logger.debug(f"DoodStream compact HTML snippet (first 1200 chars): {compact_html}")
 
-    async def _do_extract_with_proxy(self, embed_url: str, proxy_url: str | None) -> dict | None:
+    async def _do_extract_with_proxy(
+        self,
+        embed_url: str,
+        proxy_url: str | None,
+        bypass_warp: bool = False,
+    ) -> dict | None:
         normalized_proxy = self._normalize_proxy_url(proxy_url) if proxy_url else None
+        if normalized_proxy is None and not _cfg.is_direct_connection_allowed(bypass_warp):
+            raise ExtractorError(
+                "DoodStream: direct fallback disabled; no proxy route available"
+            )
         self.last_used_proxy = normalized_proxy
         logger.info("DoodStream: curl_cffi using %s", normalized_proxy or "direct connection")
         request_kwargs = {}
         if normalized_proxy:
             request_kwargs["proxies"] = {"http": normalized_proxy, "https": normalized_proxy}
 
-        async with AsyncSession(impersonate="chrome124") as session:
+        async with AsyncSession(
+            impersonate="chrome124",
+        ) as session:
             response = await session.get(
                 embed_url,
                 headers={"User-Agent": _DOOD_UA},
@@ -183,6 +196,7 @@ class DoodStreamExtractor:
             result = await self._do_extract_with_proxy(
                 embed_url,
                 await self._get_proxy(embed_url, bypass_warp=bypass_warp),
+                bypass_warp=bypass_warp,
             )
             if result:
                 return result

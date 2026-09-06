@@ -10,9 +10,13 @@ dlstreams_activity.txt
 /scripts/*
 # keep scripts required at runtime in the image
 !/scripts/embedst_runner.mjs
+!/scripts/vidfast_runner.mjs
+!/scripts/warp_userspace_ctl.sh
+!/scripts/cinejoy_runner.mjs
 config.json
 /downloaded_files
 /cache
-/tests
 /graphify-out
 /data
+/.pytest_cache/
+/tests

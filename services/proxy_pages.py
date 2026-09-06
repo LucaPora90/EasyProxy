@@ -19,7 +19,13 @@ from services.proxy_shared import (
 from extractors.registry import *
 import config_store
 import config as _config
-from config import reload_config, clear_proxy_affinity, get_system_stats
+from config import (
+    reload_config,
+    clear_proxy_affinity,
+    get_system_stats,
+    get_memory_profile,
+    reset_memory_profiler,
+)
 
 class HLSProxyPagesMixin:
 
@@ -32,10 +38,8 @@ class HLSProxyPagesMixin:
 
         try:
             url_param = request.query.get("url")
-
             if not url_param:
                 return web.Response(text="Missing 'url' parameter", status=400)
-
             if not url_param.strip():
                 return web.Response(text="'url' parameter cannot be empty", status=400)
 
@@ -52,15 +56,29 @@ class HLSProxyPagesMixin:
             # ✅ FIX: Passa api_password al builder se presente
             api_password = request.query.get("api_password")
 
-            async def generate_response():
-                async for (
-                    line
-                ) in self.playlist_builder.async_generate_combined_playlist(
-                    playlist_definitions, base_url, api_password=api_password
-                ):
-                    yield line.encode("utf-8")
+            # Genera e raccoglie completamente la playlist in memoria prima di
+            # rispondere, invece di inviarla in streaming (chunked) chunk per
+            # chunk. Alcuni client a valle (es. Cloudflare Worker + APTV)
+            # restano bloccati in attesa su risposte StreamResponse/chunked,
+            # mentre gestiscono correttamente una risposta bufferizzata con
+            # Content-Length. La logica di generazione/riscrittura degli URL
+            # non cambia.
+            #
+            # Ottimizzazione memoria: invece di accumulare stringhe in una
+            # lista e poi fare "".join(...) + .encode("utf-8") (che tiene in
+            # memoria contemporaneamente lista di stringhe + stringa unita +
+            # buffer bytes finale, cioè fino a 3 copie parziali), si accumula
+            # direttamente in un bytearray man mano che le righe arrivano.
+            # Questo mantiene un'unica struttura che cresce in place, con un
+            # picco di memoria inferiore per playlist molto grandi.
+            buf = bytearray()
+            async for line in self.playlist_builder.async_generate_combined_playlist(
+                playlist_definitions, base_url, api_password=api_password
+            ):
+                buf.extend(line.encode("utf-8"))
 
-            response = web.StreamResponse(
+            return web.Response(
+                body=bytes(buf),
                 status=200,
                 headers={
                     "Content-Type": "application/vnd.apple.mpegurl",
@@ -68,14 +86,6 @@ class HLSProxyPagesMixin:
                     "Access-Control-Allow-Origin": "*",
                 },
             )
-
-            await response.prepare(request)
-
-            async for chunk in generate_response():
-                await response.write(chunk)
-
-            await response.write_eof()
-            return response
 
         except (ConnectionResetError, OSError) as e:
             logger.info(f"Playlist download interrupted (client disconnected): {e}")
@@ -277,8 +287,14 @@ class HLSProxyPagesMixin:
                     for s in getattr(self, '_proxy_sessions', {}).values()
                     if s and not s.closed and hasattr(s, '_connector') and hasattr(s._connector, '_conns')
                 ),
+                "parallel_fetch": dict(getattr(self, "_parallel_fetch_stats", {})),
             },
-            "memory": stats.get("proxy_ram", {}),
+            "memory": {
+                **stats.get("proxy_ram", {}),
+                "tracemalloc": stats.get("tracemalloc", {}),
+                "processes": stats.get("processes", {}),
+                "asyncio_tasks": stats.get("asyncio_tasks", {}),
+            },
             "modules": {
                 "playlist_builder": PlaylistBuilder is not None,
                 "vavoo_extractor": VavooExtractor is not None,
@@ -307,6 +323,8 @@ class HLSProxyPagesMixin:
                 "/license": "Proxy licenze DRM (ClearKey/Widevine) - ?url=<URL> o ?clearkey=<id:key>",
                 "/info": "Pagina HTML con informazioni sul server",
                 "/api/info": "Endpoint JSON con informazioni sul server",
+                "/api/memory/profile": "Profiler tracemalloc: allocazioni Python e crescita dal boot",
+                "/api/memory/profile/reset": "POST: resetta il baseline del profiler",
                 "/api/dual/memory": "RAM used by the integrated DUAL service",
                 "/dual/menifest.m3u8": "DUAL HLS master with synchronized video + audio - ?d=<Base64 JSON>",
                 "/dual/manifest.m3u8": "Correctly spelled alias for the DUAL HLS master - ?d=<Base64 JSON>",
@@ -326,6 +344,18 @@ class HLSProxyPagesMixin:
             },
         }
         return web.json_response(info)
+
+    async def handle_memory_profile(self, request):
+        """Return top Python allocations and growth since the profiler baseline."""
+        if not check_password(request):
+            return web.Response(status=401, text="Unauthorized: Invalid API Password")
+        return web.json_response(get_memory_profile(request.query.get("limit", 30)))
+
+    async def handle_memory_profile_reset(self, request):
+        """Reset the tracemalloc baseline used by the memory profiler."""
+        if not check_password(request):
+            return web.Response(status=401, text="Unauthorized: Invalid API Password")
+        return web.json_response(reset_memory_profiler())
 
     async def handle_openapi(self, request):
         """Espone una specifica OpenAPI minimale per Swagger/ReDoc."""
@@ -425,7 +455,7 @@ class HLSProxyPagesMixin:
                 "/dual/menifest.m3u8": {
                     "get": {
                         "summary": "DUAL HLS master",
-                        "description": "Builds one HLS master containing a selected video and an extracted, synchronized audio track. The d parameter is URL-safe Base64 JSON. The endpoint is intentionally named menifest for compatibility.",
+                        "description": "Builds one HLS master containing a selected video and an extracted, synchronized audio track. The video is always served through EasyProxy's HLS proxy. The d parameter is URL-safe Base64 JSON. The endpoint is intentionally named menifest for compatibility.",
                         "parameters": [
                             {"name": "d", "in": "query", "required": True, "schema": {"type": "string"}, "description": "URL-safe Base64 JSON DualSyncRequest payload."},
                             {"name": "api_password", "in": "query", "schema": {"type": "string"}},
@@ -1219,7 +1249,7 @@ class HLSProxyPagesMixin:
             clear_proxy_affinity()
             # Invalidate extractor cache if proxy/routing/WARP settings changed
             if any(k in updates for k in ("global_proxies", "extractor_proxies", "transport_routes", "warp_off_extractors", "proxy_off_extractors", "warp_exclude_domains_custom", "proxy_exclude_domains", "enable_warp")):
-                self.extractors.clear()
+                self._invalidate_extractors()
                 logger.info("Extractor cache cleared due to config change")
 
         return web.json_response({"status": "ok", "updated": list(updates.keys())})
@@ -1236,7 +1266,7 @@ class HLSProxyPagesMixin:
         config_store.set("enable_warp", bool(enable))
         reload_config()
         clear_proxy_affinity()
-        self.extractors.clear()
+        self._invalidate_extractors()
 
         if enable:
             logger.info("WARP enabled via admin panel")
@@ -1284,7 +1314,7 @@ class HLSProxyPagesMixin:
         config_store.set("extractor_proxies", extractor_proxies)
         reload_config()
         clear_proxy_affinity()
-        self.extractors.clear()
+        self._invalidate_extractors()
 
         return web.json_response({"status": "ok", "extractor": extractor, "proxy": proxy or None})
 
@@ -1316,7 +1346,7 @@ class HLSProxyPagesMixin:
             config_store.replace_all(data)
             reload_config()
             clear_proxy_affinity()
-            self.extractors.clear()
+            self._invalidate_extractors()
             return web.json_response({"status": "ok", "message": "Config imported successfully"})
         except json.JSONDecodeError:
             return web.Response(status=400, text="Invalid JSON file")

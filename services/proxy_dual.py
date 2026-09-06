@@ -13,6 +13,7 @@ from urllib.parse import urljoin
 
 import aiohttp
 
+import config_store
 from config import check_password
 from services.proxy_shared import (
     BYPASS_PROXIES_CONTEXT,
@@ -54,7 +55,7 @@ _LANGUAGE_ALIASES = {
     "rus": {"ru", "rus", "russian", "russo", "russian 5.1 (dd+)"},
 }
 _SAFE_HEADERS = re.compile(r"^[A-Za-z0-9-]+$")
-_DUAL_SYNC_TIMEOUT_SECONDS = 50
+_DUAL_SYNC_TIMEOUT_SECONDS = 120
 
 
 def _dual_error_code(error: BaseException) -> str:
@@ -203,6 +204,15 @@ class HLSProxyDualMixin:
         return value
 
     @staticmethod
+    def _stable_spec_id(spec: Any) -> str:
+        """ID stabile per la cache: pagina + extractor, mai URL estratti (token)."""
+        if isinstance(spec, dict):
+            extractor = str(spec.get("extractor") or spec.get("host") or "").strip().lower()
+            url = str(spec.get("d") or spec.get("url") or "").strip()
+            return f"{extractor}|{url}"
+        return str(spec or "").strip()
+
+    @staticmethod
     def _routing(spec: dict) -> tuple[bool, bool, str | None]:
         raw_proxy = str(spec.get("proxy") or spec.get("proxy_url") or "").strip()
         proxy_off = raw_proxy.lower() == "off" or bool(spec.get("proxy_off"))
@@ -231,6 +241,23 @@ class HLSProxyDualMixin:
                 "proxy_off": proxy_off,
                 "forced_proxy": forced_proxy,
             }
+
+        # Apply the same admin routing overrides used by the public extractor
+        # endpoint. DUAL resolves extractors in-process, so it cannot rely on
+        # handle_extractor_request to apply these settings for it.
+        extractor_key = extractor_name.replace("_direct", "").replace("_noproxy", "")
+        warp_off_extractors = {
+            str(value).strip().lower()
+            for value in config_store.get("warp_off_extractors", [])
+        }
+        proxy_off_extractors = {
+            str(value).strip().lower()
+            for value in config_store.get("proxy_off_extractors", [])
+        }
+        if extractor_key in warp_off_extractors:
+            warp_off = True
+        if extractor_key in proxy_off_extractors:
+            proxy_off = True
 
         bypass_token = BYPASS_WARP_CONTEXT.set(warp_off)
         proxy_bypass_token = BYPASS_PROXIES_CONTEXT.set(proxy_off)
@@ -282,21 +309,7 @@ class HLSProxyDualMixin:
         except Exception as exc:
             raise DualLinksError(502, f"extractor failed: {type(exc).__name__}: {exc}") from exc
         finally:
-            if extractor:
-                try:
-                    extractor_key = self._extractor_key_for_instance(extractor) or extractor_key
-                except Exception:
-                    pass
-                if extractor_key and extractor_key in self.extractors:
-                    self.extractors.pop(extractor_key, None)
-                    self._extractor_atimes.pop(extractor_key, None)
-                    for key in [key for key in self._extractor_stream_atimes if key[0] == extractor_key]:
-                        self._extractor_stream_atimes.pop(key, None)
-                if hasattr(extractor, "close"):
-                    try:
-                        await extractor.close()
-                    except Exception:
-                        pass
+            # Shared extractor lifecycle belongs to the registry owner.
             BYPASS_WARP_CONTEXT.reset(bypass_token)
             BYPASS_PROXIES_CONTEXT.reset(proxy_bypass_token)
             SELECTED_PROXY_CONTEXT.reset(selected_token)
@@ -344,10 +357,10 @@ class HLSProxyDualMixin:
         return str(text), final_url
 
     @staticmethod
-    def _pick_video(text: str, base_url: str, requested: int) -> tuple[str, int, str | None]:
+    def _pick_video(text: str, base_url: str, requested: int) -> tuple[str, int, str | None, bool]:
         variants, audios = _master_entries(text, base_url)
         if not variants:
-            return base_url, requested or 1080, None
+            return base_url, requested or 1080, None, False
         target = requested or max(item["height"] for item in variants)
         exact = [item for item in variants if item["height"] == target]
         candidates = exact or sorted(
@@ -357,11 +370,18 @@ class HLSProxyDualMixin:
         selected = candidates[0]
         group = selected["attributes"].get("AUDIO", "")
         reference = None
+        muxed_reference = False
         reference_candidates = [item for item in audios if not group or item.get("GROUP-ID") == group]
         if reference_candidates:
             english = [item for item in reference_candidates if _language_match(item, "eng")]
             reference = (english or reference_candidates)[0].get("url")
-        return selected["url"], selected["height"] or target or 1080, reference
+        elif len(variants) > 1:
+            reference = min(
+                variants,
+                key=lambda item: (item["height"] or 10_000, item["width"] or 10_000),
+            )["url"]
+            muxed_reference = reference != selected["url"]
+        return selected["url"], selected["height"] or target or 1080, reference, muxed_reference
 
     @staticmethod
     def _pick_audio(
@@ -450,9 +470,25 @@ class HLSProxyDualMixin:
         return ""
 
     @staticmethod
-    def _fingerprint(url: str, headers: dict) -> str:
-        selected = "|".join(f"{key}:{headers[key]}" for key in sorted(headers))
-        return hashlib.sha1(f"{url}|{selected}".encode()).hexdigest()[:20]
+    def _cached_sync_result(
+        lookup: dict | None,
+        cache_key: str,
+        reference_audio_url: str,
+        validate_muxed_reference: bool,
+    ) -> dict | None:
+        """Accept only the same cache entries accepted by SyncEngine."""
+        if not isinstance(lookup, dict):
+            return None
+        details = lookup.get("details") or lookup
+        if not isinstance(details, dict) or str(
+            details.get("status") or lookup.get("status") or ""
+        ).lower() != "ok":
+            return None
+        if validate_muxed_reference and "reference_matches_video" not in details:
+            return None
+        if reference_audio_url and not details.get("video_start_time"):
+            return None
+        return {"status": "ok", "cached": True, **details, "cache_key": cache_key}
 
     async def _prepare_dual_audio(
         self,
@@ -546,7 +582,7 @@ class HLSProxyDualMixin:
         return urllib.parse.urlunsplit(parts._replace(query=urllib.parse.urlencode(query)))
 
     @staticmethod
-    def _web_test_video_url(request, video_url: str, video: dict) -> str:
+    def _dual_video_proxy_url(request, video_url: str, video: dict) -> str:
         params = {
             "url": video_url,
             "redirect_stream": "true",
@@ -577,14 +613,35 @@ class HLSProxyDualMixin:
         name = str(result.get("audio_name") or result["audio_lang"]).replace('"', "'")
         audio_url = str(result["audio_url"]).replace('"', "%22")
         video_url = str(result["video_url"]).replace('"', "%22")
+        codecs = str(result.get("video_codecs") or "avc1.640028,mp4a.40.2").replace('"', "")
         return "\n".join([
             "#EXTM3U",
             "#EXT-X-VERSION:7",
             f'#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="dual-audio",LANGUAGE="{language}",NAME="{name}",DEFAULT=YES,AUTOSELECT=YES,URI="{audio_url}"',
-            f'#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},RESOLUTION={width}x{resolution},CODECS="avc1.640028,mp4a.40.2",AUDIO="dual-audio"',
+            f'#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},RESOLUTION={width}x{resolution},CODECS="{codecs}",AUDIO="dual-audio"',
             video_url,
             "",
         ])
+
+    @staticmethod
+    def _video_codecs(text: str, base_url: str, video_url: str) -> str:
+        """CODECS reali della variante scelta (hls.js li usa per il SourceBuffer)."""
+        try:
+            variants, _ = _master_entries(text, base_url)
+            for item in variants:
+                if item.get("url") != video_url:
+                    continue
+                raw = str(item["attributes"].get("CODECS", ""))
+                video = next((
+                    part.strip() for part in raw.split(",")
+                    if part.strip().split(".")[0].lower() not in
+                    {"mp4a", "ac-3", "ac-4", "ec-3", "opus", "vorbis", "alac"}
+                ), "")
+                if video:
+                    return f"{video},mp4a.40.2"
+        except (AttributeError, TypeError, ValueError):
+            pass
+        return "avc1.640028,mp4a.40.2"
 
     async def _build_dual_result(self, request, body: dict) -> dict:
         requested_audio_lang = str(
@@ -603,17 +660,27 @@ class HLSProxyDualMixin:
 
         video_spec = body.get("video") or body.get("video_url")
         audio_spec = body.get("audio") or body.get("audio_url")
-        video = await self._resolve_dual_spec(video_spec)
-        audio = await self._resolve_dual_spec(audio_spec)
+        # These two sources are independent. Resolve both concurrently so a
+        # slow extractor/proxy on one side does not delay starting the other.
+        video, audio = await asyncio.gather(
+            self._resolve_dual_spec(video_spec),
+            self._resolve_dual_spec(audio_spec),
+        )
 
-        video_text, video_base = await self._manifest(video)
+        # Both initial manifests are independent as well. The selected audio
+        # playlist is fetched later because its URL comes from audio_text.
+        (video_text, video_base), (audio_text, audio_base) = await asyncio.gather(
+            self._manifest(video),
+            self._manifest(audio),
+        )
         requested_resolution = int(body.get("resolution") or 0)
-        video_url, resolution, auto_reference = self._pick_video(
+        video_url, resolution, auto_reference, muxed_reference = self._pick_video(
             video_text, video_base, requested_resolution
         )
-        reference_audio_url = str(body.get("reference_audio_url") or "").strip() or auto_reference
+        explicit_reference = str(body.get("reference_audio_url") or "").strip()
+        reference_audio_url = explicit_reference or auto_reference
+        validate_muxed_reference = bool(muxed_reference and not explicit_reference)
 
-        audio_text, audio_base = await self._manifest(audio)
         selected_audio_url, audio_meta = self._pick_audio(
             audio_text,
             audio_base,
@@ -628,10 +695,42 @@ class HLSProxyDualMixin:
 
         media_key = str(body.get("media_key") or body.get("mediaKey") or "").strip()
         if not media_key:
-            media_key = hashlib.sha1(str(body.get("video_url") or video["url"]).encode()).hexdigest()[:24]
+            media_key = hashlib.sha1(self._stable_spec_id(video_spec).encode()).hexdigest()[:24]
         video_fingerprint = str(body.get("video_fingerprint") or "").strip()
         if not video_fingerprint:
-            video_fingerprint = self._fingerprint(video_url, video.get("headers") or {})
+            video_fingerprint = hashlib.sha1(
+                f"video|{self._stable_spec_id(video_spec)}".encode()
+            ).hexdigest()[:20]
+
+        audio_segments, _, _ = dual_service.audio._parse_playlist(
+            audio_playlist, audio_playlist_base
+        )
+        audio_fingerprint = dual_service.audio.source_fingerprint(audio_segments)
+        if not audio_fingerprint:
+            raise DualLinksError(400, "selected audio playlist has no segments")
+        cache_key = dual_service.offsets.key(
+            media_key, resolution, video_fingerprint, audio_fingerprint
+        )
+        cache_payload = {
+            "cache_key": cache_key,
+            "media_key": media_key,
+            "resolution": resolution,
+            "video_fingerprint": video_fingerprint,
+            "audio_fingerprint": audio_fingerprint,
+            "vpsAccess": body.get("vpsAccess", ""),
+        }
+        # Check the shared offset cache before bridge audio, session work and
+        # the expensive sync. SyncEngine receives the checked flag so misses
+        # are not queried a second time later in the same request.
+        cache_lookup = await dual_service.offsets.lookup(cache_payload)
+        cached_sync = self._cached_sync_result(
+            cache_lookup,
+            cache_key,
+            reference_audio_url,
+            validate_muxed_reference,
+        )
+        if cached_sync:
+            logger.info("[DUAL] offset cache hit before audio preparation key=%s", cache_key)
 
         session_result = await self._dual_json(request, "POST", "/session", {})
         token = str(session_result.get("token") or "")
@@ -652,18 +751,20 @@ class HLSProxyDualMixin:
                 "video_url": video_url,
                 "video_headers": video.get("headers") or {},
                 "reference_audio_url": reference_audio_url,
+                "validate_muxed_reference": validate_muxed_reference,
                 "audio_hid": candidate.get("hid") or "",
                 "audio_fingerprint": candidate.get("audio_fingerprint") or "",
                 "video_fingerprint": video_fingerprint,
+                "_offset_cache_checked": True,
                 **video_routing,
             }
 
         prepared = None
         audio_hid = ""
-        synced = None
+        synced = cached_sync
         bridge_used = False
         bridge_attempted = False
-        if audio_lang != "eng":
+        if synced is None and audio_lang != "eng":
             try:
                 bridge_url, bridge_meta = self._pick_audio(audio_text, audio_base, "eng")
                 if bridge_url != selected_audio_url:
@@ -672,6 +773,11 @@ class HLSProxyDualMixin:
                     bridge_media["manifest"] = ""
                     bridge_playlist, bridge_base = await self._manifest(bridge_media)
                     if _same_audio_timeline(audio_playlist, bridge_playlist):
+                        logger.info(
+                            "[DUAL] English-first sync trying eng='%s' requested=%s",
+                            (bridge_meta.get("name") or "English"),
+                            audio_lang,
+                        )
                         bridge = await self._prepare_dual_audio(
                             request,
                             bridge_media,
@@ -688,11 +794,29 @@ class HLSProxyDualMixin:
                         if str(bridge_sync.get("status") or "") == "ok":
                             synced = bridge_sync
                             bridge_used = True
+                            report_task = asyncio.create_task(
+                                dual_service.offsets.report(cache_payload, bridge_sync)
+                            )
+                            if hasattr(self, "_background_tasks") and isinstance(self._background_tasks, set):
+                                self._background_tasks.add(report_task)
+                                report_task.add_done_callback(self._background_tasks.discard)
                             logger.info(
                                 "[DUAL] English-first sync succeeded; using requested %s track via '%s' offset",
                                 audio_lang,
                                 bridge_meta.get("name") or "English",
                             )
+                        else:
+                            logger.info(
+                                "[DUAL] English-first sync rejected; falling back to requested %s track",
+                                audio_lang,
+                            )
+                    else:
+                        logger.warning("[DUAL] English bridge skipped: ita/eng timeline mismatch")
+                else:
+                    logger.info(
+                        "[DUAL] English bridge skipped: no separate eng rendition (extractor=%s)",
+                        str(audio.get("extractor_name") or ""),
+                    )
             except DualLinksError as exc:
                 logger.warning("[DUAL] English sync bridge unavailable: %s", exc.message)
         if bridge_attempted and not bridge_used:
@@ -725,15 +849,19 @@ class HLSProxyDualMixin:
             "audio_hls_language": audio_meta.get("hls_language") or audio_lang,
             "resolution": resolution,
             "video_url": video_url,
-            "reference_audio_url": reference_audio_url,
+            "reference_audio_url": (
+                reference_audio_url
+                if synced.get("reference_matches_video", True)
+                else ""
+            ),
             "audio_url": self._audio_url_with_sync(str(prepared.get("url") or ""), synced),
             "audio_hid": audio_hid,
             "sync": synced,
+            "video_codecs": self._video_codecs(video_text, video_base, video_url),
         }
         if bridge_used:
             result["sync_bridge"] = "eng"
-        if str(request.query.get("web_test") or "").lower() in {"1", "true"}:
-            result["video_url"] = self._web_test_video_url(request, video_url, video)
+        result["video_url"] = self._dual_video_proxy_url(request, video_url, video)
         result["m3u8"] = self._dual_master(result)
         return result
 

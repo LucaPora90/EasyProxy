@@ -692,6 +692,7 @@
                             <option value="freeshot">Freeshot</option>
                             <option value="vavoo">Vavoo</option>
                             <option value="vidxgo">VidXGo</option>
+                            <option value="ads">ADS</option>
                             <option value="vixsrc">VixSrc</option>
                             <option value="sportsonline">SportsOnline</option>
                             <option value="dlstreams">DLStreams / DaddyLiveHD</option>
@@ -703,7 +704,9 @@
                             <option value="sports99">Sports99 / CDNLiveTV</option>
                             <option value="embedst">EmbedSports / Streamed</option>
                             <option value="vidsonic">VidSonic</option>
-                            <option value="vidlink">VidLink (Movies / TV)</option>
+                            <option value="vidlink">VidLink</option>
+                            <option value="vidfast">VidFast</option>
+                            <option value="cinejoy">Cinejoy</option>
                             <option value="mediaset">Mediaset Infinity</option>
                             <option value="wittytv">WittyTV</option>
                             <option value="raiplay">RaiPlay</option>
@@ -1399,11 +1402,7 @@
 
         document.getElementById('playDualResult').addEventListener('click', () => {
             const url = document.getElementById('dualResult').value.trim();
-            if (url) {
-                const testUrl = new URL(url, window.location.href);
-                testUrl.searchParams.set('web_test', '1');
-                openPlayerModal(testUrl.toString());
-            }
+            if (url) openPlayerModal(url);
         });
 
         document.getElementById('showDualPayload').addEventListener('click', (event) => {

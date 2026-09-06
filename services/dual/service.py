@@ -40,7 +40,7 @@ def configure_cache(cache_dir: str | Path) -> None:
     cache_path = Path(cache_dir)
     cache_path.mkdir(parents=True, exist_ok=True)
     audio = AudioStore(str(cache_path / "audio"))
-    offsets = RemoteOffsetStore("https://dualdb.realbestia.com")
+    offsets = RemoteOffsetStore()
     sync_engine = SyncEngine(audio, offsets)
 
 

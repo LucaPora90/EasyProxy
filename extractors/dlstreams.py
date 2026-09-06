@@ -16,7 +16,9 @@ except ImportError:
 from config import (
     get_connector_for_proxy,
     get_preferred_proxy_for_url,
+    get_ordered_proxies_for_url,
 )
+import config as _cfg
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,7 @@ class DLStreamsExtractor:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
         }
         self.session = None
+        self._route_sessions = {}
         self.mediaflow_endpoint = "hls_manifest_proxy"
         self.proxies = proxies or []
         self.bypass_warp_active = bypass_warp
@@ -46,6 +49,31 @@ class DLStreamsExtractor:
     def _origin_of(url: str) -> str:
         parsed = urlparse(url)
         return f"{parsed.scheme}://{parsed.netloc}"
+
+    def _route_diagnostic(self, url: str) -> str:
+        """Describe routing state without exposing proxy credentials."""
+        try:
+            ordered = get_ordered_proxies_for_url(
+                url,
+                "dlstreams",
+                self.proxies,
+                self.bypass_warp_active,
+            )
+            warp_url = getattr(_cfg, "WARP_PROXY_URL", "")
+            route_types = ["WARP" if proxy == warp_url else "proxy" for proxy in ordered]
+            route_summary = ",".join(route_types) or "none"
+        except Exception as exc:
+            route_summary = f"unavailable({type(exc).__name__})"
+
+        warp_enabled = bool(_cfg._get_dynamic_warp_enabled())
+        warp_excluded = bool(_cfg._is_warp_excluded(url or ""))
+        direct_allowed = _cfg.is_direct_connection_allowed(self.bypass_warp_active)
+        host = urlparse(url or "").netloc or "unknown"
+        return (
+            f"target={host} warp={'on' if warp_enabled else 'off'} "
+            f"warp_excluded={'yes' if warp_excluded else 'no'} "
+            f"candidates={route_summary} direct={'allowed' if direct_allowed else 'disabled'}"
+        )
 
     def _sync_entry_origin_from_url(self, url: str) -> None:
         parsed = urlparse(url)
@@ -200,17 +228,17 @@ class DLStreamsExtractor:
         # Determine the correct proxy for the current state
         target_url = url or self.stream_origin or self.entry_origin
         proxy_url = await get_preferred_proxy_for_url(target_url, "dlstreams", self.proxies, self.bypass_warp_active)
+        if proxy_url is None and not _cfg.is_direct_connection_allowed(self.bypass_warp_active):
+            raise ExtractorError(
+                "DLStreams: no usable proxy route; direct fallback disabled "
+                f"[{self._route_diagnostic(target_url)}]"
+            )
         
-        # If we have an existing session, check if its proxy matches what we need now
-        if self.session and not self.session.closed:
-            # We store the proxy used for the current session in a custom attribute
-            session_proxy = getattr(self, "_session_proxy", "NOT_SET")
-            if session_proxy == proxy_url:
-                return self.session
-            else:
-                logger.debug("DLStreams: Proxy choice changed (was %s, now %s). Closing old session.", session_proxy, proxy_url)
-                await self.session.close()
-                self.session = None
+        session = self._route_sessions.get(proxy_url)
+        if session is not None and not session.closed:
+            self.session = session
+            self._session_proxy = proxy_url
+            return session
 
         # DLStreams keys and segments appear to be tied to a consistent
         # egress/session context. Using rotating/global proxies here can
@@ -219,7 +247,7 @@ class DLStreamsExtractor:
             connector = get_connector_for_proxy(proxy_url)
             logger.debug("DLStreams: Using proxy session: %s", proxy_url)
         else:
-            connector = TCPConnector(limit=0, limit_per_host=0, family=socket.AF_INET)
+            connector = TCPConnector(limit=0, limit_per_host=0)
             logger.debug("DLStreams: Using direct session (Real IP)")
         
         timeout = ClientTimeout(total=30, connect=10)
@@ -230,6 +258,7 @@ class DLStreamsExtractor:
             cookie_jar=aiohttp.CookieJar(unsafe=True),
         )
         self._session_proxy = proxy_url # Store for future comparison
+        self._route_sessions[proxy_url] = self.session
         return self.session
 
     async def extract(self, url: str, **kwargs) -> Dict[str, Any]:
@@ -264,13 +293,22 @@ class DLStreamsExtractor:
                     logger.info("DLStreams: Direct browser-less extraction succeeded for %s!", f"premium{channel_id}")
                     return direct_result
             except Exception as direct_exc:
-                logger.error("DLStreams: Direct browser-less extraction failed for %s: %s", f"premium{channel_id}", direct_exc)
+                logger.debug(
+                    "DLStreams: browser-less extraction failed for %s: %s",
+                    f"premium{channel_id}",
+                    direct_exc,
+                    exc_info=True,
+                )
 
             raise ExtractorError("Could not retrieve manifest via browser-less extraction (browser fallback is disabled).")
 
+        except asyncio.CancelledError:
+            raise
+        except ExtractorError:
+            raise
         except Exception as e:
-            logger.exception(f"DLStreams extraction failed for {url}")
-            raise ExtractorError(f"Extraction failed: {str(e)}")
+            logger.debug("DLStreams internal extraction error for %s: %s", url, e, exc_info=True)
+            raise ExtractorError(f"DLStreams extraction failed: {str(e)}") from None
 
     async def close(self):
         pending_tasks = list(self._inflight_extract_tasks.values())
@@ -279,6 +317,11 @@ class DLStreamsExtractor:
         if pending_tasks:
             await asyncio.gather(*pending_tasks, return_exceptions=True)
         self._inflight_extract_tasks.clear()
-        if self.session and not self.session.closed:
-            await self.session.close()
-            self.session = None
+        sessions = set(self._route_sessions.values())
+        if self.session is not None:
+            sessions.add(self.session)
+        for session in sessions:
+            if not session.closed:
+                await session.close()
+        self._route_sessions.clear()
+        self.session = None
