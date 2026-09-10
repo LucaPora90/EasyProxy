@@ -3,7 +3,9 @@ import socket
 import re
 import asyncio
 import base64
-from urllib.parse import urlparse
+import json
+import math
+from urllib.parse import urlparse, urljoin
 from typing import Dict, Any
 import aiohttp
 from aiohttp import ClientSession, ClientTimeout, TCPConnector
@@ -21,6 +23,40 @@ from config import (
 import config as _cfg
 
 logger = logging.getLogger(__name__)
+
+def _decode_barecrop_econfig(enc: str) -> str | None:
+    """Decode window._econfig payload used by barecrop.net embeds (Player 2).
+
+    Port of the _0x1b7ade() function in /assets/stream.js:
+      s = atob(enc) -> split in 4 chunks -> reorder [2,0,3,1] ->
+      strip char at index 3 of each chunk -> atob each -> join ->
+      atob -> JSON {stream_url, stream_url_nop2p, ...}
+    Returns the m3u8 URL or None.
+    """
+    try:
+        if not enc:
+            return None
+        s = base64.b64decode(enc).decode("latin1")
+        n = 4
+        order = [2, 0, 3, 1]
+        chunk_len = math.ceil(len(s) / n)
+        parts = [s[i * chunk_len:(i + 1) * chunk_len] for i in range(n)]
+        arr = [""] * n
+        for i, o in enumerate(order):
+            a = str(parts[i])
+            if len(a) < 4:
+                return None
+            a = a[:3] + a[4:]
+            arr[o] = base64.b64decode(a).decode("latin1")
+        final = base64.b64decode("".join(arr)).decode("utf-8", errors="ignore")
+        cfg = json.loads(final)
+        if isinstance(cfg, dict):
+            url = cfg.get("stream_url") or cfg.get("stream_url_nop2p")
+            if isinstance(url, str) and url.startswith("http"):
+                return url.strip()
+        return None
+    except Exception:
+        return None
 
 class ExtractorError(Exception):
     pass
@@ -113,12 +149,106 @@ class DLStreamsExtractor:
             f"{origin}/plus/stream-{channel_id}.php",
             f"{origin}/casting/stream-{channel_id}.php",
             f"{origin}/player/stream-{channel_id}.php",
+            f"{origin}/hub/stream-{channel_id}.php",
         ]
+
+    @staticmethod
+    def _first_media_uri(body: str, base_url: str, want_playlist: bool) -> str | None:
+        """First non-comment URI in a playlist: variant (.m3u8) or segment."""
+        for raw in (body or "").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            low = line.lower().split("?")[0].split("#")[0]
+            if (low.endswith(".m3u8")) == want_playlist:
+                return urljoin(base_url, line)
+        return None
+
+    async def _is_stream_alive(self, session, stream_url: str, headers: dict) -> bool:
+        """Validate the full chain: master -> variant -> first segment (+ AES key).
+
+        Some CDNs serve the manifest (200) while segments 403 (IP-bound
+        tokens, datacenter blocks). A manifest-only check would accept a
+        dead player and hide the working ones, so follow the chain with
+        cheap probes (first bytes of the first segment only).
+        """
+        try:
+            async with session.get(stream_url, headers=headers, timeout=10) as resp:
+                if resp.status != 200:
+                    logger.debug("DLStreams: validation of %s -> HTTP %s", stream_url, resp.status)
+                    return False
+                master = await resp.text()
+            if "#EXTM3U" not in master[:8000] and "#EXT-X-" not in master[:8000]:
+                logger.debug("DLStreams: validation of %s -> not a playlist", stream_url)
+                return False
+            current_url, current_body = stream_url, master
+            # Master -> variant (media playlists contain #EXTINF, masters don't)
+            if "#EXTINF" not in master:
+                variant = self._first_media_uri(master, stream_url, want_playlist=True)
+                if not variant:
+                    logger.debug("DLStreams: validation of %s -> no variant found", stream_url)
+                    return False
+                async with session.get(variant, headers=headers, timeout=8) as resp:
+                    if resp.status != 200:
+                        logger.debug("DLStreams: validation variant %s -> HTTP %s", variant, resp.status)
+                        return False
+                    current_body = await resp.text()
+                current_url = variant
+                if "#EXTM3U" not in current_body[:8000]:
+                    return False
+            # Variant -> first segment (probe first bytes only)
+            segment = self._first_media_uri(current_body, current_url, want_playlist=False)
+            if not segment:
+                logger.debug("DLStreams: validation of %s -> no segments listed", stream_url)
+                return False
+            probe_headers = {**headers, "Range": "bytes=0-1023"}
+            async with session.get(segment, headers=probe_headers, timeout=8) as resp:
+                if resp.status not in (200, 206):
+                    logger.debug("DLStreams: segment probe of %s -> HTTP %s", segment, resp.status)
+                    return False
+                try:
+                    await resp.content.read(4096)
+                except Exception:
+                    pass
+            # AES key, if the variant uses one
+            key_match = re.search(r'#EXT-X-KEY:[^\n]*URI="([^"]+)"', current_body)
+            if key_match:
+                key_url = urljoin(current_url, key_match.group(1))
+                try:
+                    async with session.get(key_url, headers=headers, timeout=8) as resp:
+                        if resp.status != 200:
+                            logger.debug("DLStreams: key probe of %s -> HTTP %s", key_url, resp.status)
+                            return False
+                except Exception as e:
+                    logger.debug("DLStreams: key probe of %s failed: %s", key_url, e)
+                    return False
+            return True
+        except Exception as e:
+            logger.debug("DLStreams: validation of %s failed: %s", stream_url, e)
+            return False
+
+    def _build_result(self, stream_url: str, playback_headers: dict) -> Dict[str, Any]:
+        """Build the extractor response payload for an accepted stream URL."""
+        parsed_stream = urlparse(stream_url)
+        # Sync session cookies for playback/proxying
+        self.stream_origin = f"{parsed_stream.scheme}://{parsed_stream.netloc}"
+        # Store cookies in session if needed
+        cookie_header = self._get_cookie_header_for_url(stream_url)
+        if cookie_header:
+            playback_headers = {**playback_headers, "Cookie": cookie_header}
+        return {
+            "destination_url": stream_url,
+            "request_headers": playback_headers,
+            "mediaflow_endpoint": self.mediaflow_endpoint,
+            "captured_manifest": None,
+            "captured_manifests": {stream_url: ""},
+        }
 
     async def _extract_directly(self, url: str, channel_id: str) -> Dict[str, Any] | None:
         """Fast path direct HTTP M3U8 extraction."""
         session = await self._get_session(url)
         player_urls = self._prioritize_player_urls(channel_id)
+        first_fallback = None  # (stream_url, playback_headers): first URL found, even if dead
         
         for candidate in player_urls:
             try:
@@ -135,7 +265,7 @@ class DLStreamsExtractor:
                         continue
                     html = await resp.text()
                 
-                # Extract player iframe src
+                # Extract player iframe src (support absolute, protocol-relative and relative URLs)
                 iframe_src = None
                 if BeautifulSoup:
                     try:
@@ -147,13 +277,21 @@ class DLStreamsExtractor:
                         logger.debug("DLStreams: bs4 parsing error: %s", e)
                 
                 if not iframe_src:
-                    match = re.search(r'<iframe\s+[^>]*src=["\'](https?://[^"\']+)["\']', html, re.I)
+                    match = re.search(r'<iframe\s+[^>]*src=["\']([^"\']+)["\']', html, re.I)
                     if match:
-                        iframe_src = match.group(1)
+                        iframe_src = match.group(1).strip()
                 
                 if not iframe_src:
                     logger.debug("DLStreams: player iframe not found in HTML of %s", candidate)
                     continue
+
+                # Resolve relative / protocol-relative iframe URLs against the candidate page
+                if iframe_src.startswith("//"):
+                    iframe_src = urlparse(candidate).scheme + ":" + iframe_src
+                elif iframe_src.startswith("/"):
+                    iframe_src = urljoin(candidate, iframe_src)
+                elif not re.match(r"^https?://", iframe_src, re.I):
+                    iframe_src = urljoin(candidate + "/", iframe_src)
                 
                 logger.debug("DLStreams: found player iframe: %s", iframe_src)
                 
@@ -168,23 +306,54 @@ class DLStreamsExtractor:
                         continue
                     iframe_html = await resp.text()
                 
-                # Extract atob(...) Base64 encoded stream URL
-                atob_match = re.search(r"atob\(['\"](.*?)['\"]\)", iframe_html)
-                if not atob_match:
-                    logger.debug("DLStreams: atob parameter not found in iframe HTML. Checking for direct source.")
-                    direct_match = re.search(r"source:\s*['\"](.*?)['\"]", iframe_html)
-                    if not direct_match:
-                        logger.debug("DLStreams: no direct source found either. Iframe HTML start: %s", iframe_html[:200])
-                        continue
-                    stream_url = direct_match.group(1)
-                    logger.debug("DLStreams: extracted direct stream URL: %s", stream_url)
-                else:
-                    b64_url = atob_match.group(1)
-                    stream_url = base64.b64decode(b64_url).decode('utf-8', errors='ignore')
-                    logger.debug("DLStreams: decrypted stream URL: %s", stream_url)
+                # Extract stream URL from iframe HTML.
+                # Supported formats:
+                #  1) barecrop.net Player 2: window._econfig='...' (Clappr, scrambled base64)
+                #  2) classic: source:window.atob('...') / atob('...')
+                #  3) direct: source: 'https://...m3u8'
+                #  4) fallback: any https://...m3u8 URL in page
+                stream_url = None
+
+                m_cfg = re.search(r"window\._econfig\s*=\s*['\"]([^'\"]{100,})['\"]", iframe_html)
+                if m_cfg:
+                    stream_url = _decode_barecrop_econfig(m_cfg.group(1))
+                    if stream_url:
+                        logger.debug("DLStreams: decoded _econfig stream URL: %s", stream_url)
+
+                if not stream_url:
+                    atob_match = re.search(r"(?:window\.)?atob\(['\"]([A-Za-z0-9+/=]{20,})['\"]\)", iframe_html)
+                    if atob_match:
+                        try:
+                            cand = base64.b64decode(atob_match.group(1)).decode('utf-8', errors='ignore').strip()
+                            if cand.startswith("http"):
+                                stream_url = cand
+                                logger.debug("DLStreams: decrypted stream URL: %s", stream_url)
+                            else:
+                                logger.debug("DLStreams: atob payload is not a URL: %s", cand[:80])
+                        except Exception as e:
+                            logger.debug("DLStreams: atob decode failed: %s", e)
+
+                if not stream_url:
+                    direct_match = re.search(r"source\s*:\s*['\"](https?://[^'\"]+?)['\"]", iframe_html)
+                    if direct_match:
+                        stream_url = direct_match.group(1).strip()
+                        logger.debug("DLStreams: extracted direct stream URL: %s", stream_url)
+
+                if not stream_url:
+                    m3u8_match = re.search(r"https?://[^\s'\"<>\\]+\.m3u8[^\s'\"<>\\]*", iframe_html)
+                    if m3u8_match:
+                        stream_url = m3u8_match.group(0)
+                        logger.debug("DLStreams: extracted m3u8 fallback URL: %s", stream_url)
+
+                if not stream_url:
+                    logger.debug("DLStreams: no stream URL found. Iframe HTML start: %s", iframe_html[:200])
+                    continue
+
+                if not stream_url.startswith("http"):
+                    logger.debug("DLStreams: invalid stream URL: %s", stream_url[:120])
+                    continue
                 
                 # Format response payload
-                parsed_stream = urlparse(stream_url)
                 parsed_iframe = urlparse(iframe_src)
                 iframe_origin = f"{parsed_iframe.scheme}://{parsed_iframe.netloc}"
                 
@@ -201,25 +370,27 @@ class DLStreamsExtractor:
                     "Sec-Fetch-Site": "cross-site",
                 }
                 
-                # Sync session cookies for playback/proxying
-                self.stream_origin = f"{parsed_stream.scheme}://{parsed_stream.netloc}"
-                
-                # Store cookies in session if needed
-                cookie_header = self._get_cookie_header_for_url(stream_url)
-                if cookie_header:
-                    playback_headers["Cookie"] = cookie_header
-                
-                return {
-                    "destination_url": stream_url,
-                    "request_headers": playback_headers,
-                    "mediaflow_endpoint": self.mediaflow_endpoint,
-                    "captured_manifest": None,
-                    "captured_manifests": {stream_url: ""},
-                }
+                # Keep the first URL as last-resort fallback (old behaviour),
+                # but only return it if no player validates as alive.
+                if first_fallback is None:
+                    first_fallback = (stream_url, playback_headers)
+
+                # Return the first stream that is actually playable from here.
+                # A dead Player 1 URL must not hide a working Player 2.
+                if await self._is_stream_alive(session, stream_url, playback_headers):
+                    logger.info("DLStreams: working stream found via %s", candidate)
+                    return self._build_result(stream_url, playback_headers)
+                logger.info("DLStreams: stream from %s is dead, trying next player", candidate)
+                continue
                 
             except Exception as e:
                 logger.debug("DLStreams: direct extraction candidate %s failed: %s", candidate, e)
                 continue
+
+        if first_fallback is not None:
+            stream_url, playback_headers = first_fallback
+            logger.warning("DLStreams: no player validated alive, returning first URL as fallback")
+            return self._build_result(stream_url, playback_headers)
                 
         return None
 

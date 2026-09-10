@@ -469,8 +469,12 @@ class VixSrcExtractor:
             if proxy:
                 request_kwargs["proxies"] = {"http": proxy, "https": proxy}
             try:
+                curl_options = _cfg.get_curl_ipv4_options(proxy).get("curl_options")
+                session_kwargs = {"impersonate": imp}
+                if curl_options:
+                    session_kwargs["curl_options"] = curl_options
                 async with CurlAsyncSession(
-                    impersonate=imp,
+                    **session_kwargs,
                 ) as session:
                     resp = await session.get(
                         url,

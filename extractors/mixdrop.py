@@ -118,6 +118,7 @@ class MixdropExtractor:
                         try:
                             async with AsyncSession(
                                 impersonate="chrome120",
+                                curl_options=_cfg.get_curl_ipv4_options(pref_p).get("curl_options") or {},
                             ) as s:
                                 resp = await s.get(
                                     current_url,

@@ -15,7 +15,7 @@ logging.basicConfig(
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from services.proxy import HLSProxy
-from config import PORT, RECORDINGS_DIR, APP_VERSION, start_memory_profiler
+from config import PORT, RECORDINGS_DIR, APP_VERSION
 from services.dual import service as dual_service
 from services.recording_manager import RecordingManager
 from routes.recordings import setup_recording_routes
@@ -146,7 +146,6 @@ def create_app():
     app.on_cleanup.append(cleanup_handler)
     
     async def on_startup(app):
-        start_memory_profiler()
         asyncio.create_task(proxy.start_tasks())
         asyncio.create_task(recording_manager.cleanup_loop())
     app.on_startup.append(on_startup)

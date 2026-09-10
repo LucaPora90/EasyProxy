@@ -119,6 +119,23 @@ class HLSProxyCoreMixin:
                             retire_session(self, p_sess)
                             logger.info(f"[NET] Closed idle proxy session: {p}")
 
+                # Keep independent WARP connector pools for concurrent media
+                # streams.  A stale/busy connector must not stall another
+                # stream that happens to use the same WARP proxy URL.
+                stream_sessions = getattr(self, "_stream_proxy_sessions", None)
+                stream_atimes = getattr(self, "_stream_proxy_session_atimes", None)
+                if stream_sessions is not None and stream_atimes is not None:
+                    stale_streams = [
+                        key for key, t in list(stream_atimes.items())
+                        if now - t > 60
+                    ]
+                    for key in stale_streams:
+                        p_sess = stream_sessions.pop(key, None)
+                        stream_atimes.pop(key, None)
+                        if p_sess and not p_sess.closed:
+                            retire_session(self, p_sess)
+                            logger.info("[NET] Closed idle media session: %s", key[1])
+
                 # 3. Close shared session if idle >30s
                 _session_atime = getattr(self, "_session_atime", 0)
                 if _session_atime and now - _session_atime > 30:
@@ -221,7 +238,10 @@ class HLSProxyCoreMixin:
             if self._warp_established_connections() != 0:
                 return
             warp_url = _shared.WARP_PROXY_URL
-            await self._invalidate_proxy_session(warp_url)
+            await self._invalidate_proxy_session(
+                warp_url,
+                invalidate_streams=True,
+            )
             try:
                 rc = await self._run_warp_control("restart")
             except (FileNotFoundError, asyncio.TimeoutError, OSError) as exc:
@@ -413,9 +433,26 @@ class HLSProxyCoreMixin:
         return False
 
     async def get_warp_status(self) -> str:
-        """Returns WARP status and fetches real external IP through WARP proxy."""
+        """Return cached WARP status; avoid probing SOCKS on every admin poll."""
+        if not _shared.ENABLE_WARP or not _shared.WARP_PROXY_URL:
+            self.warp_status = "Disabled"
+            self._warp_ip = ""
+            self._warp_status_reason = "WARP disabled or proxy URL missing"
+            self._warp_status_checked_at = time.monotonic()
+            return self.warp_status
+
+        now = time.monotonic()
+        if (
+            self.warp_status in {"Connected", "Disconnected"}
+            and now - getattr(self, "_warp_status_checked_at", 0.0) < 15.0
+        ):
+            return self.warp_status
+
         healthy, _reason = await self._probe_warp(timeout_sec=10)
-        return "Connected" if healthy else "Disconnected"
+        self.warp_status = "Connected" if healthy else "Disconnected"
+        self._warp_status_reason = _reason
+        self._warp_status_checked_at = time.monotonic()
+        return self.warp_status
 
     async def _run_warp_control(self, action: str) -> int:
         """Run the explicit userspace WARP control action."""
@@ -446,6 +483,9 @@ class HLSProxyCoreMixin:
                 if rc != 0:
                     return {"status": "error", "message": "wireproxy restart failed"}
                 healthy, reason = await self._probe_warp(timeout_sec=8)
+                self.warp_status = "Connected" if healthy else "Disconnected"
+                self._warp_status_reason = reason
+                self._warp_status_checked_at = time.monotonic()
                 if healthy:
                     return {"status": "ok", "message": "WARP userspace tunnel reconnected"}
                 return {
@@ -475,6 +515,13 @@ class HLSProxyCoreMixin:
         Can be called on-demand (e.g. on page refresh).
         Uses its own temporary session to avoid resetting the shared session idle timer.
         """
+        now = time.monotonic()
+        if now - getattr(self, "_latest_version_checked_at", 0.0) < 3600.0:
+            return
+        # Set before I/O so simultaneous page/API requests cannot create
+        # duplicate GitHub sessions. Background task retries on next interval.
+        self._latest_version_checked_at = now
+
         try:
             cache_buster = int(time.time())
             url = f"https://raw.githubusercontent.com/realbestia1/EasyProxy/main/config.py?t={cache_buster}"
@@ -633,6 +680,11 @@ class HLSProxyCoreMixin:
                 "enable_cleanup_closed": True,
                 "use_dns_cache": True,
             }
+            # The known-good MPD path used IPv4 for DIRECT connections.
+            # Keep WARP/proxy routes dual-stack; this only avoids broken VPS
+            # IPv6 paths for direct CDN requests.
+            if not prefer_default_family:
+                connector_kwargs["family"] = socket.AF_INET
             connector = TCPConnector(**connector_kwargs)
             session = aiohttp.ClientSession(
                 timeout=ClientTimeout(total=None, connect=30, sock_connect=30, sock_read=30),
@@ -674,7 +726,14 @@ class HLSProxyCoreMixin:
         except Exception as e:
             logging.error(f"❌ Error in dynamic WARP bypass: {e}")
 
-    async def _get_proxy_session(self, url: str, bypass_warp: bool = False, forced_proxy: str | None = None):
+    async def _get_proxy_session(
+        self,
+        url: str,
+        bypass_warp: bool = False,
+        forced_proxy: str | None = None,
+        session_key: str | None = None,
+        force_direct: bool = False,
+    ):
         """Create a fresh session or reuse an existing one for the given URL.
 
         Returns: (session, proxy_url) tuple
@@ -719,8 +778,8 @@ class HLSProxyCoreMixin:
                 if p_sess and not p_sess.closed:
                     retire_session(self, p_sess)
 
-        proxy = forced_proxy or get_proxy_for_url(url, bypass_warp=bypass_warp)
-        if not proxy and not _config.is_direct_connection_allowed(bypass_warp):
+        proxy = None if force_direct else (forced_proxy or get_proxy_for_url(url, bypass_warp=bypass_warp))
+        if not proxy and not force_direct and not _config.is_direct_connection_allowed(bypass_warp):
             raise aiohttp.ClientConnectionError(
                 "No proxy route available; direct fallback disabled"
             )
@@ -735,6 +794,41 @@ class HLSProxyCoreMixin:
             if not hasattr(self, "_proxy_sessions"):
                 self._proxy_sessions = {}
                 self._proxy_session_atimes = {}
+
+            # Media requests get an isolated pool for every playback, no
+            # matter whether route is WARP, another proxy, or direct.
+            use_stream_pool = bool(session_key)
+            if use_stream_pool:
+                if not hasattr(self, "_stream_proxy_sessions"):
+                    self._stream_proxy_sessions = {}
+                    self._stream_proxy_session_atimes = {}
+                stream_key = (proxy, str(session_key))
+                stream_session = self._stream_proxy_sessions.get(stream_key)
+                if stream_session is None or stream_session.closed:
+                    logger.info(
+                        "[NET] Creating per-stream proxy session: %s",
+                        str(session_key)[:32],
+                    )
+                    connector = get_connector_for_proxy(
+                        proxy,
+                        limit=0,
+                        limit_per_host=0,
+                        keepalive_timeout=15,
+                        enable_cleanup_closed=True,
+                    )
+                    timeout = ClientTimeout(
+                        total=None,
+                        connect=30,
+                        sock_connect=30,
+                        sock_read=30,
+                    )
+                    stream_session = ClientSession(
+                        timeout=timeout,
+                        connector=connector,
+                    )
+                    self._stream_proxy_sessions[stream_key] = stream_session
+                self._stream_proxy_session_atimes[stream_key] = time.time()
+                return SharedSessionWrapper(stream_session), proxy
 
             # Evict oldest session if cache gets too large (e.g. >= 10) to prevent memory leak
             if len(self._proxy_sessions) >= 10 and proxy not in self._proxy_sessions:
@@ -779,21 +873,127 @@ class HLSProxyCoreMixin:
             self._proxy_session_atimes[proxy] = time.time()
             return SharedSessionWrapper(session), proxy
 
+        if session_key:
+            if not hasattr(self, "_stream_proxy_sessions"):
+                self._stream_proxy_sessions = {}
+                self._stream_proxy_session_atimes = {}
+            stream_key = (None, str(session_key), prefer_default_family)
+            stream_session = self._stream_proxy_sessions.get(stream_key)
+            if stream_session is None or stream_session.closed:
+                logger.info(
+                    "[NET] Creating per-stream direct session: %s",
+                    str(session_key)[:32],
+                )
+                connector_kwargs = {
+                    "limit": 0,
+                    "limit_per_host": 0,
+                    "keepalive_timeout": 15,
+                    "enable_cleanup_closed": True,
+                    "use_dns_cache": True,
+                }
+                if not prefer_default_family:
+                    connector_kwargs["family"] = socket.AF_INET
+                connector = TCPConnector(**connector_kwargs)
+                stream_session = ClientSession(
+                    timeout=ClientTimeout(
+                        total=None,
+                        connect=30,
+                        sock_connect=30,
+                        sock_read=30,
+                    ),
+                    connector=connector,
+                )
+                self._stream_proxy_sessions[stream_key] = stream_session
+            self._stream_proxy_session_atimes[stream_key] = time.time()
+            return SharedSessionWrapper(stream_session), None
+
         session = await self._get_session(prefer_default_family=prefer_default_family)
         return SharedSessionWrapper(session), None
 
-    async def _invalidate_proxy_session(self, proxy_url: str | None) -> bool:
+    async def _invalidate_proxy_session(
+        self,
+        proxy_url: str | None,
+        session_key: str | None = None,
+        invalidate_streams: bool = False,
+    ) -> bool:
         """Drop one pooled proxy session so the next request gets a new connector."""
-        if not proxy_url or not hasattr(self, "_proxy_sessions"):
+        if not proxy_url:
             return False
+
+        invalidated = False
+        stream_sessions = getattr(self, "_stream_proxy_sessions", None)
+        stream_atimes = getattr(self, "_stream_proxy_session_atimes", None)
+        if (
+            stream_sessions is not None
+            and stream_atimes is not None
+            and (session_key is not None or invalidate_streams)
+        ):
+            stream_keys = [
+                key for key in stream_sessions
+                if key[0] == proxy_url
+                and (
+                    invalidate_streams
+                    or key[1] == str(session_key)
+                )
+            ]
+            for key in stream_keys:
+                session = stream_sessions.pop(key, None)
+                stream_atimes.pop(key, None)
+                if session and not session.closed:
+                    retire_session(self, session)
+                invalidated = True
+
+        # A stream-scoped WARP session must not invalidate the shared WARP
+        # session used by other requests/streams.
+        if session_key is not None and proxy_url == _shared.WARP_PROXY_URL:
+            if invalidated:
+                logger.warning("[NET] Invalidated stream proxy session: %s", proxy_url)
+            return invalidated
+
+        if not hasattr(self, "_proxy_sessions"):
+            if invalidated:
+                logger.warning("[NET] Invalidated stream proxy session: %s", proxy_url)
+            return invalidated
         session = self._proxy_sessions.pop(proxy_url, None)
         if hasattr(self, "_proxy_session_atimes"):
             self._proxy_session_atimes.pop(proxy_url, None)
         if not session:
-            return False
+            if invalidated:
+                logger.warning("[NET] Invalidated stream proxy session: %s", proxy_url)
+            return invalidated
         if not session.closed:
             retire_session(self, session)
         logger.warning("[NET] Invalidated pooled proxy session: %s", proxy_url)
+        return True
+
+    async def _invalidate_direct_session(
+        self,
+        url: str | None = None,
+        session_key: str | None = None,
+    ) -> bool:
+        """Detach a stale shared DIRECT connector without changing routing policy."""
+        prefer_default_family = prefer_default_family_for_url(url or "")
+        if session_key is not None:
+            stream_sessions = getattr(self, "_stream_proxy_sessions", None)
+            stream_atimes = getattr(self, "_stream_proxy_session_atimes", None)
+            if stream_sessions is not None and stream_atimes is not None:
+                key = (None, str(session_key), prefer_default_family)
+                session = stream_sessions.pop(key, None)
+                stream_atimes.pop(key, None)
+                if session and not session.closed:
+                    retire_session(self, session)
+                if session:
+                    logger.warning("[NET] Invalidated stream DIRECT session: %s", key[1])
+                return bool(session)
+        attr = "flex_session" if prefer_default_family else "session"
+        session = getattr(self, attr, None)
+        if session is None or session.closed:
+            setattr(self, attr, None)
+            return False
+
+        setattr(self, attr, None)
+        retire_session(self, session)
+        logger.warning("[NET] Invalidated pooled DIRECT session: %s", attr)
         return True
 
     async def _retry_special_cdn_request(self, request_target, headers, disable_ssl: bool):
@@ -958,21 +1158,6 @@ class HLSProxyCoreMixin:
 
     async def cleanup(self):
         """Pulizia delle risorse"""
-        prefetch_tasks = list(getattr(self, "prefetch_tasks", set()))
-        for task in prefetch_tasks:
-            task.cancel()
-        if prefetch_tasks:
-            await asyncio.gather(*prefetch_tasks, return_exceptions=True)
-        self.prefetch_tasks.clear()
-        for entry in getattr(self, "_segment_prefetch_cache", {}).values():
-            timer = entry.get("timer")
-            if timer:
-                timer.cancel()
-        getattr(self, "_segment_prefetch_cache", {}).clear()
-        getattr(self, "_segment_next_urls", {}).clear()
-        getattr(self, "_hls_playlist_cache", {}).clear()
-        getattr(self, "_mpd_manifest_cache", {}).clear()
-
         tasks = list(self._background_tasks)
         for task in tasks:
             task.cancel()
@@ -998,6 +1183,14 @@ class HLSProxyCoreMixin:
                 self._proxy_sessions.clear()
                 if hasattr(self, "_proxy_session_atimes"):
                     self._proxy_session_atimes.clear()
+
+            if hasattr(self, "_stream_proxy_sessions"):
+                for p_sess in list(self._stream_proxy_sessions.values()):
+                    if not p_sess.closed:
+                        await p_sess.close()
+                self._stream_proxy_sessions.clear()
+                if hasattr(self, "_stream_proxy_session_atimes"):
+                    self._stream_proxy_session_atimes.clear()
 
             for extractor in list(self.extractors.values()):
                 if hasattr(extractor, "close"):

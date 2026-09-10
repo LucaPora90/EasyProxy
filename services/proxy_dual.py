@@ -7,6 +7,7 @@ import base64
 import hashlib
 import json
 import re
+import secrets
 import urllib.parse
 from typing import Any
 from urllib.parse import urljoin
@@ -326,6 +327,7 @@ class HLSProxyDualMixin:
                 url,
                 bypass_warp=bool(source.get("warp_off")),
                 forced_proxy=source.get("forced_proxy"),
+                session_key=source.get("stream_key"),
             )
             async with session.get(
                 url,
@@ -596,6 +598,8 @@ class HLSProxyDualMixin:
             params["proxy"] = "off"
         elif video.get("forced_proxy"):
             params["proxy"] = video["forced_proxy"]
+        if video.get("stream_key"):
+            params["stream_key"] = video["stream_key"]
         api_password = request.query.get("api_password")
         if api_password:
             params["api_password"] = api_password
@@ -666,6 +670,9 @@ class HLSProxyDualMixin:
             self._resolve_dual_spec(video_spec),
             self._resolve_dual_spec(audio_spec),
         )
+        playback_key = request.query.get("stream_key") or f"dual-{secrets.token_hex(6)}"
+        video["stream_key"] = f"{playback_key}-video"
+        audio["stream_key"] = f"{playback_key}-audio"
 
         # Both initial manifests are independent as well. The selected audio
         # playlist is fetched later because its URL comes from audio_text.

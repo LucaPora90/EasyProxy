@@ -160,8 +160,12 @@ class VidLinkExtractor:
             request_kwargs["proxies"] = {"http": proxy, "https": proxy}
 
         try:
+            curl_options = _cfg.get_curl_ipv4_options(proxy).get("curl_options")
+            session_kwargs = {"impersonate": "chrome124"}
+            if curl_options:
+                session_kwargs["curl_options"] = curl_options
             async with AsyncSession(
-                impersonate="chrome124",
+                **session_kwargs,
             ) as session:
                 response = await session.get(
                     api_url, headers=headers, timeout=30, **request_kwargs

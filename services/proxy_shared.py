@@ -79,7 +79,10 @@ def safe_log_endpoint(value: str | None) -> str:
 def extractor_log_name(request=None, extractor=None, fallback: str = "unknown") -> str:
     """Resolve a stable, human-readable extractor label for request logs."""
     if extractor is not None:
-        value = getattr(extractor, "extractor_name", None) or type(extractor).__name__
+        if isinstance(extractor, str):
+            value = extractor
+        else:
+            value = getattr(extractor, "extractor_name", None) or type(extractor).__name__
         if value:
             return str(value).replace("_direct", "").replace("_noproxy", "")
     if request is not None:
@@ -107,6 +110,10 @@ def request_log_context(request=None, target_url: str | None = None, route: str 
     else:
         extractor_fallback = "unknown"
     requested = query.get("orig_url") or query.get("original_channel_url") or query.get("url") or query.get("d")
+    # Old/generated relay URLs may not carry extractor_key. Keep service logs
+    # useful by inferring only the unambiguous provider URL we support here.
+    if extractor_fallback in {"unknown", "generic_hls"} and "vavoo.to" in str(requested or "").lower():
+        extractor_fallback = "vavoo"
     route_text = route or "unknown"
     return (
         f"extractor={extractor_log_name(request, extractor, extractor_fallback)} "

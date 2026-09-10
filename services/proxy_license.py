@@ -73,8 +73,14 @@ class HLSProxyLicenseHandlerMixin:
 
             # ✅ Use pooled session for better performance
             bypass_warp = request.query.get("warp", "").lower() == "off"
+            # Widevine license requests are part of the same playback as the
+            # rewritten MPD. Reuse that playback's isolated pool instead of
+            # falling back to the shared proxy session.
+            stream_key = request.query.get("stream_key")
             session, proxy_used = await self._get_proxy_session(
-                license_url, bypass_warp=bypass_warp
+                license_url,
+                bypass_warp=bypass_warp,
+                session_key=stream_key,
             )
             try:
                 async with session.request(

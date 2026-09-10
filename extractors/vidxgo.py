@@ -128,14 +128,20 @@ class VidXgoExtractor:
 
     # ------------------------------------------------------------------ fetch
 
-    async def _get_curl_session(self):
+    async def _get_curl_session(self, proxy_url=None):
         """Reuse the curl_cffi connection pool during one extraction."""
+        curl_options = _cfg.get_curl_ipv4_options(proxy_url).get("curl_options") or {}
         if self._curl_session is None:
             try:
                 from curl_cffi.requests import AsyncSession as CurlAsyncSession
             except ImportError as exc:
                 raise ExtractorError("VidXgo: curl_cffi is required") from exc
-            self._curl_session = CurlAsyncSession(impersonate="chrome124")
+            self._curl_session = CurlAsyncSession(
+                impersonate="chrome124",
+                curl_options=curl_options,
+            )
+        else:
+            self._curl_session.curl_options = curl_options
         return self._curl_session
 
     async def _fetch(self, url: str, headers: dict, bypass_warp: bool = False) -> str:
@@ -160,7 +166,7 @@ class VidXgoExtractor:
             } if proxy_url else {}
             try:
                 logger.info("vidxgo curl fetch via %s for %s", proxy_url or "direct", url)
-                session = await self._get_curl_session()
+                session = await self._get_curl_session(proxy_url)
                 resp = await session.get(
                     url,
                     headers=curl_headers,

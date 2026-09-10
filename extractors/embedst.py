@@ -199,7 +199,8 @@ class EmbedStExtractor(BaseExtractor):
         if proxy:
             request_kwargs["proxies"] = {"http": proxy, "https": proxy}
         try:
-            s = await self._get_curl_session()
+            curl_options = _cfg.get_curl_ipv4_options(proxy).get("curl_options")
+            s = await self._get_curl_session(curl_options)
             resp = await s.get(
                 url,
                 headers=headers,

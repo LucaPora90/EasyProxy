@@ -18,5 +18,7 @@ config.json
 /cache
 /graphify-out
 /data
+/recordings/
+/data-test-warp/
 /.pytest_cache/
 /tests

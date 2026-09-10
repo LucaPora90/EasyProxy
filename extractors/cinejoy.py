@@ -132,6 +132,12 @@ class CinejoyExtractor(BaseExtractor):
                 f"Cinejoy: failed to create HTTP bridge for proxy ({proxy})"
             )
         self.last_used_proxy = proxy
+        logger.info(
+            "Cinejoy routing: proxy=%s warp_off=%s direct=%s",
+            proxy or "DIRECT",
+            bypass_warp,
+            proxy is None,
+        )
 
         env = dict(os.environ)
         if runner_proxy:
