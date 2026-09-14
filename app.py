@@ -119,7 +119,6 @@ def create_app():
     app.router.add_get('/api/sidecar/memory', dual_service.handle_memory)
 
     app.router.add_post('/dual/sync/links', proxy.handle_dual_sync_links)
-    app.router.add_get('/dual/menifest.m3u8', proxy.handle_dual_server_m3u8)
     app.router.add_get('/dual/manifest.m3u8', proxy.handle_dual_server_m3u8)
 
     # Admin Panel

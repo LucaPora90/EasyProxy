@@ -234,6 +234,7 @@ async def audio_playlist(request: web.Request) -> web.Response:
         timeline = audio.timeline(metadata, offset, rate)
         if not timeline:
             raise ValueError("empty audio timeline")
+        audio.prefetch(hid, [item["idx"] for item in timeline[:3]], offset, rate)
         base = _base_url(request)
         lines = [
             "#EXTM3U",
@@ -292,6 +293,8 @@ async def audio_segment(request: web.Request) -> web.Response:
     rate_nano = _query_int(request, "r", 1_000_000_000)
     try:
         _, fragment_data = await audio.fragment_bytes(hid, index, offset_ms / 1000.0, rate_nano / 1_000_000_000)
+        # Keep the next fragments warm so playback never waits for ffmpeg.
+        audio.prefetch(hid, [index + 1, index + 2, index + 3], offset_ms / 1000.0, rate_nano / 1_000_000_000)
         return _audio_response(fragment_data, "video/iso.segment")
     except FileNotFoundError as exc:
         raise DualServiceError(410, "audio session expired") from exc

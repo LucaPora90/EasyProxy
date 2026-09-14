@@ -478,7 +478,11 @@ class HLSProxyDualMixin:
         reference_audio_url: str,
         validate_muxed_reference: bool,
     ) -> dict | None:
-        """Accept only the same cache entries accepted by SyncEngine."""
+        """Accept only the same cache entries accepted by SyncEngine.
+
+        Prefer the reference_matches_video marker. Entries written before the
+        offset API persisted it fall back to the measured video_start_time.
+        """
         if not isinstance(lookup, dict):
             return None
         details = lookup.get("details") or lookup
@@ -486,9 +490,14 @@ class HLSProxyDualMixin:
             details.get("status") or lookup.get("status") or ""
         ).lower() != "ok":
             return None
-        if validate_muxed_reference and "reference_matches_video" not in details:
+        reference_validated = details.get("reference_matches_video")
+        if validate_muxed_reference and reference_validated is False:
             return None
-        if reference_audio_url and not details.get("video_start_time"):
+        if (
+            reference_audio_url
+            and reference_validated is not True
+            and "video_start_time" not in details
+        ):
             return None
         return {"status": "ok", "cached": True, **details, "cache_key": cache_key}
 
@@ -766,80 +775,89 @@ class HLSProxyDualMixin:
                 **video_routing,
             }
 
-        prepared = None
+        # Register the requested audio while the English bridge sync runs: the
+        # registration only depends on the playlist and the session token.
+        prepared_task = asyncio.create_task(
+            self._prepare_dual_audio(
+                request,
+                audio_media,
+                audio_playlist,
+                audio_playlist_base,
+                token,
+                media_key,
+                audio_lang,
+            )
+        )
+
         audio_hid = ""
         synced = cached_sync
         bridge_used = False
         bridge_attempted = False
-        if synced is None and audio_lang != "eng":
-            try:
-                bridge_url, bridge_meta = self._pick_audio(audio_text, audio_base, "eng")
-                if bridge_url != selected_audio_url:
-                    bridge_media = dict(audio)
-                    bridge_media["url"] = bridge_url
-                    bridge_media["manifest"] = ""
-                    bridge_playlist, bridge_base = await self._manifest(bridge_media)
-                    if _same_audio_timeline(audio_playlist, bridge_playlist):
-                        logger.info(
-                            "[DUAL] English-first sync trying eng='%s' requested=%s",
-                            (bridge_meta.get("name") or "English"),
-                            audio_lang,
-                        )
-                        bridge = await self._prepare_dual_audio(
-                            request,
-                            bridge_media,
-                            bridge_playlist,
-                            bridge_base,
-                            token,
-                            media_key,
-                            "eng",
-                        )
-                        bridge_attempted = True
-                        bridge_sync = await self._dual_sync_json(
-                            request, sync_body(bridge)
-                        )
-                        if str(bridge_sync.get("status") or "") == "ok":
-                            synced = bridge_sync
-                            bridge_used = True
-                            report_task = asyncio.create_task(
-                                dual_service.offsets.report(cache_payload, bridge_sync)
-                            )
-                            if hasattr(self, "_background_tasks") and isinstance(self._background_tasks, set):
-                                self._background_tasks.add(report_task)
-                                report_task.add_done_callback(self._background_tasks.discard)
+        try:
+            if synced is None and audio_lang != "eng":
+                try:
+                    bridge_url, bridge_meta = self._pick_audio(audio_text, audio_base, "eng")
+                    if bridge_url != selected_audio_url:
+                        bridge_media = dict(audio)
+                        bridge_media["url"] = bridge_url
+                        bridge_media["manifest"] = ""
+                        bridge_playlist, bridge_base = await self._manifest(bridge_media)
+                        if _same_audio_timeline(audio_playlist, bridge_playlist):
                             logger.info(
-                                "[DUAL] English-first sync succeeded; using requested %s track via '%s' offset",
+                                "[DUAL] English-first sync trying eng='%s' requested=%s",
+                                (bridge_meta.get("name") or "English"),
                                 audio_lang,
-                                bridge_meta.get("name") or "English",
                             )
+                            bridge = await self._prepare_dual_audio(
+                                request,
+                                bridge_media,
+                                bridge_playlist,
+                                bridge_base,
+                                token,
+                                media_key,
+                                "eng",
+                            )
+                            bridge_attempted = True
+                            bridge_sync = await self._dual_sync_json(
+                                request, sync_body(bridge)
+                            )
+                            if str(bridge_sync.get("status") or "") == "ok":
+                                synced = bridge_sync
+                                bridge_used = True
+                                report_task = asyncio.create_task(
+                                    dual_service.offsets.report(cache_payload, bridge_sync)
+                                )
+                                if hasattr(self, "_background_tasks") and isinstance(self._background_tasks, set):
+                                    self._background_tasks.add(report_task)
+                                    report_task.add_done_callback(self._background_tasks.discard)
+                                logger.info(
+                                    "[DUAL] English-first sync succeeded; using requested %s track via '%s' offset",
+                                    audio_lang,
+                                    bridge_meta.get("name") or "English",
+                                )
+                            else:
+                                logger.info(
+                                    "[DUAL] English-first sync rejected; falling back to requested %s track",
+                                    audio_lang,
+                                )
                         else:
-                            logger.info(
-                                "[DUAL] English-first sync rejected; falling back to requested %s track",
-                                audio_lang,
-                            )
+                            logger.warning("[DUAL] English bridge skipped: ita/eng timeline mismatch")
                     else:
-                        logger.warning("[DUAL] English bridge skipped: ita/eng timeline mismatch")
-                else:
-                    logger.info(
-                        "[DUAL] English bridge skipped: no separate eng rendition (extractor=%s)",
-                        str(audio.get("extractor_name") or ""),
-                    )
-            except DualLinksError as exc:
-                logger.warning("[DUAL] English sync bridge unavailable: %s", exc.message)
-        if bridge_attempted and not bridge_used:
-            session_result = await self._dual_json(request, "POST", "/session", {})
-            token = str(session_result.get("token") or "")
-            if not token:
-                raise DualLinksError(502, "DUAL service did not return a fallback session token")
-        prepared = await self._prepare_dual_audio(
-            request,
-            audio_media,
-            audio_playlist,
-            audio_playlist_base,
-            token,
-            media_key,
-            audio_lang,
-        )
+                        logger.info(
+                            "[DUAL] English bridge skipped: no separate eng rendition (extractor=%s)",
+                            str(audio.get("extractor_name") or ""),
+                        )
+                except DualLinksError as exc:
+                    logger.warning("[DUAL] English sync bridge unavailable: %s", exc.message)
+            if bridge_attempted and not bridge_used:
+                session_result = await self._dual_json(request, "POST", "/session", {})
+                token = str(session_result.get("token") or "")
+                if not token:
+                    raise DualLinksError(502, "DUAL service did not return a fallback session token")
+        except BaseException:
+            prepared_task.cancel()
+            raise
+        prepared = await prepared_task
         audio_hid = str(prepared.get("hid") or "")
         if not audio_hid:
             raise DualLinksError(502, "DUAL service did not register the selected audio")

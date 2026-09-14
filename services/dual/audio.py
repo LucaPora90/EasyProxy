@@ -18,9 +18,10 @@ from .routing import RoutingOptions
 class AudioStore:
     """Hold audio metadata in memory and never persist audio fragments.
 
-    The DUAL service is used as a personal service, so source audio and generated
-    fMP4 fragments are processed per request and removed with their temporary
-    working directory. Offset data remains persisted separately by the offset API.
+    Source audio and generated fMP4 fragments are processed per request and
+    removed with their temporary working directory. Converted fragments are
+    cached in memory only while their track is active, so the player can start
+    without waiting for a fresh ffmpeg pass on every segment.
     """
 
     TRACK_TTL_SECONDS = 21600
@@ -28,6 +29,7 @@ class AudioStore:
     MAX_TRACKS = 128
     MAX_REDIRECTS = 5
     MAX_SEGMENT_BYTES = 20 * 1024 * 1024
+    MAX_CACHED_FRAGMENTS = 6
 
     def __init__(self, root: str, proxy: str = "", max_bytes: int | None = None):
         self.default_routing = RoutingOptions(forced_proxy=proxy.strip() or None)
@@ -38,6 +40,8 @@ class AudioStore:
         # Sync requests can wait in the global queue for longer than the
         # normal player-idle timeout. Keep those tracks alive temporarily.
         self._pinned: dict[str, int] = {}
+        self._active: dict[str, int] = {}
+        self._prefetch_tasks: set[asyncio.Task] = set()
 
     def _lock(self, hid: str):
         return self._locks.setdefault(hid, asyncio.Lock())
@@ -227,7 +231,7 @@ class AudioStore:
         now = time.monotonic()
         removed = 0
         for hid, track in list(self._tracks.items()):
-            if hid in self._pinned:
+            if hid in self._pinned or hid in self._active:
                 continue
             lock = self._locks.get(hid)
             if lock is not None and lock.locked():
@@ -368,49 +372,98 @@ class AudioStore:
             struct.pack_into(">I", fragment, position + header + 4, value)
 
     async def fragment_bytes(self, hid: str, index: int, offset: float, rate: float):
-        async with self._lock(hid):
-            metadata = self.metadata(hid)
-            timeline = self.timeline(metadata, offset, rate)
-            item = next((entry for entry in timeline if entry["idx"] == index), None)
-            if not item:
-                raise ValueError("audio segment outside timeline")
-            with tempfile.TemporaryDirectory(prefix=f"dual-audio-{hid}-") as temp_dir:
-                work = Path(temp_dir)
-                await self._download(
-                    metadata["segs"][index],
-                    metadata.get("headers") or {},
-                    work / "src.ts",
-                    metadata.get("routing"),
-                )
-                key_bytes = self.key_bytes(hid)
-                key_line = ""
-                if key_bytes:
-                    (work / "enc.key").write_bytes(key_bytes)
-                    iv = f",IV={metadata['iv']}" if metadata.get("iv") else ""
-                    key_line = f'#EXT-X-KEY:METHOD=AES-128,URI="enc.key"{iv}\n'
-                (work / "input.m3u8").write_text(
-                    "#EXTM3U\n#EXT-X-VERSION:3\n"
-                    f"#EXT-X-TARGETDURATION:{int(metadata['durs'][index]) + 1}\n"
-                    f"{key_line}"
-                    f"#EXTINF:{metadata['durs'][index]:.6f},\nsrc.ts\n#EXT-X-ENDLIST\n"
-                )
-                command = ["ffmpeg", "-v", "error", "-allowed_extensions", "ALL", "-protocol_whitelist", "file,crypto", "-i", "input.m3u8"]
-                if item["trim"] > 0.001:
-                    command += ["-ss", f"{item['trim']:.6f}"]
-                command += ["-c:a", "copy", "-bsf:a", "aac_adtstoasc", "-f", "hls", "-hls_time", "99999", "-hls_playlist_type", "vod", "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4", "-hls_segment_filename", "f%d.m4s", "-hls_list_size", "0", "-y", "output.m3u8"]
-                process = await asyncio.create_subprocess_exec(*command, cwd=work, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
-                _, error = await asyncio.wait_for(process.communicate(), timeout=60)
-                made = work / "f0.m4s"
-                if process.returncode or not made.exists():
-                    raise RuntimeError((error.decode(errors="replace") or "ffmpeg failed")[:300])
-                init_data = (work / "init.mp4").read_bytes()
-                fragment = bytearray(made.read_bytes())
-                timescale = 48000
-                found = self._find_box(init_data, [b"moov", b"trak", b"mdia", b"mdhd"])
-                if found:
-                    position, _, header = found
-                    version = init_data[position + header]
-                    offset_pos = position + header + (20 if version == 1 else 12)
-                    timescale = struct.unpack(">I", init_data[offset_pos:offset_pos + 4])[0] or 48000
-                self._patch_time(fragment, timescale, item["start"])
-                return init_data, bytes(fragment)
+        offset_ms = int(round(offset * 1000))
+        rate_nano = int(round(rate * 1_000_000_000))
+        track = self._track(hid)
+        key = (index, offset_ms, rate_nano)
+        cached = (track.get("fragments") or {}).get(key)
+        if cached is not None:
+            return cached
+        # One lock per requested fragment: the player and the prefetch task
+        # share a single conversion instead of running ffmpeg twice.
+        async with self._lock(f"{hid}|{key}"):
+            cached = (track.get("fragments") or {}).get(key)
+            if cached is not None:
+                return cached
+            self._active[hid] = self._active.get(hid, 0) + 1
+            try:
+                result = await self._convert(hid, index, offset, rate, track)
+            finally:
+                remaining = self._active.get(hid, 1) - 1
+                if remaining > 0:
+                    self._active[hid] = remaining
+                else:
+                    self._active.pop(hid, None)
+            fragments = track.setdefault("fragments", {})
+            fragments[key] = result
+            while len(fragments) > self.MAX_CACHED_FRAGMENTS:
+                fragments.pop(next(iter(fragments)))
+            return result
+
+    async def _convert(
+        self,
+        hid: str,
+        index: int,
+        offset: float,
+        rate: float,
+        track: dict,
+    ) -> tuple[bytes, bytes]:
+        metadata = track["metadata"]
+        timeline = self.timeline(metadata, offset, rate)
+        item = next((entry for entry in timeline if entry["idx"] == index), None)
+        if not item:
+            raise ValueError("audio segment outside timeline")
+        with tempfile.TemporaryDirectory(prefix=f"dual-audio-{hid}-") as temp_dir:
+            work = Path(temp_dir)
+            await self._download(
+                metadata["segs"][index],
+                metadata.get("headers") or {},
+                work / "src.ts",
+                metadata.get("routing"),
+            )
+            key_bytes = track["key"]
+            key_line = ""
+            if key_bytes:
+                (work / "enc.key").write_bytes(key_bytes)
+                iv = f",IV={metadata['iv']}" if metadata.get("iv") else ""
+                key_line = f'#EXT-X-KEY:METHOD=AES-128,URI="enc.key"{iv}\n'
+            (work / "input.m3u8").write_text(
+                "#EXTM3U\n#EXT-X-VERSION:3\n"
+                f"#EXT-X-TARGETDURATION:{int(metadata['durs'][index]) + 1}\n"
+                f"{key_line}"
+                f"#EXTINF:{metadata['durs'][index]:.6f},\nsrc.ts\n#EXT-X-ENDLIST\n"
+            )
+            command = ["ffmpeg", "-v", "error", "-allowed_extensions", "ALL", "-protocol_whitelist", "file,crypto", "-i", "input.m3u8"]
+            if item["trim"] > 0.001:
+                command += ["-ss", f"{item['trim']:.6f}"]
+            command += ["-c:a", "copy", "-bsf:a", "aac_adtstoasc", "-f", "hls", "-hls_time", "99999", "-hls_playlist_type", "vod", "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4", "-hls_segment_filename", "f%d.m4s", "-hls_list_size", "0", "-y", "output.m3u8"]
+            process = await asyncio.create_subprocess_exec(*command, cwd=work, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            _, error = await asyncio.wait_for(process.communicate(), timeout=60)
+            made = work / "f0.m4s"
+            if process.returncode or not made.exists():
+                raise RuntimeError((error.decode(errors="replace") or "ffmpeg failed")[:300])
+            init_data = (work / "init.mp4").read_bytes()
+            fragment = bytearray(made.read_bytes())
+            timescale = 48000
+            found = self._find_box(init_data, [b"moov", b"trak", b"mdia", b"mdhd"])
+            if found:
+                position, _, header = found
+                version = init_data[position + header]
+                offset_pos = position + header + (20 if version == 1 else 12)
+                timescale = struct.unpack(">I", init_data[offset_pos:offset_pos + 4])[0] or 48000
+            self._patch_time(fragment, timescale, item["start"])
+            return init_data, bytes(fragment)
+
+    def prefetch(self, hid: str, indices: list[int], offset: float, rate: float) -> None:
+        """Warm the fragment cache while the player is still starting."""
+        for index in indices:
+            task = asyncio.create_task(self._prefetch_one(hid, index, offset, rate))
+            self._prefetch_tasks.add(task)
+            task.add_done_callback(self._prefetch_tasks.discard)
+
+    async def _prefetch_one(self, hid: str, index: int, offset: float, rate: float) -> None:
+        try:
+            await self.fragment_bytes(hid, index, offset, rate)
+        except (FileNotFoundError, ValueError, RuntimeError, asyncio.TimeoutError, OSError):
+            # Prefetch is best-effort: the player request converts on demand.
+            pass

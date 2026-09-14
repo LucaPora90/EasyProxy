@@ -855,7 +855,7 @@
                     <div class="form-hint" style="margin-bottom:0.5rem;">Decoded JSON stored inside the URL-safe Base64 <code>d</code> parameter:</div>
                     <textarea id="dualPayloadPreview" class="result-area" readonly rows="12"></textarea>
                 </div>
-                <div class="form-hint" style="margin-top:0.8rem;">First playback may take time because EasyProxy extracts the audio and calculates synchronization. The endpoint is <code>/dual/menifest.m3u8</code>.</div>
+                <div class="form-hint" style="margin-top:0.8rem;">First playback may take time because EasyProxy extracts the audio and calculates synchronization. The endpoint is <code>/dual/manifest.m3u8</code>.</div>
             </div>
         </div>
 
@@ -1199,7 +1199,7 @@
             const encoded = base64UrlEncodeUtf8(JSON.stringify(payload));
             const params = new URLSearchParams({ d: encoded });
             if (apiPassword) params.set('api_password', apiPassword);
-            result.value = `${buildBaseUrl()}/dual/menifest.m3u8?${params.toString()}`;
+            result.value = `${buildBaseUrl()}/dual/manifest.m3u8?${params.toString()}`;
             document.getElementById('playDualResult').style.display = 'inline-flex';
             if (document.getElementById('dualPayloadPanel').style.display !== 'none') {
                 updateDualPayloadPreview();

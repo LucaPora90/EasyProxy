@@ -335,8 +335,7 @@ class HLSProxyPagesMixin:
                 "/api/memory/profile": "Profiler tracemalloc: allocazioni Python e crescita dal boot",
                 "/api/memory/profile/reset": "POST: resetta il baseline del profiler",
                 "/api/dual/memory": "RAM used by the integrated DUAL service",
-                "/dual/menifest.m3u8": "DUAL HLS master with synchronized video + audio - ?d=<Base64 JSON>",
-                "/dual/manifest.m3u8": "Correctly spelled alias for the DUAL HLS master - ?d=<Base64 JSON>",
+                "/dual/manifest.m3u8": "DUAL HLS master with synchronized video + audio - ?d=<Base64 JSON>",
                 "/dual/sync/links": "DUAL JSON test for synchronizing video and audio",
                 "/dual/cache/status": "Checks only whether the DUAL offset exists in the shared MongoDB cache",
                 "/dual/aud/{hid}/audio.m3u8": "Synchronized DUAL audio playlist",
@@ -349,7 +348,7 @@ class HLSProxyPagesMixin:
                 "aes_key": "/key?key_url=https://server.com/key.bin",  # ✅ NUOVO
                 "playlist": "/playlist?url=http://example.com/playlist1.m3u8;http://example.com/playlist2.m3u8",
                 "custom_headers": "/proxy/hls/manifest.m3u8?d=<URL>&h_Authorization=Bearer%20token",
-                "dual_hls": "/dual/menifest.m3u8?d=<Base64URL(JSON)> [&api_password=<PASSWORD>]",
+                "dual_hls": "/dual/manifest.m3u8?d=<Base64URL(JSON)> [&api_password=<PASSWORD>]",
             },
         }
         return web.json_response(info)
@@ -461,10 +460,10 @@ class HLSProxyPagesMixin:
                         **({"security": security} if requires_password else {}),
                     }
                 },
-                "/dual/menifest.m3u8": {
+                "/dual/manifest.m3u8": {
                     "get": {
                         "summary": "DUAL HLS master",
-                        "description": "Builds one HLS master containing a selected video and an extracted, synchronized audio track. The video is always served through EasyProxy's HLS proxy. The d parameter is URL-safe Base64 JSON. The endpoint is intentionally named menifest for compatibility.",
+                        "description": "Builds one HLS master containing a selected video and an extracted, synchronized audio track. The video is always served through EasyProxy's HLS proxy. The d parameter is URL-safe Base64 JSON.",
                         "parameters": [
                             {"name": "d", "in": "query", "required": True, "schema": {"type": "string"}, "description": "URL-safe Base64 JSON DualSyncRequest payload."},
                             {"name": "api_password", "in": "query", "schema": {"type": "string"}},
@@ -476,18 +475,6 @@ class HLSProxyPagesMixin:
                             "409": {"description": "Synchronization unavailable; JSON error response"},
                             "502": {"description": "Extraction or upstream failure"},
                         },
-                        **({"security": security} if requires_password else {}),
-                    }
-                },
-                "/dual/manifest.m3u8": {
-                    "get": {
-                        "summary": "DUAL HLS master (correct alias)",
-                        "description": "Alias of /dual/menifest.m3u8 with the correctly spelled manifest path.",
-                        "parameters": [
-                            {"name": "d", "in": "query", "required": True, "schema": {"type": "string"}, "description": "URL-safe Base64 JSON DualSyncRequest payload."},
-                            {"name": "api_password", "in": "query", "schema": {"type": "string"}},
-                        ],
-                        "responses": {"200": {"description": "Combined HLS master playlist"}, "400": {"description": "Invalid descriptor or unavailable audio; JSON error response"}, "401": {"description": "Invalid API password"}, "409": {"description": "Synchronization unavailable; JSON error response"}, "502": {"description": "Extraction or upstream failure"}},
                         **({"security": security} if requires_password else {}),
                     }
                 },
