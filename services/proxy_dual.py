@@ -126,13 +126,22 @@ def _playlist_durations(text: str) -> list[float]:
 
 
 def _same_audio_timeline(left: str, right: str) -> bool:
+    """Match renditions of the same edit even when encoders split segments differently.
+
+    Segment boundaries differ per encoder, so identical EXTINF values are too
+    strict. A cumulative drift bound keeps clearly different edits out while
+    still accepting the same track encoded twice (e.g. ita/eng of one provider).
+    """
     left_durations = _playlist_durations(left)
     right_durations = _playlist_durations(right)
-    return (
-        bool(left_durations)
-        and len(left_durations) == len(right_durations)
-        and all(abs(a - b) <= 0.02 for a, b in zip(left_durations, right_durations))
-    )
+    if not left_durations or len(left_durations) != len(right_durations):
+        return False
+    drift = 0.0
+    for a, b in zip(left_durations, right_durations):
+        drift += a - b
+        if abs(drift) > 5.0:
+            return False
+    return True
 
 
 def _master_entries(text: str, base_url: str) -> tuple[list[dict], list[dict]]:
