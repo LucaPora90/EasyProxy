@@ -40,6 +40,12 @@ DEFAULT_CONFIG = {
     "warp_off_extractors": ["cinejoy"],
     "proxy_off_extractors": [],
     "proxy_exclude_domains": [],
+    # Force the highest video variant (no adaptive bitrate). Can be enabled per
+    # extractor, for every MPD source, for every HLS source, or per request
+    # with &max_res=true.
+    "max_res_extractors": [],
+    "max_res_mpd": False,
+    "max_res_hls": False,
     "dvr_enabled": False,
     "recordings_dir": DEFAULT_RECORDINGS_DIR,
     "max_recording_duration": 28800,

@@ -609,15 +609,19 @@ class SyncEngine:
         coarse_reference = block_average(reference)
         coarse_candidate = block_average(candidate)
         coarse_max_lag = max_lag // coarse_step
+        # best keeps (score, lag in 10 ms envelope samples) so the refinement
+        # pass can compare like with like; storing the coarse grid index left
+        # the returned lag off by the coarse step whenever the coarse peak was
+        # not improved (a 5x error at 50 ms steps).
         best = (-2.0, 0)
         for lag in range(-coarse_max_lag, coarse_max_lag + 1):
             score = correlation(
                 coarse_reference, coarse_candidate, lag, minimum_size=100
             )
             if score is not None and score > best[0]:
-                best = score, lag
+                best = score, lag * coarse_step
 
-        coarse_lag = best[1] * coarse_step
+        coarse_lag = best[1]
         for lag in range(
             max(-max_lag, coarse_lag - coarse_step),
             min(max_lag, coarse_lag + coarse_step) + 1,

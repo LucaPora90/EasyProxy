@@ -46,7 +46,7 @@ _SOCKET_CHECK_EXECUTOR = ThreadPoolExecutor(
 )
 
 
-APP_VERSION = "2.11.47"
+APP_VERSION = "2.12.0"
 
 _MEMORY_PROFILE_FRAMES = 15
 _memory_profile_baseline = None
@@ -355,6 +355,36 @@ def get_transport_route_proxy(url: str, transport_routes: list) -> str | None:
 
 def _get_dynamic_warp_enabled() -> bool:
     return _cfg_get("enable_warp", False)
+
+def should_force_max_res(
+    extractor_key: str = "",
+    requested: bool = False,
+    source: str = "",
+    proxy_endpoint: bool = False,
+) -> bool:
+    """Decide whether only the highest video variant must be served.
+
+    `requested` is the per-request &max_res flag, `source` is "mpd" or "hls".
+    Requests that belong to an extractor only honour the per-extractor list;
+    the MPD/HLS switches cover direct /proxy/mpd and /proxy/hls requests.
+    """
+    if requested:
+        return True
+    name = str(extractor_key or "").strip().lower()
+    name = name.replace("_direct", "").replace("_noproxy", "")
+    if name:
+        forced = {
+            str(item).strip().lower()
+            for item in (_cfg_get("max_res_extractors", []) or [])
+        }
+        return name in forced
+    if not proxy_endpoint:
+        return False
+    if source == "mpd":
+        return bool(_cfg_get("max_res_mpd", False))
+    if source == "hls":
+        return bool(_cfg_get("max_res_hls", False))
+    return False
 
 def is_direct_connection_allowed(bypass_warp: bool | None = None) -> bool:
     """Allow direct only when WARP is explicitly bypassed or disabled in admin."""

@@ -1228,6 +1228,7 @@ class HLSProxyPagesMixin:
             "enable_warp", "warp_license_key",
             "global_proxies", "transport_routes", "extractor_proxies",
             "warp_off_extractors", "proxy_off_extractors", "warp_exclude_domains_custom", "proxy_exclude_domains",
+            "max_res_extractors", "max_res_mpd", "max_res_hls",
             "dvr_enabled",
             "max_recording_duration", "recordings_retention_days",
             "proxy_test_timeout", "proxy_test_concurrency",

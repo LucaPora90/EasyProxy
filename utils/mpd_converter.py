@@ -168,6 +168,7 @@ class MPDToHLSConverter:
                 or param.startswith('orig_url=')
                 or param.startswith('direct=')
                 or param.startswith('disable_ssl=')
+                or param.startswith('max_res=')
             ):
                 header_params.append(param)
         
@@ -295,17 +296,28 @@ class MPDToHLSConverter:
                 lines[1] = '#EXT-X-VERSION:6'
 
             # --- GESTIONE VIDEO (EXT-X-STREAM-INF) ---
-            # Mantieni tutte le rappresentazioni anche per i live MPD: Shaka,
-            # AVPlayer e gli altri client devono poter partire dalla qualità
-            # sostenibile e salire in adaptive bitrate. Forzare la risoluzione
-            # massima fa partire subito un 7 Mbps su dispositivi/reti mobili,
-            # causando buffering e scatti.
+            # Default: mantieni tutte le rappresentazioni (ABR, come prima).
+            # Con max_res=true serviamo solo la variante col bandwidth più alto,
+            # coerente con il rewriter HLS quando richiede la qualità massima.
+            max_res = "max_res=true" in (params or "")
+            video_candidates = []
             for adaptation_set in video_sets:
                 for representation in adaptation_set.findall('mpd:Representation', self.ns):
                     rep_id = representation.get('id', '')
                     if 'iframe' in rep_id.lower() or 'i-frame' in rep_id.lower():
                         continue
+                    video_candidates.append((adaptation_set, representation))
 
+            def _video_bandwidth(candidate):
+                try:
+                    return int(candidate[1].get('bandwidth') or 0)
+                except (TypeError, ValueError):
+                    return 0
+
+            if max_res and video_candidates:
+                video_candidates = [max(video_candidates, key=_video_bandwidth)]
+
+            for adaptation_set, representation in video_candidates:
                     rep_id = representation.get('id')
                     bandwidth = representation.get('bandwidth')
                     width = representation.get('width')

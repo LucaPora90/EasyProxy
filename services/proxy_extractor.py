@@ -16,7 +16,6 @@ from services.proxy_shared import (
 )
 import config_store
 import asyncio
-import secrets
 import base64
 import gzip
 import re
@@ -234,13 +233,14 @@ class HLSProxyExtractorHandlerMixin:
                 source_key = self._stream_key_for_url(
                     request.query.get("orig_url") or url
                 ) or "stream"
-                stream_key = f"{source_key}-{secrets.token_hex(6)}"
+                stream_key = self._reuse_stream_key(
+                    source_key, _config.get_client_ip(request)
+                )
 
             stream_url = result["destination_url"]
             stream_headers = result.get("request_headers", {})
             mediaflow_endpoint = result.get("mediaflow_endpoint", "hls_proxy")
             captured_manifest = result.get("captured_manifest")
-            captured_manifests = result.get("captured_manifests") or {}
             force_disable_ssl = result.get("disable_ssl", False)
             selected_proxy = result.get("selected_proxy") or selected_proxy
             if not selected_proxy and extractor:
@@ -335,6 +335,11 @@ class HLSProxyExtractorHandlerMixin:
                 endpoint = "/proxy/mpd/manifest.m3u8"
 
             encoded_url = urllib.parse.quote(stream_url, safe="")
+            forced_max_res = self._request_forces_max_res(
+                request,
+                extractor_key,
+                "mpd" if endpoint.endswith("/manifest.mpd") else "hls",
+            )
             header_params = "".join(
                 [
                     f"&h_{urllib.parse.quote(key)}={urllib.parse.quote(value)}"
@@ -365,6 +370,8 @@ class HLSProxyExtractorHandlerMixin:
                 header_params += f"&extractor_key={urllib.parse.quote(extractor_key, safe='')}"
             if stream_key:
                 header_params += f"&stream_key={urllib.parse.quote(stream_key, safe='')}"
+            if forced_max_res:
+                header_params += "&max_res=true"
             for key, value in result_query_params.items():
                 header_params += (
                     f"&{urllib.parse.quote(key, safe='')}="
@@ -377,42 +384,10 @@ class HLSProxyExtractorHandlerMixin:
                 is_vavoo_req = check_vavoo_request(stream_headers, request, stream_url)
                 disable_ssl = request.query.get("disable_ssl") == "1" or force_disable_ssl or is_vavoo_req
 
-                # VidXgo already captured the best video variant during
-                # extraction. Return that media playlist directly instead of
-                # making iOS request a second, generic HLS relay URL.
+                # Variant selection (all variants or only the highest one)
+                # happens in rewrite_manifest_urls via max_res.
                 manifest_content = captured_manifest
                 manifest_base_url = stream_url
-                if extractor_key == "vidxgo" and captured_manifests:
-                    captured_variants = []
-                    master_lines = captured_manifest.splitlines()
-                    for index, line in enumerate(master_lines[:-1]):
-                        if not line.startswith("#EXT-X-STREAM-INF:"):
-                            continue
-                        raw_url = master_lines[index + 1].strip()
-                        if not raw_url or raw_url.startswith("#"):
-                            continue
-                        variant_url = urllib.parse.urljoin(stream_url, raw_url)
-                        variant_text = captured_manifests.get(variant_url)
-                        if not variant_text or "#EXTM3U" not in variant_text:
-                            continue
-                        bandwidth_match = re.search(r"BANDWIDTH=(\d+)", line)
-                        bandwidth = int(bandwidth_match.group(1)) if bandwidth_match else 0
-                        captured_variants.append((bandwidth, variant_url, variant_text))
-
-                    if captured_variants:
-                        _, manifest_base_url, manifest_content = max(
-                            captured_variants,
-                            key=lambda item: item[0],
-                        )
-                        logger.info(
-                            "VidXgo: returning captured best variant directly for iOS [%s]",
-                            request_log_context(
-                                request,
-                                manifest_base_url,
-                                route=safe_log_route(selected_proxy),
-                                extractor=extractor,
-                            ),
-                        )
 
                 rewritten_manifest = await ManifestRewriter.rewrite_manifest_urls(
                     manifest_content=manifest_content,
@@ -433,6 +408,7 @@ class HLSProxyExtractorHandlerMixin:
                     force_direct=force_direct,
                     extractor_key=extractor_key,
                     stream_key=stream_key,
+                    max_res=forced_max_res,
                 )
                 response_headers = {
                     "Content-Type": "application/vnd.apple.mpegurl",
@@ -473,6 +449,8 @@ class HLSProxyExtractorHandlerMixin:
                     proxy_query["extractor_key"] = extractor_key
                 if stream_key:
                     proxy_query["stream_key"] = stream_key
+                if forced_max_res:
+                    proxy_query["max_res"] = "true"
                 proxy_request = request.clone(
                     rel_url=URL(endpoint).with_query(proxy_query)
                 )

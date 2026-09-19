@@ -323,7 +323,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
                         request_headers, proxies=proxy_list
                     )
                 return self.extractors[key]
-            elif host in {"cinejoy", "cinejoy.to"}:
+            elif host == "cinejoy" or host.startswith("cinejoy."):
                 key = _cache_key("cinejoy", bypass_warp)
                 if CinejoyExtractor is None:
                     raise RuntimeError("CinejoyExtractor module not available")
@@ -362,13 +362,16 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
 
         # 2. Auto-detection basata sull'URL
         parsed_url = urllib.parse.urlparse(url)
-        if (
-            parsed_url.hostname in {"altadefinizionestreaming.tv", "www.altadefinizionestreaming.tv"}
-            and (
-                parsed_url.path.startswith("/api/player-sources/")
-                or re.fullmatch(r"/film/.+-\d+/?", parsed_url.path)
-            )
-        ):
+        ads_host = (parsed_url.hostname or "").lower()
+        ads_host_ok = bool(
+            ADS_HOST_PATTERN.fullmatch(ads_host)
+            or ads_host == ads_configured_host()
+        )
+        ads_path_ok = bool(
+            ADS_FILM_PATTERN.fullmatch(parsed_url.path)
+            or ADS_SERIES_PATTERN.fullmatch(parsed_url.path)
+        )
+        if parsed_url.path.startswith("/api/player-sources/") or (ads_host_ok and ads_path_ok):
             key = _cache_key("ads", bypass_warp)
             if ADSExtractor is None:
                 raise RuntimeError("ADSExtractor module not available")
@@ -790,9 +793,9 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
                     request_headers, proxies=proxy_list
                 )
             return self.extractors[key]
-        elif re.search(r"(?:www\.)?cinejoy\.to/", url, re.IGNORECASE):
+        elif re.search(r"(?:www\.)?cinejoy\.[a-z]{2,}/", url, re.IGNORECASE):
             key = _cache_key("cinejoy", bypass_warp)
-            proxy = get_proxy_for_url("cinejoy.to", bypass_warp=bypass_warp)
+            proxy = get_proxy_for_url(url, bypass_warp=bypass_warp)
             proxy_list = _build_proxy_list(proxy, "cinejoy")
             if CinejoyExtractor is None:
                 raise RuntimeError("CinejoyExtractor module not available")

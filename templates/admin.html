@@ -509,6 +509,24 @@
             <div id="proxy-off-list" style="display:flex;flex-wrap:wrap;gap:6px"></div>
         </div>
 
+        <!-- Max Res (force highest quality) -->
+        <div class="card card-wide">
+            <h2><span class="icon">🎚️</span> Max Res (force highest quality)</h2>
+            <p class="help-text">Serve only the highest video variant (no adaptive bitrate). The two switches apply <strong>only to direct <code>/proxy/…</code> requests</strong> (the legacy <code>/proxy/manifest.m3u8</code> alias counts as HLS, <code>/proxy/stream</code> by source type); extractor streams are controlled by the per-extractor list below. A per-request <code>max_res=true</code> always works, everywhere.</p>
+            <div class="row">
+                <label>Direct DASH requests (<code>/proxy/mpd/manifest.m3u8</code> and <code>/proxy/mpd/manifest.mpd</code>)</label>
+                <div id="max-res-mpd-toggle" class="toggle" onclick="toggleMaxRes('mpd')"></div>
+                <span id="max-res-mpd-label" class="badge badge-off">OFF</span>
+            </div>
+            <div class="row">
+                <label>Direct HLS requests (<code>/proxy/hls/manifest.m3u8</code> and <code>/proxy/manifest.m3u8</code>)</label>
+                <div id="max-res-hls-toggle" class="toggle" onclick="toggleMaxRes('hls')"></div>
+                <span id="max-res-hls-label" class="badge badge-off">OFF</span>
+            </div>
+            <p class="help-text" style="margin-top:12px">Extractor streams (<code>/extractor</code> and its relayed URLs) — click to toggle:</p>
+            <div id="max-res-list" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+        </div>
+
         <!-- WARP Exclude Domains -->
         <div class="card card-wide">
             <h2><span class="icon">🚫</span> WARP Exclude Domains</h2>
@@ -741,6 +759,9 @@ async function loadConfig() {
         populateExtractorSelect(config.available_extractors || []);
         renderWarpOffToggles(config.available_extractors || [], config.warp_off_extractors || []);
         renderProxyOffToggles(config.available_extractors || [], config.proxy_off_extractors || []);
+        renderMaxResToggles(config.available_extractors || [], config.max_res_extractors || []);
+        setToggle('max-res-mpd-toggle', config.max_res_mpd || false);
+        setToggle('max-res-hls-toggle', config.max_res_hls || false);
         renderExcludeDomains();
         renderProxyExcludeDomains();
 
@@ -786,7 +807,8 @@ async function loadConfig() {
 function renderExtractorProxies() {
     const container = document.getElementById('extractor-proxies-list');
     container.innerHTML = '';
-    for (const [name, entry] of Object.entries(extractorProxies)) {
+    for (const name of Object.keys(extractorProxies).sort((a, b) => a.localeCompare(b))) {
+        const entry = extractorProxies[name];
         let isFile = false, value = '';
         if (typeof entry === 'string') { value = entry; }
         else if (Array.isArray(entry)) { value = entry[0] || ''; }
@@ -807,7 +829,7 @@ function renderExtractorProxies() {
 function populateExtractorSelect(availableExtractors) {
     const sel = document.getElementById('new-extractor-name');
     sel.innerHTML = '<option value="">— Select extractor —</option>';
-    for (const name of availableExtractors) {
+    for (const name of [...availableExtractors].sort((a, b) => a.localeCompare(b))) {
         if (!extractorProxies[name]) {
             const opt = document.createElement('option');
             opt.value = name;
@@ -820,7 +842,7 @@ function populateExtractorSelect(availableExtractors) {
 function renderWarpOffToggles(available, warpOffList) {
     const container = document.getElementById('warp-off-list');
     container.innerHTML = '';
-    for (const name of available) {
+    for (const name of [...available].sort((a, b) => a.localeCompare(b))) {
         const isOff = warpOffList.includes(name);
         const btn = document.createElement('span');
         btn.className = 'warp-off-chip' + (isOff ? ' off' : '');
@@ -843,7 +865,7 @@ function renderWarpOffToggles(available, warpOffList) {
 function renderProxyOffToggles(available, proxyOffList) {
     const container = document.getElementById('proxy-off-list');
     container.innerHTML = '';
-    for (const name of available) {
+    for (const name of [...available].sort((a, b) => a.localeCompare(b))) {
         const isOff = proxyOffList.includes(name);
         const btn = document.createElement('span');
         btn.className = 'warp-off-chip' + (isOff ? ' off' : '');
@@ -861,6 +883,36 @@ function renderProxyOffToggles(available, proxyOffList) {
         };
         container.appendChild(btn);
     }
+}
+
+function renderMaxResToggles(available, maxResList) {
+    const container = document.getElementById('max-res-list');
+    container.innerHTML = '';
+    for (const name of [...available].sort((a, b) => a.localeCompare(b))) {
+        const isOn = maxResList.includes(name);
+        const btn = document.createElement('span');
+        btn.className = 'warp-off-chip' + (isOn ? '' : ' off');
+        btn.textContent = isOn ? name + ' · max' : name;
+        btn.onclick = async () => {
+            let newList;
+            if (maxResList.includes(name)) {
+                newList = maxResList.filter(x => x !== name);
+            } else {
+                newList = [...maxResList, name];
+            }
+            await saveField('max_res_extractors', newList);
+            config.max_res_extractors = newList;
+            renderMaxResToggles(available, newList);
+        };
+        container.appendChild(btn);
+    }
+}
+
+async function toggleMaxRes(kind) {
+    const key = 'max_res_' + kind;
+    const newVal = !config[key];
+    await saveField(key, newVal);
+    setToggle('max-res-' + kind + '-toggle', newVal);
 }
 
 function humanizeKey(key) {

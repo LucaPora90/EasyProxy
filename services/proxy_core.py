@@ -4,6 +4,7 @@ import hmac
 import logging
 import os
 import re
+import secrets
 import time
 import urllib.parse
 import aiohttp
@@ -57,6 +58,10 @@ class SharedSessionWrapper:
 
 
 class HLSProxyCoreMixin:
+
+    # Extractor polls for the same source+client reuse one playback namespace
+    # for this long (matches the 60s per-stream session idle TTL).
+    STREAM_KEY_REUSE_SECONDS = 60.0
 
     @staticmethod
     def _pow_search(hmac_hash: str, resource: str, number: str, ts: int, max_iter: int) -> int:
@@ -1107,6 +1112,50 @@ class HLSProxyCoreMixin:
         if not url:
             return None
         return hashlib.md5(url.encode()).hexdigest()[:12]
+
+    def _request_forces_max_res(self, request, extractor_key: str | None, source: str) -> bool:
+        """Apply the max-res policy for this request.
+
+        Direct /proxy/mpd and /proxy/hls calls honour the admin MPD/HLS
+        switches; requests that belong to an extractor (query namespace or the
+        extractor endpoint itself) honour only the per-extractor list.
+        """
+        query_key = request.query.get("extractor_key", "")
+        proxy_endpoint = request.path.startswith("/proxy/")
+        key = query_key or ("" if proxy_endpoint else (extractor_key or ""))
+        requested = request.query.get("max_res", "").lower() in {"1", "true", "yes", "on"}
+        return _config.should_force_max_res(
+            key,
+            requested,
+            source,
+            proxy_endpoint=proxy_endpoint,
+        )
+
+    def _reuse_stream_key(self, source_key: str, client_id: str = "") -> str:
+        """Keep one playback namespace while the player polls the extractor.
+
+        Players reload the extractor URL every few seconds; minting a new
+        stream_key per call created (and closed) one upstream session per poll.
+        Reuse the key per source+client IP for a quiet period (60s, the same
+        idle TTL the session reaper uses), so viewers behind different IPs keep
+        separate sessions while devices that share an IP also share the session.
+        """
+        now = time.time()
+        cache = getattr(self, "_stream_key_cache", None)
+        if cache is None:
+            cache = {}
+            self._stream_key_cache = cache
+        cache_key = f"{client_id}|{source_key}"
+        entry = cache.get(cache_key)
+        if entry and now - entry[0] < self.STREAM_KEY_REUSE_SECONDS:
+            cache[cache_key] = (now, entry[1])
+            return entry[1]
+        stream_key = f"{source_key}-{secrets.token_hex(6)}"
+        cache[cache_key] = (now, stream_key)
+        while len(cache) > 512:
+            oldest = min(cache, key=lambda key: cache[key][0])
+            cache.pop(oldest, None)
+        return stream_key
 
     def _touch_extractor_activity(self, extractor_key: str | None = None, stream_key: str | None = None):
         now = time.time()

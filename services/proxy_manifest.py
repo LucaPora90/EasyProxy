@@ -523,6 +523,7 @@ class HLSProxyManifestHandlerMixin:
                     forced_proxy=selected_proxy,
                     extractor_key=extractor_key,
                     stream_key=stream_key,
+                    max_res=self._request_forces_max_res(request, extractor_key, "mpd"),
                 )
 
                 return web.Response(
@@ -605,6 +606,11 @@ class HLSProxyManifestHandlerMixin:
                     force_direct=force_direct,
                     extractor_key=extractor_key if 'extractor_key' in locals() else request.query.get("extractor_key"),
                     stream_key=stream_key if 'stream_key' in locals() else request.query.get("stream_key"),
+                    max_res=self._request_forces_max_res(
+                        request,
+                        extractor_key if 'extractor_key' in locals() else request.query.get("extractor_key"),
+                        "hls",
+                    ),
                 )
                 return web.Response(
                     text=rewritten_manifest,
@@ -758,6 +764,8 @@ class HLSProxyManifestHandlerMixin:
                     params += "&warp=off"
                 if bypass_proxies:
                     params += "&proxy=off"
+                if self._request_forces_max_res(request, extractor_key, "mpd"):
+                    params += "&max_res=true"
                 if extractor_key:
                     params += f"&extractor_key={urllib.parse.quote(extractor_key, safe='')}"
                 if stream_key:

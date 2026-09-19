@@ -5,6 +5,9 @@ import asyncio
 import base64
 import json
 import math
+import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse, urljoin
 from typing import Dict, Any
 import aiohttp
@@ -64,6 +67,21 @@ class ExtractorError(Exception):
 class DLStreamsExtractor:
     """Extractor for daddy live / dlstreams streams."""
 
+    # Return before the request layer kills the task at 30s: an unresponsive
+    # dlive.sx would otherwise burn 10s per candidate, hit the outer timeout
+    # and turn concurrent requests into 500s.
+    EXTRACT_BUDGET_SECONDS = 20.0
+    CANDIDATE_TIMEOUT_SECONDS = 6
+    # Players poll the extractor every few seconds. Re-scraping the player
+    # pages on every poll gets the iframe host to answer 429, so reuse a
+    # validated stream URL for a short window instead. When a re-scrape fails,
+    # keep serving the last known URL (its token lives for hours) with a small
+    # backoff so the failing host is not hammered.
+    STREAM_CACHE_SECONDS = 30.0
+    STREAM_CACHE_STALE_SECONDS = 900.0
+    STREAM_CACHE_FAIL_BACKOFF_SECONDS = 15.0
+    MAX_HOST_BACKOFF_SECONDS = 3600.0
+
     def __init__(self, request_headers: dict = None, proxies: list = None, bypass_warp: bool = False):
         self.request_headers = request_headers or {}
         self.entry_origin = ""
@@ -77,6 +95,63 @@ class DLStreamsExtractor:
         self.proxies = proxies or []
         self.bypass_warp_active = bypass_warp
         self._inflight_extract_tasks: dict[str, asyncio.Task] = {}
+        self._stream_cache: dict[str, tuple[float, float, dict]] = {}
+        # host -> monotonic deadline: honour upstream Retry-After instead of
+        # scraping a host that already said "too many requests".
+        self._host_backoff: dict[str, float] = {}
+
+    @staticmethod
+    def _host_of(url: str) -> str:
+        return (urlparse(url).hostname or "").lower()
+
+    @classmethod
+    def _parse_retry_after(cls, value: str | None) -> float | None:
+        """Retry-After as delta-seconds or HTTP-date, clamped to a sane range."""
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        seconds = None
+        if raw.isdigit():
+            seconds = float(raw)
+        else:
+            try:
+                target = parsedate_to_datetime(raw)
+            except (TypeError, ValueError):
+                return None
+            if target is None:
+                return None
+            if target.tzinfo is None:
+                target = target.replace(tzinfo=timezone.utc)
+            seconds = (target - datetime.now(timezone.utc)).total_seconds()
+        if seconds is None:
+            return None
+        return max(1.0, min(float(seconds), cls.MAX_HOST_BACKOFF_SECONDS))
+
+    def _host_limited_for(self, url: str) -> float:
+        """Seconds left before this host may be queried again (0 = free)."""
+        deadline = self._host_backoff.get(self._host_of(url), 0.0)
+        return max(0.0, deadline - time.monotonic())
+
+    def _mark_host_limited(self, url: str, retry_after: str | None) -> float:
+        host = self._host_of(url)
+        seconds = self._parse_retry_after(retry_after)
+        if seconds is None:
+            seconds = self.STREAM_CACHE_FAIL_BACKOFF_SECONDS
+        self._host_backoff[host] = time.monotonic() + seconds
+        logger.warning("DLStreams: %s rate-limited, backing off %.0fs", host, seconds)
+        return seconds
+
+    def _rate_limit_wait(self) -> float:
+        """Longest remaining host backoff, dropping expired entries."""
+        now = time.monotonic()
+        self._host_backoff = {
+            host: deadline
+            for host, deadline in self._host_backoff.items()
+            if deadline > now
+        }
+        if not self._host_backoff:
+            return 0.0
+        return max(self._host_backoff.values()) - now
 
     def _prioritize_player_urls(self, channel_id: str) -> list[str]:
         return self._build_player_urls(channel_id)
@@ -153,7 +228,22 @@ class DLStreamsExtractor:
         ]
 
     @staticmethod
-    def _first_media_uri(body: str, base_url: str, want_playlist: bool) -> str | None:
+    def _inherit_query_if_missing(absolute_url: str, base_url: str) -> str:
+        """CDNs here issue a token in the playlist URL and list relative URIs.
+
+        Plain urljoin drops the parent token, so the segment/variant probe
+        becomes a 404 and a working player is reported as dead.
+        """
+        parsed = urlparse(absolute_url)
+        if parsed.query:
+            return absolute_url
+        base_query = urlparse(base_url).query
+        if not base_query:
+            return absolute_url
+        return parsed._replace(query=base_query).geturl()
+
+    @classmethod
+    def _first_media_uri(cls, body: str, base_url: str, want_playlist: bool) -> str | None:
         """First non-comment URI in a playlist: variant (.m3u8) or segment."""
         for raw in (body or "").splitlines():
             line = raw.strip()
@@ -161,10 +251,10 @@ class DLStreamsExtractor:
                 continue
             low = line.lower().split("?")[0].split("#")[0]
             if (low.endswith(".m3u8")) == want_playlist:
-                return urljoin(base_url, line)
+                return cls._inherit_query_if_missing(urljoin(base_url, line), base_url)
         return None
 
-    async def _is_stream_alive(self, session, stream_url: str, headers: dict) -> bool:
+    async def _is_stream_alive(self, session, stream_url: str, headers: dict, budget: float | None = None) -> bool:
         """Validate the full chain: master -> variant -> first segment (+ AES key).
 
         Some CDNs serve the manifest (200) while segments 403 (IP-bound
@@ -172,8 +262,13 @@ class DLStreamsExtractor:
         dead player and hide the working ones, so follow the chain with
         cheap probes (first bytes of the first segment only).
         """
+        def _timeout(default: float) -> float:
+            if budget is None:
+                return default
+            return max(1.0, min(default, budget))
+
         try:
-            async with session.get(stream_url, headers=headers, timeout=10) as resp:
+            async with session.get(stream_url, headers=headers, timeout=_timeout(10)) as resp:
                 if resp.status != 200:
                     logger.debug("DLStreams: validation of %s -> HTTP %s", stream_url, resp.status)
                     return False
@@ -188,7 +283,7 @@ class DLStreamsExtractor:
                 if not variant:
                     logger.debug("DLStreams: validation of %s -> no variant found", stream_url)
                     return False
-                async with session.get(variant, headers=headers, timeout=8) as resp:
+                async with session.get(variant, headers=headers, timeout=_timeout(8)) as resp:
                     if resp.status != 200:
                         logger.debug("DLStreams: validation variant %s -> HTTP %s", variant, resp.status)
                         return False
@@ -202,7 +297,7 @@ class DLStreamsExtractor:
                 logger.debug("DLStreams: validation of %s -> no segments listed", stream_url)
                 return False
             probe_headers = {**headers, "Range": "bytes=0-1023"}
-            async with session.get(segment, headers=probe_headers, timeout=8) as resp:
+            async with session.get(segment, headers=probe_headers, timeout=_timeout(8)) as resp:
                 if resp.status not in (200, 206):
                     logger.debug("DLStreams: segment probe of %s -> HTTP %s", segment, resp.status)
                     return False
@@ -213,9 +308,11 @@ class DLStreamsExtractor:
             # AES key, if the variant uses one
             key_match = re.search(r'#EXT-X-KEY:[^\n]*URI="([^"]+)"', current_body)
             if key_match:
-                key_url = urljoin(current_url, key_match.group(1))
+                key_url = self._inherit_query_if_missing(
+                    urljoin(current_url, key_match.group(1)), current_url
+                )
                 try:
-                    async with session.get(key_url, headers=headers, timeout=8) as resp:
+                    async with session.get(key_url, headers=headers, timeout=_timeout(8)) as resp:
                         if resp.status != 200:
                             logger.debug("DLStreams: key probe of %s -> HTTP %s", key_url, resp.status)
                             return False
@@ -249,8 +346,34 @@ class DLStreamsExtractor:
         session = await self._get_session(url)
         player_urls = self._prioritize_player_urls(channel_id)
         first_fallback = None  # (stream_url, playback_headers): first URL found, even if dead
+        seen_iframes: set[str] = set()
         
-        for candidate in player_urls:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.EXTRACT_BUDGET_SECONDS
+
+        def _remaining() -> float:
+            return deadline - loop.time()
+
+        def _timeout(default: float) -> float:
+            return max(1.0, min(default, _remaining()))
+
+        for candidate_index, candidate in enumerate(player_urls):
+            if _remaining() <= 2.0:
+                logger.warning(
+                    "DLStreams: extraction budget of %.0fs exhausted after %d/%d players",
+                    self.EXTRACT_BUDGET_SECONDS,
+                    candidate_index,
+                    len(player_urls),
+                )
+                break
+            limited_for = self._host_limited_for(candidate)
+            if limited_for > 0:
+                logger.debug(
+                    "DLStreams: %s rate-limited for another %.0fs, skipping",
+                    self._host_of(candidate),
+                    limited_for,
+                )
+                continue
             try:
                 headers = {
                     "User-Agent": self.base_headers["User-Agent"],
@@ -259,9 +382,11 @@ class DLStreamsExtractor:
                 }
                 
                 logger.debug("DLStreams: GET stream page %s", candidate)
-                async with session.get(candidate, headers=headers, timeout=10) as resp:
+                async with session.get(candidate, headers=headers, timeout=_timeout(self.CANDIDATE_TIMEOUT_SECONDS)) as resp:
                     if resp.status != 200:
                         logger.debug("DLStreams: candidate %s returned status %s", candidate, resp.status)
+                        if resp.status == 429:
+                            self._mark_host_limited(candidate, resp.headers.get("Retry-After"))
                         continue
                     html = await resp.text()
                 
@@ -294,15 +419,29 @@ class DLStreamsExtractor:
                     iframe_src = urljoin(candidate + "/", iframe_src)
                 
                 logger.debug("DLStreams: found player iframe: %s", iframe_src)
+                if iframe_src in seen_iframes:
+                    logger.debug("DLStreams: iframe %s already attempted, skipping", iframe_src)
+                    continue
+                seen_iframes.add(iframe_src)
+                limited_for = self._host_limited_for(iframe_src)
+                if limited_for > 0:
+                    logger.debug(
+                        "DLStreams: %s rate-limited for another %.0fs, skipping iframe",
+                        self._host_of(iframe_src),
+                        limited_for,
+                    )
+                    continue
                 
                 # Fetch iframe player page
                 iframe_headers = headers.copy()
                 iframe_headers["Referer"] = candidate
                 iframe_headers["Origin"] = self.entry_origin
                 
-                async with session.get(iframe_src, headers=iframe_headers, timeout=10) as resp:
+                async with session.get(iframe_src, headers=iframe_headers, timeout=_timeout(self.CANDIDATE_TIMEOUT_SECONDS)) as resp:
                     if resp.status != 200:
                         logger.debug("DLStreams: iframe %s returned status %s", iframe_src, resp.status)
+                        if resp.status == 429:
+                            self._mark_host_limited(iframe_src, resp.headers.get("Retry-After"))
                         continue
                     iframe_html = await resp.text()
                 
@@ -377,14 +516,23 @@ class DLStreamsExtractor:
 
                 # Return the first stream that is actually playable from here.
                 # A dead Player 1 URL must not hide a working Player 2.
-                if await self._is_stream_alive(session, stream_url, playback_headers):
+                if await self._is_stream_alive(
+                    session, stream_url, playback_headers, budget=_remaining()
+                ):
                     logger.info("DLStreams: working stream found via %s", candidate)
-                    return self._build_result(stream_url, playback_headers)
+                    result = self._build_result(stream_url, playback_headers)
+                    result["_validated"] = True
+                    return result
                 logger.info("DLStreams: stream from %s is dead, trying next player", candidate)
                 continue
                 
             except Exception as e:
                 logger.debug("DLStreams: direct extraction candidate %s failed: %s", candidate, e)
+                if candidate_index == 0 and isinstance(e, asyncio.TimeoutError):
+                    # Every candidate shares the dlive.sx origin: when the first
+                    # page does not answer, the others will not either.
+                    logger.warning("DLStreams: site page timed out, aborting candidate loop")
+                    break
                 continue
 
         if first_fallback is not None:
@@ -438,19 +586,61 @@ class DLStreamsExtractor:
         channel_id = self._extract_channel_id(url)
         channel_key = f"premium{channel_id}"
 
-        existing_task = self._inflight_extract_tasks.get(channel_key)
-        if existing_task and not existing_task.done():
-            logger.debug("DLStreams: waiting for in-flight extraction of %s", channel_key)
-            return await existing_task
+        cached = self._stream_cache.get(channel_key)
+        if cached and cached[0] > time.monotonic():
+            logger.debug("DLStreams: reusing cached stream URL for %s", channel_key)
+            return dict(cached[2])
 
-        task = asyncio.create_task(self._extract_impl(url, channel_id=channel_id, **kwargs))
-        self._inflight_extract_tasks[channel_key] = task
         try:
-            return await task
-        finally:
-            current_task = self._inflight_extract_tasks.get(channel_key)
-            if current_task is task:
-                self._inflight_extract_tasks.pop(channel_key, None)
+            existing_task = self._inflight_extract_tasks.get(channel_key)
+            if existing_task and not existing_task.done():
+                logger.debug("DLStreams: waiting for in-flight extraction of %s", channel_key)
+                result = await existing_task
+            else:
+                task = asyncio.create_task(self._extract_impl(url, channel_id=channel_id, **kwargs))
+                self._inflight_extract_tasks[channel_key] = task
+                try:
+                    result = await task
+                finally:
+                    current_task = self._inflight_extract_tasks.get(channel_key)
+                    if current_task is task:
+                        self._inflight_extract_tasks.pop(channel_key, None)
+        except Exception:
+            if cached and cached[1] > time.monotonic():
+                logger.warning(
+                    "DLStreams: extraction failed for %s, serving last known stream URL",
+                    channel_key,
+                )
+                self._backoff_cache_entry(channel_key, cached)
+                return dict(cached[2])
+            raise
+
+        if result and result.pop("_validated", False):
+            now = time.monotonic()
+            self._stream_cache[channel_key] = (
+                now + self.STREAM_CACHE_SECONDS,
+                now + self.STREAM_CACHE_STALE_SECONDS,
+                dict(result),
+            )
+        elif result and cached and cached[1] > time.monotonic():
+            logger.warning(
+                "DLStreams: no player validated for %s, serving last known stream URL",
+                channel_key,
+            )
+            self._backoff_cache_entry(channel_key, cached)
+            return dict(cached[2])
+        elif result:
+            result.pop("_validated", None)
+        return result
+
+    def _backoff_cache_entry(self, channel_key: str, cached: tuple[float, float, dict]) -> None:
+        """Delay the next scrape, honouring any Retry-After from the hosts."""
+        wait = max(self.STREAM_CACHE_FAIL_BACKOFF_SECONDS, self._rate_limit_wait())
+        self._stream_cache[channel_key] = (
+            time.monotonic() + wait,
+            cached[1],
+            cached[2],
+        )
 
     async def _extract_impl(self, url: str, channel_id: str, **kwargs) -> Dict[str, Any]:
         try:

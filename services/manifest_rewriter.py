@@ -7,6 +7,29 @@ from services.secure_state import seal_state
 
 logger = logging.getLogger(__name__)
 
+
+def _keep_best_representation(root, namespace: str) -> None:
+    """Keep only the highest-bandwidth Representation of every AdaptationSet.
+
+    The HLS rewriter already serves just the max variant, so pruning here
+    keeps DASH output consistent instead of letting ABR start lower.
+    """
+    for adaptation_set in root.iter(namespace + "AdaptationSet"):
+        representations = adaptation_set.findall(namespace + "Representation")
+        if len(representations) < 2:
+            continue
+
+        def _bandwidth(representation):
+            try:
+                return int(representation.get("bandwidth") or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        best = max(representations, key=_bandwidth)
+        for representation in representations:
+            if representation is not best:
+                adaptation_set.remove(representation)
+
 # Conditional import for DLHD detection
 # (Rimosso perche non serve piu logica speciale per DLHD nel rewriter)
 try:
@@ -76,6 +99,7 @@ class ManifestRewriter:
         bypass_proxies: bool = False,
         extractor_key: str = None,
         stream_key: str = None,
+        max_res: bool = False,
     ) -> str:
         """Riscrive il manifest MPD per DASH nativo (senza conversione HLS)."""
         import copy
@@ -83,6 +107,8 @@ class ManifestRewriter:
 
         root = ET.fromstring(manifest_content)
         namespace = root.tag.split("}")[0] + "}" if "}" in root.tag else ""
+        if max_res:
+            _keep_best_representation(root, namespace)
 
         def relay(absolute, init_url=None, init_range=None):
             parsed = urllib.parse.urlsplit(absolute)
@@ -188,6 +214,7 @@ class ManifestRewriter:
         drm_token: str = None,
         extractor_key: str = None,
         stream_key: str = None,
+        max_res: bool = False,
     ) -> str:
         """Riscrive i manifest MPD (DASH) per passare attraverso il proxy."""
         try:
@@ -202,6 +229,10 @@ class ManifestRewriter:
                 )
 
             root = ET.fromstring(manifest_content)
+            if max_res:
+                _keep_best_representation(
+                    root, root.tag.split("}")[0] + "}" if "}" in root.tag else ""
+                )
             ns = {
                 "mpd": "urn:mpeg:dash:schema:mpd:2011",
                 "cenc": "urn:mpeg:cenc:2013",
@@ -239,6 +270,8 @@ class ManifestRewriter:
                 header_params += f"&extractor_key={urllib.parse.quote(extractor_key, safe='')}"
             if stream_key:
                 header_params += f"&stream_key={urllib.parse.quote(stream_key, safe='')}"
+            if max_res:
+                header_params += "&max_res=true"
 
             def create_proxy_url(relative_url):
                 # Skip proxying if URL contains DASH template variables - player must resolve these
@@ -391,6 +424,7 @@ class ManifestRewriter:
         force_direct: bool = False,
         extractor_key: str = None,
         stream_key: str = None,
+        max_res: bool = False,
     ) -> str:
         """Riscrive gli URL nei manifest HLS per passare attraverso il proxy."""
         lines = manifest_content.split("\n")
@@ -399,8 +433,8 @@ class ManifestRewriter:
         # no_bypass e mantenuto per compatibilita, ma il rewriter ora proxa sempre.
         _ = no_bypass
 
-        # Master-playlist optimization: keep only the highest-bandwidth
-        # video variant, while preserving audio/media tags and other metadata.
+        # max_res=true: keep only the highest-bandwidth video variant.
+        # Default: keep every variant so the player can adapt (ABR).
         generic_streams = []
         for i, line in enumerate(lines):
             if line.startswith("#EXT-X-STREAM-INF:") and i + 1 < len(lines):
@@ -415,7 +449,7 @@ class ManifestRewriter:
                     }
                 )
 
-        if generic_streams:
+        if generic_streams and max_res:
             highest_quality_stream = max(generic_streams, key=lambda x: x["bandwidth"])
             logger.debug(
                 "Generic HLS: selected max bandwidth %s.",
@@ -464,6 +498,8 @@ class ManifestRewriter:
                 header_params += f"&extractor_key={urllib.parse.quote(extractor_key, safe='')}"
             if stream_key:
                 header_params += f"&stream_key={urllib.parse.quote(stream_key, safe='')}"
+            if max_res:
+                header_params += "&max_res=true"
 
             absolute_variant_url = ManifestRewriter._inherit_query_if_missing(
                 urljoin(base_url, highest_quality_stream["url"]),
@@ -603,6 +639,8 @@ class ManifestRewriter:
             header_params += f"&extractor_key={urllib.parse.quote(extractor_key, safe='')}"
         if stream_key:
             header_params += f"&stream_key={urllib.parse.quote(stream_key, safe='')}"
+        if max_res:
+            header_params += "&max_res=true"
 
         # Estrai query params dal base_url per ereditarli se necessario
         base_parsed = urllib.parse.urlparse(base_url)

@@ -116,7 +116,7 @@ class HLSProxyStreamingMixin:
                 # ✅ CORREZIONE: Se base_url è un URL completo (es. generato dal converter), usalo direttamente.
                 if any(
                     ext in base_url
-                    for ext in [".mp4", ".m4s", ".ts", ".m4i", ".m4a", ".m4v"]
+                    for ext in [".mp4", ".m4s", ".ts", ".m4i", ".m4a", ".m4v", ".dash"]
                 ):
                     segment_url = base_url
                 else:
@@ -387,7 +387,7 @@ class HLSProxyStreamingMixin:
             # Content-Length would make Safari wait for bytes that no longer
             # exist and repeatedly seek backwards.
             segment_ext = os.path.splitext(segment_name.split("?", 1)[0].lower())[1]
-            if segment_ext in {".ts", ".m4s", ".mp4", ".m4a", ".m4v", ".m4i", ".aac"}:
+            if segment_ext in {".ts", ".m4s", ".mp4", ".m4a", ".m4v", ".m4i", ".aac", ".dash"}:
                 headers["Accept-Encoding"] = "identity"
 
             if is_special_cdn:
@@ -475,7 +475,7 @@ class HLSProxyStreamingMixin:
                 # being able to demux it. Keep attachment semantics for legacy TS.
                 segment_path = segment_name.split("?", 1)[0].lower()
                 segment_ext = os.path.splitext(segment_path)[1]
-                is_fmp4 = segment_ext in {".m4s", ".mp4", ".m4a", ".m4v", ".m4i"}
+                is_fmp4 = segment_ext in {".m4s", ".mp4", ".m4a", ".m4v", ".m4i", ".dash"}
                 requested_media_type = request.query.get("media_type", "").lower()
                 set_response_header(
                     response_headers,
@@ -666,8 +666,8 @@ class HLSProxyStreamingMixin:
 
             # ponytail: strip Accept-Language for lulustream source to prevent 403 Forbidden
             orig_url = request.query.get("orig_url", "")
-            extractor_key = request.query.get("extractor_key", "")
-            if "lulustream" in orig_url or "luluvdo" in orig_url or extractor_key == "lulustream":
+            query_extractor_key = request.query.get("extractor_key", "")
+            if "lulustream" in orig_url or "luluvdo" in orig_url or query_extractor_key == "lulustream":
                 headers.pop("accept-language", None)
                 headers.pop("Accept-Language", None)
 
@@ -1207,6 +1207,7 @@ class HLSProxyStreamingMixin:
                         force_direct=force_direct,
                         extractor_key=extractor_key or request.query.get("extractor_key"),
                         stream_key=stream_key or request.query.get("stream_key"),
+                        max_res=self._request_forces_max_res(request, extractor_key, "hls"),
                     )
                     return web.Response(text=rewritten, headers={
                         "Content-Type": "application/vnd.apple.mpegurl",
@@ -1256,6 +1257,10 @@ class HLSProxyStreamingMixin:
                                 mpd_params = f"{mpd_params}&extractor_key={urllib.parse.quote(extractor_key, safe='')}" if mpd_params else f"extractor_key={urllib.parse.quote(extractor_key, safe='')}"
                             if stream_key and "stream_key=" not in mpd_params:
                                 mpd_params = f"{mpd_params}&stream_key={urllib.parse.quote(stream_key, safe='')}" if mpd_params else f"stream_key={urllib.parse.quote(stream_key, safe='')}"
+                            if "max_res=" not in mpd_params and self._request_forces_max_res(
+                                request, extractor_key, "mpd"
+                            ):
+                                mpd_params = f"{mpd_params}&max_res=true" if mpd_params else "max_res=true"
 
                             if rep_id:
                                 # Generate Media Playlist (Segments)
@@ -1322,6 +1327,7 @@ class HLSProxyStreamingMixin:
                         drm_token=drm_token,
                         extractor_key=extractor_key or request.query.get("extractor_key"),
                         stream_key=stream_key or request.query.get("stream_key"),
+                        max_res=self._request_forces_max_res(request, extractor_key, "mpd"),
                     )
 
                     return web.Response(

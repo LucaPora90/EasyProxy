@@ -265,63 +265,13 @@ class VidXgoExtractor:
         m3u8_url = self._decode_embed(html)
         logger.info(f"vidxgo: extracted m3u8 for {url} -> {m3u8_url[:80]}...")
 
-        # 3. Fetch master and only the selected video variant. The proxy
-        # rewriter exposes the highest-bandwidth variant, so fetching every
-        # variant here only adds latency and the result is otherwise unused.
+        # 3. Fetch the master. Variant selection (all variants or only the
+        # highest one) is decided by the proxy rewriter via max_res.
         master_text = await self._fetch(m3u8_url, playback_headers, bypass_warp=bypass_warp)
         if "#EXTM3U" not in master_text:
             raise ExtractorError("VidXgo: extracted URL did not return a valid HLS manifest")
 
-        from urllib.parse import urljoin
-        captured_map: dict[str, str] = {}
-        master_lines = master_text.splitlines()
-        variant_urls: list[str] = []
-        video_variants: list[tuple[str, int]] = []
-        for i, line in enumerate(master_lines):
-            if line.startswith("#EXT-X-STREAM-INF:") and i + 1 < len(master_lines):
-                raw = master_lines[i + 1].strip()
-                if raw and not raw.startswith("#"):
-                    variant_url = urljoin(m3u8_url, raw)
-                    variant_urls.append(variant_url)
-                    bandwidth_match = re.search(r"BANDWIDTH=(\d+)", line)
-                    video_variants.append(
-                        (variant_url, int(bandwidth_match.group(1)) if bandwidth_match else 0)
-                    )
-
-        for line in master_lines:
-            if line.startswith("#EXT-X-MEDIA:") and 'URI="' in line:
-                uri_start = line.find('URI="') + 5
-                uri_end = line.find('"', uri_start)
-                if uri_start > 4 and uri_end > uri_start:
-                    media_url = urljoin(m3u8_url, line[uri_start:uri_end])
-                    if media_url not in variant_urls:
-                        variant_urls.append(media_url)
-
-        if video_variants:
-            selected_variant, _bandwidth = max(
-                video_variants,
-                key=lambda candidate: candidate[1],
-            )
-            logger.info(
-                "vidxgo: prefetching selected variant only (%d/%d): %s",
-                variant_urls.index(selected_variant) + 1,
-                len(variant_urls),
-                selected_variant,
-            )
-            try:
-                captured_map[selected_variant] = await self._fetch(
-                    selected_variant,
-                    playback_headers,
-                    bypass_warp=bypass_warp,
-                )
-            except Exception as e:
-                logger.warning(
-                    "vidxgo: selected variant fetch failed %s: %s",
-                    selected_variant,
-                    e,
-                )
-
-        captured_map[m3u8_url] = master_text
+        captured_map: dict[str, str] = {m3u8_url: master_text}
 
         result = {
             "destination_url": m3u8_url,
