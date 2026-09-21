@@ -4,6 +4,9 @@ import logging
 import re
 import json
 import ssl
+import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse, urljoin
 from typing import Dict, Any
 import random
@@ -19,6 +22,11 @@ logger = logging.getLogger(__name__)
 
 class ExtractorError(Exception):
     """Eccezione personalizzata per errori di estrazione."""
+    pass
+
+
+class RateLimitError(ExtractorError):
+    """Upstream returned HTTP 429; use cached data/backoff when available."""
     pass
 
 
@@ -59,6 +67,13 @@ def _int2base(x, base):
 class SportsonlineExtractor:
     """Sportsonline/Sportzonline URL extractor for M3U8 streams."""
 
+    EXTRACT_BUDGET_SECONDS = 20.0
+    CANDIDATE_TIMEOUT_SECONDS = 6.0
+    STREAM_CACHE_SECONDS = 30.0
+    STREAM_CACHE_STALE_SECONDS = 900.0
+    STREAM_CACHE_FAIL_BACKOFF_SECONDS = 15.0
+    MAX_HOST_BACKOFF_SECONDS = 3600.0
+
     def __init__(self, request_headers: dict, proxies: list = None):
         self.request_headers = request_headers or {}
         self.base_headers = {
@@ -69,6 +84,45 @@ class SportsonlineExtractor:
         self.mediaflow_endpoint = "hls_manifest_proxy"
         self.proxies = proxies or _cfg.GLOBAL_PROXIES
         self._session_proxy = None
+        self._inflight_extract_tasks: dict[str, asyncio.Task] = {}
+        self._stream_cache: dict[str, tuple[float, float, dict]] = {}
+        self._host_backoff: dict[str, float] = {}
+
+    @staticmethod
+    def _host_of(url: str) -> str:
+        return (urlparse(url).hostname or "").lower()
+
+    @classmethod
+    def _parse_retry_after(cls, value: str | None) -> float | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        if raw.isdigit():
+            seconds = float(raw)
+        else:
+            try:
+                target = parsedate_to_datetime(raw)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            if target.tzinfo is None:
+                target = target.replace(tzinfo=timezone.utc)
+            seconds = (target - datetime.now(timezone.utc)).total_seconds()
+        return max(1.0, min(float(seconds), cls.MAX_HOST_BACKOFF_SECONDS))
+
+    def _mark_host_limited(self, url: str, retry_after: str | None) -> float:
+        seconds = self._parse_retry_after(retry_after)
+        if seconds is None:
+            seconds = self.STREAM_CACHE_FAIL_BACKOFF_SECONDS
+        host = self._host_of(url)
+        self._host_backoff[host] = max(
+            self._host_backoff.get(host, 0.0), time.monotonic() + seconds
+        )
+        logger.warning("Sportsonline: %s rate-limited, backing off %.0fs", host, seconds)
+        return seconds
+
+    def _host_limited_for(self, url: str) -> float:
+        deadline = self._host_backoff.get(self._host_of(url), 0.0)
+        return max(0.0, deadline - time.monotonic())
 
     def _get_random_proxy(self):
         return random.choice(self.proxies) if self.proxies else None
@@ -196,7 +250,13 @@ class SportsonlineExtractor:
         return self.session
 
     async def _make_robust_request(
-        self, url: str, headers: dict = None, retries=2, initial_delay=1, timeout=15
+        self,
+        url: str,
+        headers: dict = None,
+        retries=2,
+        initial_delay=1,
+        timeout=15,
+        deadline: float | None = None,
     ):
         """Effettua richieste HTTP robuste con aiohttp e proxy configurati."""
         final_headers = headers or self.base_headers
@@ -205,13 +265,28 @@ class SportsonlineExtractor:
             try:
                 logger.debug(f"Attempt {attempt + 1}/{retries} for URL: {url}")
                 session = await self._get_session(url)
-                async with session.get(url, headers=final_headers, timeout=timeout) as response:
+                request_timeout = float(timeout)
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise ExtractorError(
+                            f"Sportsonline extraction budget exhausted for {url}"
+                        )
+                    request_timeout = min(request_timeout, remaining)
+                async with session.get(
+                    url, headers=final_headers, timeout=request_timeout
+                ) as response:
+                    if response.status == 429:
+                        self._mark_host_limited(url, response.headers.get("Retry-After"))
+                        raise RateLimitError(f"HTTP 429 Too Many Requests for {url}")
                     response.raise_for_status()
                     html = await self._handle_response_content(response)
                     if not html:
                         raise ExtractorError(f"Empty response for {url}")
                     return html, str(response.url)
 
+            except RateLimitError:
+                raise
             except (ssl.SSLError, ClientOSError) as e:
                 logger.warning(
                     "SSL/OS error attempt %s/%s for %s via %s: %s: %r",
@@ -227,7 +302,11 @@ class SportsonlineExtractor:
                     # Keep the shared session alive for concurrent requests.
                     # aiohttp removes the failed connection from its pool.
                 if attempt < retries - 1:
-                    await asyncio.sleep(initial_delay)
+                    delay = initial_delay
+                    if deadline is not None:
+                        delay = min(delay, max(0.0, deadline - time.monotonic()))
+                    if delay > 0:
+                        await asyncio.sleep(delay)
                 else:
                     raise ExtractorError(f"All request attempts failed for {url}: {str(e)}")
 
@@ -242,7 +321,11 @@ class SportsonlineExtractor:
                     e,
                 )
                 if attempt < retries - 1:
-                    await asyncio.sleep(initial_delay)
+                    delay = initial_delay
+                    if deadline is not None:
+                        delay = min(delay, max(0.0, deadline - time.monotonic()))
+                    if delay > 0:
+                        await asyncio.sleep(delay)
                 else:
                     raise ExtractorError(f"All request attempts failed for {url}: {str(e)}")
         raise ExtractorError(f"Unable to complete request for {url}")
@@ -346,9 +429,10 @@ class SportsonlineExtractor:
             return urljoin(base_url, cleaned)
         return cleaned
 
-    async def extract(self, url: str, **kwargs) -> Dict[str, Any]:
+    async def _extract_impl(self, url: str, **kwargs) -> Dict[str, Any]:
         """Main extraction flow: fetch page, extract iframe, unpack and find m3u8."""
         try:
+            deadline = time.monotonic() + self.EXTRACT_BUDGET_SECONDS
             self.update_request_headers(kwargs.get("request_headers"))
             
             parsed_source = urlparse(url)
@@ -368,6 +452,7 @@ class SportsonlineExtractor:
                 url,
                 headers=main_headers,
                 timeout=15,
+                deadline=deadline,
             )
             parsed_main = urlparse(main_url)
             main_origin = f"{parsed_main.scheme}://{parsed_main.netloc}"
@@ -391,10 +476,27 @@ class SportsonlineExtractor:
 
                 iframe_html = None
                 for candidate_url in candidates:
+                    if deadline <= time.monotonic():
+                        logger.warning(
+                            "Sportsonline: extraction budget exhausted before iframe candidate"
+                        )
+                        break
+                    if self._host_limited_for(candidate_url) > 0:
+                        logger.debug(
+                            "Sportsonline: skipping rate-limited iframe host %s",
+                            self._host_of(candidate_url),
+                        )
+                        continue
                     # Step 2: Fetch iframe with source page as referer
                     iframe_headers = self._build_iframe_headers(main_url, candidate_url)
                     try:
-                        iframe_html, active_iframe_url = await self._make_robust_request(candidate_url, headers=iframe_headers, timeout=15, retries=1)
+                        iframe_html, active_iframe_url = await self._make_robust_request(
+                            candidate_url,
+                            headers=iframe_headers,
+                            timeout=self.CANDIDATE_TIMEOUT_SECONDS,
+                            retries=1,
+                            deadline=deadline,
+                        )
                         iframe_url = active_iframe_url
                         logger.debug(f"Iframe HTML length: {len(iframe_html)}")
                         break
@@ -402,7 +504,9 @@ class SportsonlineExtractor:
                         logger.warning(f"Failed candidate {candidate_url}: {e}")
 
                 if not iframe_html:
-                    raise ExtractorError("All iframe candidates failed (403 or connection errors).")
+                    raise ExtractorError(
+                        "All iframe candidates failed (blocked, rate-limited, or connection errors)."
+                    )
             else:
                 logger.warning("No iframe found on page, attempting extraction from main HTML")
 
@@ -508,7 +612,51 @@ class SportsonlineExtractor:
             logger.exception(f"Sportsonline extraction failed for {url}")
             raise ExtractorError(f"Extraction failed: {str(e)}")
 
+    async def extract(self, url: str, **kwargs) -> Dict[str, Any]:
+        """Extract with short-lived cache and single-flight deduplication."""
+        cache_key = url.strip()
+        now = time.monotonic()
+        cached = self._stream_cache.get(cache_key)
+        if cached and cached[0] > now:
+            logger.debug("Sportsonline: reusing cached stream URL for %s", cache_key)
+            return dict(cached[2])
+
+        try:
+            existing_task = self._inflight_extract_tasks.get(cache_key)
+            if existing_task and not existing_task.done():
+                result = await existing_task
+            else:
+                task = asyncio.create_task(self._extract_impl(url, **kwargs))
+                self._inflight_extract_tasks[cache_key] = task
+                try:
+                    result = await task
+                finally:
+                    if self._inflight_extract_tasks.get(cache_key) is task:
+                        self._inflight_extract_tasks.pop(cache_key, None)
+        except Exception:
+            if cached and cached[1] > time.monotonic():
+                logger.warning(
+                    "Sportsonline: extraction failed for %s, serving cached stream URL",
+                    cache_key,
+                )
+                return dict(cached[2])
+            raise
+
+        now = time.monotonic()
+        self._stream_cache[cache_key] = (
+            now + self.STREAM_CACHE_SECONDS,
+            now + self.STREAM_CACHE_STALE_SECONDS,
+            dict(result),
+        )
+        return result
+
     async def close(self):
+        pending_tasks = list(self._inflight_extract_tasks.values())
+        for task in pending_tasks:
+            task.cancel()
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
+        self._inflight_extract_tasks.clear()
         for session in self._route_sessions.values():
             if not session.closed:
                 await session.close()

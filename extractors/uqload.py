@@ -1,6 +1,7 @@
 import logging
 import re
 from urllib.parse import urljoin, urlparse
+from utils.packed import unpack
 from extractors.base import BaseExtractor, ExtractorError
 
 logger = logging.getLogger(__name__)
@@ -32,7 +33,7 @@ class UqloadExtractor(BaseExtractor):
         r'sources: \["(.*?)"\]',                              # mediaflow exact — works on most uqload pages
         r'sources\s*:\s*\[\s*["\']([^"\']+)["\']',          # flexible spacing/quotes variant
         r'"?sources"?\s*:\s*\[\s*["\']([^"\']+)["\']',      # with optional quotes on key
-        r'file\s*:\s*["\']([^"\']+\.mp4[^"\']*)["\']',      # fallback: file: "...mp4..."
+        r'file\s*:\s*["\']([^"\']+\.(?:m3u8|mp4)(?:\?[^"\']*)?)["\']',
         r'src\s*:\s*["\']([^"\']+\.mp4[^"\']*)["\']',       # src: "...mp4..."
         r'video_url\s*=\s*["\']([^"\']+)["\']',              # var video_url = "..."
         r'player\.src\s*\(\s*["\']([^"\']+)["\']',           # player.src("...")
@@ -41,7 +42,32 @@ class UqloadExtractor(BaseExtractor):
 
     def __init__(self, request_headers: dict, proxies: list = None):
         super().__init__(request_headers, proxies, extractor_name="uqload")
-        self.mediaflow_endpoint = "proxy_stream_endpoint"
+
+    @classmethod
+    def _find_source(cls, text: str) -> str | None:
+        for pattern in cls.SOURCE_PATTERNS:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                return (match.group(1) if match.lastindex else match.group(0)).strip()
+        return None
+
+    @classmethod
+    def _extract_source(cls, text: str, base_url: str) -> str | None:
+        source = cls._find_source(text)
+        if source:
+            return urljoin(base_url, source.replace("\\/", "/"))
+
+        for script in re.findall(r"<script[^>]*>(.*?)</script>", text, re.DOTALL | re.IGNORECASE):
+            if "eval(function(p,a,c,k,e,d)" not in script:
+                continue
+            try:
+                source = cls._find_source(unpack(script))
+            except Exception as exc:
+                logger.debug("[Uqload] Failed to unpack source script: %s", exc)
+                continue
+            if source:
+                return urljoin(base_url, source.replace("\\/", "/"))
+        return None
 
     async def extract(self, url: str, **kwargs) -> dict:
         """Extract Uqload video URL."""
@@ -64,13 +90,45 @@ class UqloadExtractor(BaseExtractor):
         ):
             raise ExtractorError(f"Uqload video removed/not found: {url}")
 
-        video_url = None
-        for i, pattern in enumerate(self.SOURCE_PATTERNS):
-            m = re.search(pattern, text, re.IGNORECASE)
-            if m:
-                video_url = m.group(1).strip() if m.lastindex else m.group(0).strip()
-                logger.debug(f"[Uqload] Pattern #{i} matched: {video_url[:80]}...")
-                break
+        source_base = final_url or url
+        video_url = self._extract_source(text, source_base)
+
+        # Current Uqload /e/<code> pages keep the player source behind the
+        # browser's POST to /dl; the embed HTML only contains the play button.
+        if not video_url:
+            parsed = urlparse(source_base)
+            file_code = parsed.path.rstrip("/").rsplit("/", 1)[-1]
+            file_code = re.sub(r"\.html$", "", file_code, flags=re.IGNORECASE)
+            file_code = file_code.rsplit("-", 1)[-1]
+            origin = f"{parsed.scheme}://{parsed.netloc}"
+            if file_code and parsed.scheme and parsed.netloc:
+                post_headers = dict(self.BROWSER_HEADERS)
+                post_headers.update(
+                    {
+                        "Accept": "*/*",
+                        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                        "Origin": origin,
+                        "Referer": source_base,
+                        "X-Requested-With": "XMLHttpRequest",
+                    }
+                )
+                post_response = await self._make_request(
+                    f"{origin}/dl",
+                    method="POST",
+                    headers=post_headers,
+                    data={
+                        "op": "embed",
+                        "file_code": file_code,
+                        "auto": "1",
+                        "referer": self.request_headers.get("Referer", ""),
+                    },
+                )
+                video_url = self._extract_source(
+                    post_response.text,
+                    post_response.url or source_base,
+                )
+        if video_url:
+            logger.debug(f"[Uqload] Extracted source: {video_url[:80]}...")
 
         if not video_url:
             # Log more context to help debug
@@ -84,15 +142,22 @@ class UqloadExtractor(BaseExtractor):
                     logger.warning(f"[Uqload] Relevant script #{idx}: {script[:300]!r}")
             raise ExtractorError(f"Failed to extract video URL from uqload page: {url}")
 
-        origin = urljoin(url, "/")
+        parsed_url = urlparse(url)
+        origin = f"{parsed_url.scheme}://{parsed_url.netloc}"
+        media_path = urlparse(video_url).path.lower()
+        mediaflow_endpoint = (
+            "proxy_stream_endpoint"
+            if media_path.endswith((".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv"))
+            else self.mediaflow_endpoint
+        )
         return {
             "destination_url": video_url,
             "request_headers": {
                 "user-agent": self.BROWSER_HEADERS["User-Agent"],
-                "referer": origin,
+                "referer": f"{origin}/",
                 "origin": origin,
             },
-            "mediaflow_endpoint": self.mediaflow_endpoint,
+            "mediaflow_endpoint": mediaflow_endpoint,
         }
 
     async def close(self):

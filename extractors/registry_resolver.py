@@ -280,6 +280,15 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
                         request_headers, proxies=proxy_list
                     )
                 return self.extractors[key]
+            elif host in ["guardabest", "guardabestvid"]:
+                key = _cache_key("guardabest", bypass_warp)
+                proxy = get_proxy_for_url("guardabestvid", bypass_warp=bypass_warp)
+                proxy_list = _build_proxy_list(proxy, "guardabest")
+                if key not in self.extractors:
+                    self.extractors[key] = GuardabestExtractor(
+                        request_headers, proxies=proxy_list
+                    )
+                return self.extractors[key]
             elif host in ["sports99", "cdnlivetv"]:
                 key = _cache_key("sports99", bypass_warp)
                 if key not in self.extractors:
@@ -418,6 +427,17 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
                 )
             return self.extractors[key]
         elif "mediapolisvod.rai.it/relinker/" in url.lower():
+            key = _cache_key("raiplay", bypass_warp)
+            proxy = get_proxy_for_url(url, bypass_warp=bypass_warp)
+            proxy_list = _build_proxy_list(proxy, "raiplay")
+            if RaiPlayExtractor is None:
+                raise RuntimeError("RaiPlayExtractor module not available")
+            if key not in self.extractors:
+                self.extractors[key] = RaiPlayExtractor(
+                    request_headers, proxies=proxy_list
+                )
+            return self.extractors[key]
+        elif (parsed_url.hostname or "").lower().endswith("raiplay.it"):
             key = _cache_key("raiplay", bypass_warp)
             proxy = get_proxy_for_url(url, bypass_warp=bypass_warp)
             proxy_list = _build_proxy_list(proxy, "raiplay")
@@ -741,6 +761,15 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
             proxy_list = _build_proxy_list(proxy, "f16px")
             if key not in self.extractors:
                 self.extractors[key] = F16PxExtractor(
+                    request_headers, proxies=proxy_list
+                )
+            return self.extractors[key]
+        elif "guardabestvid.cam" in url.lower():
+            key = _cache_key("guardabest", bypass_warp)
+            proxy = get_proxy_for_url("guardabestvid", bypass_warp=bypass_warp)
+            proxy_list = _build_proxy_list(proxy, "guardabest")
+            if key not in self.extractors:
+                self.extractors[key] = GuardabestExtractor(
                     request_headers, proxies=proxy_list
                 )
             return self.extractors[key]

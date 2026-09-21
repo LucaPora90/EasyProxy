@@ -39,6 +39,7 @@ logger = logging.getLogger("extractors.registry")
     F16PxExtractor,
     Sports99Extractor,
 ) = None, None, None, None, None, None
+GuardabestExtractor = None
 DLStreamsExtractor = None
 StreamHGExtractor = None
 VidXgoExtractor = None
@@ -208,6 +209,12 @@ except ImportError:
     logger.warning("⚠️ F16PxExtractor module not found.")
 
 try:
+    from extractors.guardabest import GuardabestExtractor
+    logger.info("✅ GuardabestExtractor module loaded.")
+except ImportError:
+    logger.warning("⚠️ GuardabestExtractor module not found.")
+
+try:
     from extractors.sports99 import Sports99Extractor
     logger.info("✅ Sports99Extractor module loaded.")
 except ImportError:
@@ -314,6 +321,7 @@ __all__ = [
     "TurboVidPlayExtractor",
     "LiveTVExtractor",
     "F16PxExtractor",
+    "GuardabestExtractor",
     "Sports99Extractor",
     "DLStreamsExtractor",
     "StreamHGExtractor",

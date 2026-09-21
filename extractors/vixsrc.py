@@ -1032,6 +1032,7 @@ class VixSrcExtractor:
 
     async def extract(self, url: str, **kwargs) -> Dict[str, Any]:
         """Estrae URL VixSrc."""
+        source_url = url
         try:
             await self._refresh_vixsrc_domain()
             forced_proxy = kwargs.get("proxy")
@@ -1175,6 +1176,18 @@ class VixSrcExtractor:
                             raise ExtractorError(f"VixSrc URL fetch failed: {robust_err}") from robust_err
             else:
                 raise ExtractorError(f"Unsupported VixSrc URL type: {parsed_url.path}")
+
+            if (
+                self._is_expired_embed_response(response.text)
+                and not kwargs.get("_expired_embed_retried")
+                and (
+                    resolved_streamingcommunity
+                    or "/movie/" in parsed_url.path
+                    or "/tv/" in parsed_url.path
+                )
+            ):
+                logger.info("VixSrc expired embed page; resolving original source once more")
+                return await self.extract(source_url, **{**kwargs, "_expired_embed_retried": True})
 
             if response.status_code != 200:
                 raise ExtractorError("URL component extraction failed, invalid request")

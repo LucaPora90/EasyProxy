@@ -18,6 +18,11 @@ if (!inputUrl) {
 
 const pageUrl = new URL(inputUrl).href;
 const pageOrigin = new URL(pageUrl).origin;
+const STREAM_PROBE_TIMEOUT_MS = 10000;
+const minimumStreamHeight = Number(process.env.VIDFAST_MIN_HEIGHT || 0);
+const minimumAcceptedHeight = minimumStreamHeight >= 2160
+  ? minimumStreamHeight - 16
+  : minimumStreamHeight;
 const userAgent =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
   "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36";
@@ -262,6 +267,31 @@ async function playerFetch(input, init = {}) {
 }
 context.fetch = playerFetch;
 
+async function probeStreamManifest(url) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), STREAM_PROBE_TIMEOUT_MS);
+  try {
+    const response = await nativeFetch(url, fetchOptions({
+      headers: mergedHeaders({
+        accept: "application/vnd.apple.mpegurl,*/*",
+        "accept-encoding": "gzip, identity;q=1, *;q=0",
+        range: "bytes=0-",
+      }, `${pageOrigin}/`),
+      signal: controller.signal,
+    }));
+    storeCookies(response);
+    if (!response.ok) throw new Error(`stream HTTP ${response.status}`);
+    const body = await response.text();
+    if (!body.includes("#EXTM3U")) throw new Error("stream response is not an HLS manifest");
+    return body;
+  } catch (error) {
+    if (error?.name === "AbortError") throw new Error("stream manifest probe timed out");
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 const modules = {};
 const cache = {};
 function defineExports(exports, map) {
@@ -414,6 +444,15 @@ async function resolve() {
       await context.__playerDecrypt({ ...ctx, dr: decryptedStream, rs: (await response.text()).trim(), server });
       const stream = decryptedStream[0];
       if (stream?.url?.startsWith("http")) {
+        const manifest = await probeStreamManifest(stream.url);
+        if (minimumStreamHeight > 0) {
+          const heights = [...manifest.matchAll(/RESOLUTION=\d+x(\d+)/gi)]
+            .map(match => Number(match[1]))
+            .filter(Number.isFinite);
+          if (!heights.some(height => height >= minimumAcceptedHeight)) {
+            throw new Error(`no HLS variant near ${minimumStreamHeight}p`);
+          }
+        }
         return { url: stream.url, headers: { "User-Agent": userAgent, Referer: pageUrl, Origin: pageOrigin }, server: server.name || "VidFast" };
       }
       throw new Error("decrypted response has no URL");

@@ -122,9 +122,17 @@ class BaseExtractor:
                 is_proxy_err = isinstance(e, ALL_PROXY_ERRORS)
                 is_timeout = isinstance(e, asyncio.TimeoutError)
                 
-                # Check for 403 or network errors to trigger fallback
+                # Check for 403 or network errors to trigger fallback. Keep
+                # intermediate failures quiet: a later retry may succeed.
                 status = getattr(e, 'status', None)
-                logger.warning(f"[{self.extractor_name}] Attempt {attempt+1} failed for {url}: {e}")
+                if attempt >= retries - 1:
+                    logger.error(
+                        "[%s] Request failed after %s attempts for %s: %s",
+                        self.extractor_name,
+                        retries,
+                        url,
+                        e,
+                    )
                 
                 # aiohttp discards failed connections itself. Closing the shared
                 # session here would abort unrelated concurrent requests.

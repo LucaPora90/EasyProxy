@@ -89,6 +89,9 @@ ENV FLARESOLVERR_LOG_LEVEL=error
 # Copia esplicita
 COPY . .
 
+# Windows checkouts may carry CRLF into shell scripts; Linux must execute LF.
+RUN sed -i 's/\r$//' entrypoint.sh scripts/warp_userspace_ctl.sh
+
 # Node's ESM resolver does not search Debian's global module directory for a
 # bare import. Expose the apt-installed undici package from the app module
 # tree so the VidFast runner can use HTTP ProxyAgent when WARP is selected.

@@ -1,4 +1,6 @@
+import html
 import json
+import re
 import urllib.parse
 from urllib.parse import parse_qs, urlparse
 
@@ -23,14 +25,16 @@ class RaiPlayExtractor(BaseExtractor):
     async def extract(self, url: str, **kwargs) -> dict:
         parsed = urlparse(url)
         content_id = parse_qs(parsed.query).get("cont", [""])[0]
-        if (
-            parsed.scheme != "https"
-            or parsed.hostname != _RELINKER_HOST
-            or not content_id
-        ):
-            raise ExtractorError(
-                "RaiPlay extractor requires an HTTPS relinker URL containing cont"
-            )
+        is_relinker = (
+            parsed.scheme == "https"
+            and parsed.hostname == _RELINKER_HOST
+        )
+        if content_id and not is_relinker:
+            content_id = ""
+        if not content_id:
+            content_id = await self._content_id_from_page(url)
+        if not content_id:
+            raise ExtractorError("RaiPlay page does not contain a relinker URL")
         try:
             resolved = await self._resolve_playback(content_id)
             headers = self._headers()
@@ -66,6 +70,25 @@ class RaiPlayExtractor(BaseExtractor):
             "captured_manifest": resolved["manifest_text"],
             "query_params": {"clearkey": clearkey},
         }
+
+    async def _content_id_from_page(self, url: str) -> str:
+        parsed = urlparse(url)
+        hostname = str(parsed.hostname or "").lower()
+        if (
+            parsed.scheme != "https"
+            or not hostname.endswith("raiplay.it")
+            or not parsed.path
+        ):
+            return ""
+
+        page = html.unescape(await self._get_text(url))
+        match = re.search(
+            r"https://mediapolisvod\.rai\.it/relinker/"
+            r"relinkerServlet\.htm\?cont=([^\"'&<>\s]+)",
+            page,
+            re.IGNORECASE,
+        )
+        return match.group(1) if match else ""
 
     async def _resolve_playback(self, content_id: str) -> dict:
         data = await self._json_request(

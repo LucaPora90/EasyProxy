@@ -1562,11 +1562,15 @@ class HLSProxyStreamingMixin:
             # Shared extractor lifecycle belongs to the registry owner.
             pass
 
-        captured_manifests = refreshed.get("captured_manifests") or {}
+        headers = refreshed.get("request_headers") or headers
+        forced_proxy = refreshed.get("selected_proxy") or forced_proxy
+        force_direct = refreshed.get("force_direct", force_direct)
+        bypass_warp = refreshed.get("bypass_warp", bypass_warp)
+        captured_manifests = dict(refreshed.get("captured_manifests") or {})
         master_url = refreshed.get("destination_url")
         master_text = refreshed.get("captured_manifest")
-        if not master_text and master_url:
-            captured_manifests = {master_url: master_text} if master_text else {}
+        if master_text and master_url:
+            captured_manifests.setdefault(master_url, master_text)
 
         # Find the refreshed segment URL matching the requested segment filename
         seg_filename = stream_url.rsplit("/", 1)[-1].split("?")[0]

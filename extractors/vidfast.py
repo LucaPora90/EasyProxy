@@ -99,7 +99,10 @@ class VidFastExtractor:
             raise ExtractorError(
                 f"VidFast: failed to create HTTP bridge for proxy ({proxy})"
             )
-        self.last_used_proxy = runner_proxy
+        # The HTTP bridge is only for the Node runner. Return the original
+        # route for media requests so later HLS segments do not depend on a
+        # short-lived localhost bridge port.
+        self.last_used_proxy = proxy
 
         env = dict(os.environ)
         # Node's native fetch supports HTTP(S) ProxyAgent when undici is
@@ -108,6 +111,14 @@ class VidFastExtractor:
             env["VIDFAST_PROXY"] = str(runner_proxy)
         else:
             env.pop("VIDFAST_PROXY", None)
+        try:
+            required_resolution = int(kwargs.get("required_resolution") or 0)
+        except (TypeError, ValueError):
+            required_resolution = 0
+        if required_resolution > 0:
+            env["VIDFAST_MIN_HEIGHT"] = str(required_resolution)
+        else:
+            env.pop("VIDFAST_MIN_HEIGHT", None)
         if kwargs.get("background_refresh") or kwargs.get("force_refresh"):
             env["VIDFAST_DEBUG"] = "1"
 

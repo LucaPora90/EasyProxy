@@ -212,11 +212,15 @@ async function getServers() {
 
 async function resolve() {
   const target = parseTarget(input);
+  const require4k = process.env.CINEJOY_REQUIRE_4K === "1";
   log("Target:", target);
 
   const servers = await getServers();
-  const primaryServer = servers.find((s) => s["4k"] === true) || servers[0];
-  if (!primaryServer) throw new Error("No active Cinejoy server found");
+  const primaryServer = servers.find((s) => s["4k"] === true)
+    || (require4k ? null : servers[0]);
+  if (!primaryServer) {
+    throw new Error(require4k ? "No active Cinejoy 4K server found" : "No active Cinejoy server found");
+  }
   log("Using server:", primaryServer.name);
 
   const isMovie = target.type === "movie";

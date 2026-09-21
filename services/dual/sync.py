@@ -101,6 +101,7 @@ class SyncEngine:
     SYNC_MIN_CORRELATION = 0.70
     LINEAR_MIN_CORRELATION = 0.75
     SYNC_MAX_DEVIATION = 0.25
+    SYNC_MAX_LAG_SECONDS = 20
     LINEAR_MAX_DEVIATION = 0.10
     MAX_RATE_DELTA = 0.002
     MAX_END_DEVIATION = 1.5
@@ -908,7 +909,10 @@ class SyncEngine:
                 asyncio.to_thread(self._envelope, audio_pcm),
             )
             lag, correlation = await asyncio.to_thread(
-                self._lag, video_envelope, audio_envelope, 5
+                self._lag,
+                video_envelope,
+                audio_envelope,
+                self.SYNC_MAX_LAG_SECONDS,
             )
             return {"position": position, "lag": lag, "offset": lag, "correlation": correlation}
 
@@ -1055,7 +1059,10 @@ class SyncEngine:
                         self._envelope, audio_pcm
                     )
                     lag, correlation = await asyncio.to_thread(
-                        self._lag, reference_envelope, audio_envelope, 5
+                        self._lag,
+                        reference_envelope,
+                        audio_envelope,
+                        self.SYNC_MAX_LAG_SECONDS,
                     )
                     candidate = {
                         "position": position,

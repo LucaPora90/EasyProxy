@@ -6,7 +6,10 @@ import time
 import asyncio
 import os
 import multiprocessing
+import shutil
+import subprocess
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from pathlib import Path
 from urllib.parse import urlparse
 
 from Crypto.Hash import SHA256
@@ -121,11 +124,14 @@ def _solve_pow_worker(nonce: str, difficulty: int, start: int, step: int,
     return None
 
 
-def _solve_pow_parallel(nonce: str, difficulty: int, timeout: float = 60.0):
+def _solve_pow_parallel(
+    nonce: str, difficulty: int, timeout: float = 60.0, max_workers: int = None
+):
     if difficulty <= 0:
         return "0"
 
-    workers = max(2, min(os.cpu_count() or 2, 4))
+    worker_cap = max_workers or 4
+    workers = max(2, min(os.cpu_count() or 2, worker_cap))
     context = multiprocessing.get_context()
     stop_event = context.Event()
     try:
@@ -151,14 +157,41 @@ def _solve_pow_parallel(nonce: str, difficulty: int, timeout: float = 60.0):
     return None
 
 
+def _solve_pow_node(nonce: str, difficulty: int, timeout: float):
+    """Use the site's native-style JS hash when Node.js is available."""
+    node = shutil.which("node")
+    if not node:
+        return None
+
+    solver = Path(__file__).resolve().parent.parent / "scripts" / "pow_solver.js"
+    try:
+        result = subprocess.run(
+            [node, str(solver), nonce, str(difficulty), str(int(timeout * 1000))],
+            capture_output=True,
+            text=True,
+            timeout=timeout + 2,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+    solution = result.stdout.strip()
+    return solution or None
+
+
 class F16PxExtractor(BaseExtractor):
     F16PX_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:149.0) Gecko/20100101 Firefox/149.0"
-    # Longer than the default 30s handler timeout: covers 6 sequential HTTP
-    # calls plus up to 60s for the PoW solve plus the final playback call.
-    REQUEST_TIMEOUT_TOTAL = 90
+    # Covers the sequential API calls, a slower PoW solve, and playback.
+    REQUEST_TIMEOUT_TOTAL = 180
+    POW_TIMEOUT_SECONDS = 120
+    POW_MAX_WORKERS = 4  # fallback only; Node/V8 is the primary solver
+    ERROR_PREFIX = "F16PX"
 
     def __init__(self, request_headers: dict, proxies: list = None):
         super().__init__(request_headers, proxies, extractor_name="f16px")
+
+    def _error(self, message: str) -> ExtractorError:
+        return ExtractorError(f"{self.ERROR_PREFIX}: {message}")
 
     # ── base64url ──
     @staticmethod
@@ -200,7 +233,7 @@ class F16PxExtractor(BaseExtractor):
         cipher = python_aesgcm.new(key)
         decrypted = cipher.open(iv, payload)
         if decrypted is None:
-            raise ExtractorError("F16PX: GCM authentication failed")
+            raise self._error("GCM authentication failed")
         return json.loads(decrypted.decode("utf-8", "ignore")).get("sources") or []
 
     # ── attestation (ECDSA P-256, raw r||s signature) ──
@@ -248,7 +281,7 @@ class F16PxExtractor(BaseExtractor):
 
         match = re.search(r"/e/([A-Za-z0-9]+)", parsed.path or "")
         if not match:
-            raise ExtractorError("F16PX: Invalid embed URL")
+            raise self._error("Invalid embed URL")
         code = match.group(1)
         embed_url = f"{embed_origin}/e/{code}"
 
@@ -331,10 +364,23 @@ class F16PxExtractor(BaseExtractor):
             # difficulty ~16 on Pi-class hardware. PoW token TTL is 1800s.
             loop = asyncio.get_event_loop()
             solution = await loop.run_in_executor(
-                None, _solve_pow_parallel, pow_nonce, pow_difficulty, 60.0
+                None,
+                _solve_pow_node,
+                pow_nonce,
+                pow_difficulty,
+                self.POW_TIMEOUT_SECONDS,
             )
             if solution is None:
-                raise ExtractorError("F16PX: PoW solve timed out")
+                solution = await loop.run_in_executor(
+                    None,
+                    _solve_pow_parallel,
+                    pow_nonce,
+                    pow_difficulty,
+                    self.POW_TIMEOUT_SECONDS,
+                    self.POW_MAX_WORKERS,
+                )
+            if solution is None:
+                raise self._error("PoW solve timed out")
 
             verify_resp = await self._make_request(
                 f"{api_origin}/api/videos/{code}/embed/captcha/verify",
@@ -343,7 +389,7 @@ class F16PxExtractor(BaseExtractor):
             )
             verify = json.loads(verify_resp.text)
             if verify.get("status") != "ok" or not verify.get("token"):
-                raise ExtractorError(f"F16PX: captcha verify failed ({verify})")
+                raise self._error(f"captcha verify failed ({verify})")
             captcha_token = verify["token"]
 
         # 7) playback — verify token rides in X-Captcha-Token header (not the body)
@@ -358,7 +404,7 @@ class F16PxExtractor(BaseExtractor):
         )
         data = json.loads(playback_resp.text)
         if not data:
-            raise ExtractorError("F16PX: Empty playback response")
+            raise self._error("Empty playback response")
 
         out_headers = {
             "referer": referer,
@@ -379,13 +425,13 @@ class F16PxExtractor(BaseExtractor):
         # Case 2: encrypted playback
         pb = data.get("playback")
         if not pb:
-            raise ExtractorError("F16PX: No playback data")
+            raise self._error("No playback data")
         try:
             sources = self._decrypt_sources(pb)
         except Exception as e:
-            raise ExtractorError(f"F16PX: Decryption failed ({e})")
+            raise self._error(f"Decryption failed ({e})")
         if not sources:
-            raise ExtractorError("F16PX: No sources after decryption")
+            raise self._error("No sources after decryption")
 
         return {
             "destination_url": self._pick_best(sources),

@@ -139,6 +139,7 @@ class HLSProxyExtractorHandlerMixin:
                         "turbovidplay",
                         "livetv",
                         "f16px",
+                        "guardabest",
                         "mediaset",
                         "wittytv",
                         "raiplay",
@@ -550,8 +551,8 @@ class HLSProxyExtractorHandlerMixin:
                 logger.info("Extractor request cancelled (client disconnected) [%s]", error_context)
                 raise
             if is_expected_error:
-                logger.warning(
-                    "⚠️ Extractor request failed (expected error): %s [%s]",
+                logger.error(
+                    "❌ Extractor request failed: %s [%s]",
                     error_desc,
                     error_context,
                 )

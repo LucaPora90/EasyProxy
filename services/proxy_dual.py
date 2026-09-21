@@ -230,7 +230,7 @@ class HLSProxyDualMixin:
         warp_off = str(spec.get("warp") or "").lower() == "off" or bool(spec.get("warp_off"))
         return warp_off, proxy_off, forced_proxy
 
-    async def _resolve_dual_spec(self, spec: Any) -> dict:
+    async def _resolve_dual_spec(self, spec: Any, required_resolution: int = 0) -> dict:
         if isinstance(spec, str):
             spec = {"url": spec}
         if not isinstance(spec, dict):
@@ -282,12 +282,14 @@ class HLSProxyDualMixin:
                 host=extractor_name,
                 bypass_warp=warp_off,
             )
-            result = await extractor.extract(
-                target_url,
-                request_headers=headers,
-                bypass_warp=warp_off,
-                proxy=forced_proxy,
-            )
+            extract_kwargs = {
+                "request_headers": headers,
+                "bypass_warp": warp_off,
+                "proxy": forced_proxy,
+            }
+            if required_resolution > 0:
+                extract_kwargs["required_resolution"] = required_resolution
+            result = await extractor.extract(target_url, **extract_kwargs)
             extractor_key = self._extractor_key_for_instance(extractor)
             base_name = (extractor_key or extractor_name).replace("_direct", "").replace("_noproxy", "")
             selected_proxy = result.get("selected_proxy")
@@ -372,6 +374,10 @@ class HLSProxyDualMixin:
         variants, audios = _master_entries(text, base_url)
         if not variants:
             return base_url, requested or 1080, None, False
+        if requested >= 2160 and not any(
+            (item.get("height") or 0) >= requested - 16 for item in variants
+        ):
+            raise DualLinksError(409, "requested 4K video variant is unavailable")
         target = requested or max(item["height"] for item in variants)
         exact = [item for item in variants if item["height"] == target]
         candidates = exact or sorted(
@@ -689,10 +695,18 @@ class HLSProxyDualMixin:
 
         video_spec = body.get("video") or body.get("video_url")
         audio_spec = body.get("audio") or body.get("audio_url")
+        requested_resolution = int(body.get("resolution") or 0)
+        required_video_resolution = 2160 if requested_resolution >= 2160 else 0
         # These two sources are independent. Resolve both concurrently so a
         # slow extractor/proxy on one side does not delay starting the other.
+        if required_video_resolution:
+            video_task = self._resolve_dual_spec(
+                video_spec, required_resolution=required_video_resolution
+            )
+        else:
+            video_task = self._resolve_dual_spec(video_spec)
         video, audio = await asyncio.gather(
-            self._resolve_dual_spec(video_spec),
+            video_task,
             self._resolve_dual_spec(audio_spec),
         )
         playback_key = request.query.get("stream_key") or f"dual-{secrets.token_hex(6)}"
@@ -705,7 +719,6 @@ class HLSProxyDualMixin:
             self._manifest(video),
             self._manifest(audio),
         )
-        requested_resolution = int(body.get("resolution") or 0)
         video_url, resolution, auto_reference, muxed_reference = self._pick_video(
             video_text, video_base, requested_resolution
         )
