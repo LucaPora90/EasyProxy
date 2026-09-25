@@ -22,6 +22,48 @@ class MPDToHLSConverter:
             raise ValueError('Unsupported MPD duration')
         return sum(float(item or 0) * factor for item, factor in zip(match.groups(), (86400, 3600, 60, 1)))
 
+    def _period_length_seconds(self, root, period):
+        """Playlist span of one Period, derived the way DASH defines it.
+
+        ``Period@duration`` wins when present.  Otherwise a Period ends where
+        the next one starts, and the final Period ends at
+        ``mediaPresentationDuration``.  A single-Period VOD manifest only ever
+        declares the last of those, so consulting ``Period@duration`` alone
+        reported no duration at all for those streams.
+        """
+        if period is not None:
+            declared = period.get('duration')
+            if declared:
+                try:
+                    return max(0.0, self._duration_seconds(declared))
+                except ValueError:
+                    pass
+
+        start_sec = 0.0
+        end_sec = 0.0
+        periods = root.findall('.//mpd:Period', self.ns)
+        if period is not None and period in periods:
+            try:
+                start_sec = self._duration_seconds(period.get('start', 'PT0S'))
+            except ValueError:
+                start_sec = 0.0
+            following = periods[periods.index(period) + 1:]
+            if following:
+                try:
+                    end_sec = self._duration_seconds(following[0].get('start', 'PT0S'))
+                except ValueError:
+                    end_sec = 0.0
+
+        if end_sec <= start_sec:
+            presentation = root.get('mediaPresentationDuration')
+            if presentation:
+                try:
+                    end_sec = self._duration_seconds(presentation)
+                except ValueError:
+                    end_sec = 0.0
+
+        return max(0.0, end_sec - start_sec)
+
     def _sequence_for_window(self, key, segments, first_timestamp):
         """Keep overlapping DASH segments at the same HLS sequence on reload."""
         previous = self._timeline_sequences.get(key, {})
@@ -866,36 +908,124 @@ class MPDToHLSConverter:
                 # --- SEGMENT TEMPLATE (DURATION) ---
                 else:
                     duration = int(segment_template.get('duration', '0'))
-                    total_segments = 100
-                    duration_sec = 0
-                    if duration > 0:
+                    duration_sec = duration / timescale if duration > 0 else 0.0
+                    if duration_sec <= 0:
+                        raise ValueError('SegmentTemplate needs SegmentTimeline or @duration')
+                    if not media:
+                        raise ValueError('SegmentTemplate is missing @media')
+
+                    # The representation can live in any Period, not only the
+                    # first one, so resolve the Period that actually contains it.
+                    period = next(
+                        (candidate for candidate in root.findall('.//mpd:Period', self.ns)
+                         if adaptation_set in list(candidate)),
+                        None,
+                    )
+                    if period is None:
                         period = root.find('mpd:Period', self.ns)
-                        period_duration_str = period.get('duration')
-                        if period_duration_str:
-                            import re as _re
-                            m = _re.match(r'PT(\d+H)?(\d+M)?(\d+(?:\.\d+)?S)?', period_duration_str)
-                            if m:
-                                hours = int(m.group(1)[:-1]) if m.group(1) else 0
-                                minutes = int(m.group(2)[:-1]) if m.group(2) else 0
-                                seconds = float(m.group(3)[:-1]) if m.group(3) else 0
-                                period_sec = hours * 3600 + minutes * 60 + seconds
-                                duration_sec = duration / timescale
-                                total_segments = max(1, int(period_sec / duration_sec)) if duration_sec > 0 else 100
-                            else:
-                                total_segments = 100
+
+                    if is_live:
+                        # A dynamic MPD with @duration carries no SegmentTimeline,
+                        # so nothing in it lists which segments still exist.  The
+                        # origin numbers segments continuously from
+                        # availabilityStartTime and the CDN keeps only the tail of
+                        # that range: emitting a fixed 1..N list hands the player
+                        # URLs that expired long ago, and every request 404s.
+                        availability_start_raw = root.get('availabilityStartTime')
+                        if not availability_start_raw:
+                            raise ValueError('Live SegmentTemplate requires availabilityStartTime')
+
+                        try:
+                            availability_start = datetime.fromisoformat(
+                                availability_start_raw.replace('Z', '+00:00')
+                            )
+                        except ValueError:
+                            raise ValueError(f'Invalid availabilityStartTime: {availability_start_raw}')
+
+                        published_raw = root.get('publishTime')
+                        if published_raw:
+                            try:
+                                reference_time = datetime.fromisoformat(published_raw.replace('Z', '+00:00'))
+                            except ValueError:
+                                reference_time = datetime.now(timezone.utc)
                         else:
-                            total_segments = 100
+                            # No publishTime: the local clock is the only other
+                            # sanctioned anchor for a live window.
+                            reference_time = datetime.now(timezone.utc)
 
-                        duration_sec = duration / timescale
+                        period_start_sec = (
+                            self._duration_seconds(period.get('start', 'PT0S'))
+                            if period is not None else 0.0
+                        )
+                        elapsed_sec = max(
+                            0.0,
+                            (reference_time - availability_start).total_seconds() - period_start_sec,
+                        )
+                        live_edge_number = start_number + int(elapsed_sec / duration_sec)
 
-                    for i in range(total_segments):
-                        seg_num = start_number + i
+                        # Serve the declared timeshift buffer, floored at a few
+                        # segments and capped so a playlist never grows unbounded.
+                        window_sec = duration_sec * 5
+                        time_shift_raw = root.get('timeShiftBufferDepth')
+                        if time_shift_raw:
+                            try:
+                                declared_window = self._duration_seconds(time_shift_raw)
+                            except ValueError:
+                                declared_window = 0.0
+                            if declared_window > 0:
+                                window_sec = declared_window
+                        # Cap the playlist, but always keep a few segments so the
+                        # player has something to start from even when a single
+                        # segment is longer than the declared timeshift buffer.
+                        window_sec = min(window_sec, 60.0)
+                        window_count = max(3, int(math.ceil(window_sec / duration_sec)))
+                        first_number = max(start_number, live_edge_number - window_count + 1)
+                        segment_numbers = list(range(first_number, live_edge_number + 1))
+
+                        if has_explicit_start_number:
+                            # DASH already supplies the authoritative numbering,
+                            # so the sequence moves exactly one per segment.
+                            media_sequence = first_number
+                        else:
+                            media_sequence = self._sequence_for_live_window(
+                                self._sequence_key(original_url, params),
+                                (first_number - start_number) * duration_sec,
+                                duration_sec,
+                            )
+                        logger.debug(
+                            f"📐 [Duration window] rep={rep_id} edge={live_edge_number} "
+                            f"first={first_number} segs={len(segment_numbers)} "
+                            f"seq={media_sequence}"
+                        )
+                    else:
+                        # VOD: the list has to span the whole asset.  A
+                        # single-Period manifest declares that only as
+                        # mediaPresentationDuration on the MPD root, so reading
+                        # Period@duration alone found nothing and fell back to a
+                        # fixed 100 segments: a 634s film at 4s/segment needs 159,
+                        # so players reported 400s and the final third of the
+                        # asset was never listed.
+                        period_length_sec = self._period_length_seconds(root, period)
+                        total_segments = (
+                            max(1, int(math.ceil(period_length_sec / duration_sec)))
+                            if period_length_sec > 0 else 100
+                        )
+                        segment_numbers = [start_number + i for i in range(total_segments)]
+                        media_sequence = 0
+
+                    lines.append(f'#EXT-X-TARGETDURATION:{int(duration_sec) + 1}')
+                    lines.append(f'#EXT-X-MEDIA-SEQUENCE:{media_sequence}')
+
+                    for seg_num in segment_numbers:
+                        # $Time$ carries the segment's presentation time in
+                        # timescale units, not its number, so derive it from the
+                        # template's own duration and offset.
                         seg_name = self._expand_segment_template(
                             media,
                             rep_id,
                             bandwidth,
                             number=seg_num,
-                            timestamp=seg_num,
+                            timestamp=presentation_time_offset + (seg_num - start_number) * duration,
                         )
 
                         full_seg_url = urljoin(base_url, seg_name)

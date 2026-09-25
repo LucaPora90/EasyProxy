@@ -392,10 +392,17 @@
         <p class="subtitle">Changes apply immediately &mdash; no restart required</p>
         <div class="version-chip">v{{APP_VERSION}}</div>
         <div style="margin-top: 1rem; display: flex; gap: 10px; justify-content: center; flex-wrap: wrap;">
-            <button class="btn btn-primary btn-sm" onclick="logout()">🚪 Logout</button>
-            <button class="btn btn-primary btn-sm" onclick="downloadConfig()">⬇ Download Config</button>
+            <button class="btn btn-primary btn-sm" onclick="logout()">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="width:15px;height:15px"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>
+                Logout
+            </button>
+            <button class="btn btn-primary btn-sm" onclick="downloadConfig()">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="width:15px;height:15px"><path d="M12 3v12"/><path d="M7 11l5 5 5-5"/><path d="M4 20h16"/></svg>
+                Download Config
+            </button>
             <label class="btn btn-primary btn-sm" style="cursor:pointer">
-                ⬆ Upload Config
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="width:15px;height:15px"><path d="M12 20V8"/><path d="M7 12l5-5 5 5"/><path d="M4 4h16"/></svg>
+                Upload Config
                 <input type="file" id="upload-input" accept=".json" style="display:none" onchange="uploadConfig(event)">
             </label>
         </div>
@@ -678,6 +685,7 @@ async function runAllSpeedtests() {
             return '<div class="speedtest-card">' +
                 '<div style="font-weight:600;font-size:0.8rem;margin-bottom:4px">' + r.name + '</div>' +
                 (r.proxy_used ? '<div style="font-size:0.65rem;color:var(--accent-orange);margin-bottom:2px">📡 ' + r.proxy_used + '</div>' : '') +
+                (r.external_ip ? '<div style="font-size:0.65rem;color:var(--text-muted);margin-bottom:2px">IP uscente: ' + r.external_ip + '</div>' : '') +
                 '<div style="font-size:0.65rem;color:var(--text-muted);margin-bottom:4px">' + (r.server.sponsor && r.server.sponsor !== 'Unknown' ? r.server.sponsor + ' · ' : '') + r.server.location + '</div>' +
                 '<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:0.75rem"><span style="color:var(--text-muted)">Ping</span><span style="color:var(--accent-primary)">' + r.ping_ms + ' ms</span></div>' +
                 '<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:0.75rem"><span style="color:var(--text-muted)">⬇ Download</span><span style="color:var(--accent-success);font-weight:700">' + r.download_mbps + ' Mbps</span></div>' +
@@ -1336,5 +1344,6 @@ setInterval(async () => {
     }
 }, 5000);
 </script>
+<script src="/static/ep-nav.js"></script>
 </body>
 </html>

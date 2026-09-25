@@ -33,6 +33,16 @@ from services.proxy_shared import (
     prefer_default_family_for_url,
     resolve_extractor,
 )
+
+# Docker keeps the helper at /app/scripts, Termux/native checkouts run it from
+# the repository: resolve it relative to the package and always run it through
+# /bin/sh (git checkouts do not carry the executable bit).
+_PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+WARP_CTL_SCRIPT = os.environ.get("WARP_CTL_SCRIPT") or os.path.join(
+    _PROJECT_DIR, "scripts", "warp_userspace_ctl.sh"
+)
+
+
 class SharedSessionWrapper:
     def __init__(self, session):
         object.__setattr__(self, "_session", session)
@@ -280,11 +290,12 @@ class HLSProxyCoreMixin:
 
     async def _wireproxy_process_state(self) -> tuple[str, str]:
         """Return wireproxy process state without confusing it with tunnel state."""
-        control_script = "/app/scripts/warp_userspace_ctl.sh"
+        control_script = WARP_CTL_SCRIPT
         if not os.path.exists(control_script):
             return "unknown", "control script unavailable"
         try:
             proc = await asyncio.create_subprocess_exec(
+                "/bin/sh",
                 control_script,
                 "status",
                 stdout=asyncio.subprocess.PIPE,
@@ -461,13 +472,21 @@ class HLSProxyCoreMixin:
 
     async def _run_warp_control(self, action: str) -> int:
         """Run the explicit userspace WARP control action."""
-        proc = await asyncio.create_subprocess_exec(
-            "/app/scripts/warp_userspace_ctl.sh",
-            action,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        return await asyncio.wait_for(proc.wait(), timeout=20)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "/bin/sh",
+                WARP_CTL_SCRIPT,
+                action,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            return await asyncio.wait_for(proc.wait(), timeout=20)
+        except asyncio.TimeoutError:
+            logger.warning("WARP control %s timed out", action)
+            return 124
+        except OSError as exc:
+            logger.warning("WARP control %s failed: %s", action, exc)
+            return 127
 
     async def reconnect_warp(self) -> dict:
         """Restart wireproxy and verify the WARP path after reconnect."""

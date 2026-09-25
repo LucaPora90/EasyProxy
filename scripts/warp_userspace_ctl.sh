@@ -12,7 +12,10 @@ TRACE_URL="https://www.cloudflare.com/cdn-cgi/trace"
 pid_is_wireproxy() {
     pid="$1"
     [ -r "/proc/${pid}/comm" ] || return 1
-    [ "$(tr -d '\n' < "/proc/${pid}/comm")" = "wireproxy" ]
+    [ "$(tr -d '\n' < "/proc/${pid}/comm" 2>/dev/null)" = "wireproxy" ] || return 1
+    # A dead child can linger as a zombie (its comm still matches): treat it as
+    # stopped, otherwise proot/Termux waits the full timeout before giving up.
+    [ "$(awk '{print $3}' "/proc/${pid}/stat" 2>/dev/null)" != "Z" ]
 }
 
 read_pid() {

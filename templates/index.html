@@ -369,67 +369,6 @@
             color: var(--text-muted);
         }
 
-        .cta-section {
-            margin-top: 3rem;
-            display: flex;
-            gap: 1rem;
-            flex-wrap: wrap;
-            justify-content: center;
-            width: 100%;
-        }
-
-        .cta-btn {
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            padding: 1rem 2rem;
-            border-radius: var(--border-radius);
-            text-decoration: none;
-            font-weight: 600;
-            font-size: 0.95rem;
-            transition: var(--transition-normal);
-            border: none;
-            cursor: pointer;
-            justify-content: center;
-            position: relative;
-            overflow: hidden;
-        }
-
-        .cta-btn::before {
-            content: '';
-            position: absolute;
-            top: 0; left: -100%;
-            width: 100%; height: 100%;
-            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.15), transparent);
-            transition: var(--transition-normal);
-        }
-
-        .cta-btn:hover::before { left: 100%; }
-
-        .cta-primary {
-            background: var(--primary-gradient);
-            color: white;
-            box-shadow: var(--glow-primary);
-        }
-
-        .cta-primary:hover {
-            transform: translateY(-3px);
-            box-shadow: var(--glow-secondary);
-        }
-
-        .cta-secondary {
-            background: var(--surface-glass);
-            color: var(--text-primary);
-            border: 1px solid var(--border-primary);
-            backdrop-filter: blur(20px);
-        }
-
-        .cta-secondary:hover {
-            transform: translateY(-3px);
-            background: var(--surface-elevated);
-            border-color: var(--border-accent);
-        }
-
         .stats-section {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
@@ -499,8 +438,6 @@
         @media (max-width: 768px) {
             .container { padding: 1rem; }
             .hero-section { padding-top: 2rem; }
-            .cta-section { flex-direction: column; align-items: center; }
-            .cta-btn { width: 100%; max-width: 300px; }
             .hero-stats { gap: 1.5rem; }
         }
 
@@ -687,37 +624,6 @@
             </div>
         </div>
 
-        <div class="cta-section">
-            <a href="builder" class="cta-btn cta-primary">
-                <span>🏗️</span>
-                <span>Playlist Builder</span>
-            </a>
-            <a href="url-generator" class="cta-btn cta-primary">
-                <span>🔧</span>
-                <span>URL Generator</span>
-            </a>
-            <a href="recordings" class="cta-btn cta-primary">
-                <span>📹</span>
-                <span>DVR Recordings</span>
-            </a>
-            <a href="/admin" class="cta-btn cta-primary" style="background:linear-gradient(135deg,#f59e0b 0%,#d97706 100%);box-shadow:0 0 30px rgba(245,158,11,0.25)">
-                <span>⚙️</span>
-                <span>Variables Config</span>
-            </a>
-            <a href="docs" class="cta-btn cta-secondary">
-                <span>📘</span>
-                <span>API Docs</span>
-            </a>
-            <a href="redoc" class="cta-btn cta-secondary">
-                <span>📚</span>
-                <span>ReDoc</span>
-            </a>
-            <a href="info" class="cta-btn cta-secondary">
-                <span>📋</span>
-                <span>Documentation</span>
-            </a>
-        </div>
-
         <footer class="footer">
             <p>EasyProxy &mdash; Advanced Streaming Proxy Server</p>
             <div class="footer-links">
@@ -828,5 +734,6 @@
         });
     </script>
 
+<script src="/static/ep-nav.js"></script>
 </body>
 </html>

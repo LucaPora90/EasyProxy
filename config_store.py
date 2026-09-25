@@ -14,6 +14,8 @@ _DEFAULT_CONFIG_DIR = (
 )
 _CONFIG_DIR = os.environ.get("CONFIG_DIR") or _DEFAULT_CONFIG_DIR
 _CONFIG_FILE = os.path.join(_CONFIG_DIR, "config.json")
+# Public alias: tunnel profiles and other persistent files live beside config.json.
+CONFIG_DIR = _CONFIG_DIR
 DEFAULT_RECORDINGS_DIR = os.path.join(_CONFIG_DIR, "recordings")
 
 DEFAULT_CONFIG = {
@@ -34,6 +36,17 @@ DEFAULT_CONFIG = {
     "warp_exclude_domains_custom": [],
     "global_proxies": [],
     "transport_routes": [],
+    # Secondary userspace WireGuard tunnels (wireproxy) exposed as local SOCKS5
+    # proxies. WARP keeps 127.0.0.1:1080, these slots listen on their own port.
+    "nordvpn_token": "",
+    "nordvpn_server": "",
+    "nordvpn_bind": "127.0.0.1:1081",
+    "nordvpn_enabled": False,
+    "wg_custom_config": "",
+    "wg_custom_bind": "127.0.0.1:1082",
+    "wg_custom_enabled": False,
+    "tor_bind": "127.0.0.1:9050",
+    "tor_enabled": False,
     "extractor_proxies": {},
     # Cinejoy's gateway rejects Cloudflare WARP egress (HTTP 403). Keep its
     # resolver direct unless the user explicitly supplies another proxy route.

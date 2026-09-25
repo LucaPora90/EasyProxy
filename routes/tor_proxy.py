@@ -1,0 +1,100 @@
+"""Admin panel and API for the local Tor SOCKS5 proxy."""
+
+import functools
+import os
+
+from aiohttp import web
+
+from config import APP_VERSION, check_password
+from services import tor_proxy
+
+_TEMPLATES_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "templates"
+)
+
+
+def _json(payload, status=200):
+    return web.json_response(payload, status=status)
+
+
+def _unauthorized():
+    return _json({"error": "Unauthorized: Invalid API Password"}, status=401)
+
+
+def setup_tor_proxy_routes(app: web.Application) -> None:
+    async def page(request):
+        if not check_password(request):
+            raise web.HTTPFound("/admin/login")
+        with open(os.path.join(_TEMPLATES_DIR, "torproxy.html"), "r", encoding="utf-8") as handle:
+            return web.Response(text=handle.read().replace("{{APP_VERSION}}", APP_VERSION), content_type="text/html")
+
+    async def guard(request):
+        if not check_password(request):
+            return False
+        return True
+
+    async def status(request):
+        if not await guard(request):
+            return _unauthorized()
+        return _json(await tor_proxy.status(with_probe=request.query.get("probe") in ("1", "true", "yes")))
+
+    async def action(request, name):
+        if not await guard(request):
+            return _unauthorized()
+        try:
+            if name == "start":
+                tor_proxy.set_enabled(True)
+                await tor_proxy.start()
+            elif name == "stop":
+                tor_proxy.set_enabled(False)
+                await tor_proxy.stop()
+            else:
+                tor_proxy.set_enabled(True)
+                await tor_proxy.restart()
+            return _json({"status": name, "tor": await tor_proxy.status(with_probe=True)})
+        except tor_proxy.TorError as exc:
+            return _json({"error": str(exc)}, status=400)
+
+    async def bind(request):
+        if not await guard(request):
+            return _unauthorized()
+        try:
+            payload = await request.json()
+            tor_proxy.set_bind(str(payload.get("bind", "")))
+            if tor_proxy.is_enabled():
+                await tor_proxy.restart()
+            return _json({"status": "ok", "tor": await tor_proxy.status()})
+        except tor_proxy.TorError as exc:
+            return _json({"error": str(exc)}, status=400)
+
+    async def check(request):
+        if not await guard(request):
+            return _unauthorized()
+        return _json(await tor_proxy.check())
+
+    async def new_identity(request):
+        if not await guard(request):
+            return _unauthorized()
+        try:
+            await tor_proxy.new_identity()
+            return _json({"status": "new_identity", "tor": await tor_proxy.status(with_probe=True)})
+        except tor_proxy.TorError as exc:
+            return _json({"error": str(exc)}, status=400)
+
+    async def logs(request):
+        if not await guard(request):
+            return _unauthorized()
+        return _json({"logs": await tor_proxy.logs()})
+
+    app.router.add_get("/admin/torproxy", page)
+    app.router.add_get("/api/admin/tor/status", status)
+    app.router.add_post("/api/admin/tor/start", functools.partial(action, name="start"))
+    app.router.add_post("/api/admin/tor/stop", functools.partial(action, name="stop"))
+    app.router.add_post("/api/admin/tor/restart", functools.partial(action, name="restart"))
+    app.router.add_post("/api/admin/tor/bind", bind)
+    app.router.add_post("/api/admin/tor/check", check)
+    app.router.add_post("/api/admin/tor/new-identity", new_identity)
+    app.router.add_get("/api/admin/tor/logs", logs)
+
+
+__all__ = ["setup_tor_proxy_routes"]

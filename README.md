@@ -61,6 +61,11 @@ Android users can also install the APK build if they prefer a simpler app-style 
 
 For Termux, full functionality requires a 64-bit Android device. On 32-bit devices, some components and solvers may not work.
 
+The setup also installs `wireproxy` (arm64/armv7) and the pinned WARP registration
+script inside the Ubuntu guest, so Cloudflare WARP and the NordVPN/custom WireGuard
+SOCKS5 tunnels work on Termux too. The first start registers WARP once and saves the
+profile in `/data/warp.conf`; `enable_warp` in the Admin Panel only controls routing.
+
 1.  **Install Termux** from [F-Droid](https://f-droid.org/en/packages/com.termux/) (do NOT use Play Store version).
 2.  **Run the One-Shot Setup**:
     ```bash
@@ -120,6 +125,37 @@ It requires no `NET_ADMIN`, privileged mode, `/dev/net/tun`, kernel module, or
 sysctl.
 
 You can enable and configure WARP, customize the excluded domains list, and enter your license key directly from the **Admin Panel**.
+
+### 🧭 NordVPN, custom WireGuard & TorProxy
+Besides WARP, EasyProxy can run extra local SOCKS5 proxies:
+
+| Panel | Profile source | Default SOCKS5 endpoint |
+| :--- | :--- | :--- |
+| `/admin/nordvpn` | NordLynx profile generated from your NordVPN access token and the server you pick | `socks5h://127.0.0.1:1081` |
+| `/admin/wireguard` | Any WireGuard profile pasted into the panel | `socks5h://127.0.0.1:1082` |
+| `/admin/torproxy` | Tor client managed by EasyProxy | `socks5h://127.0.0.1:9050` |
+
+WARP keeps `127.0.0.1:1080`; each tunnel has its own process, port and log,
+so they can run in parallel. Bind addresses are editable in their panels.
+
+Tor is installed in the Docker image and starts only after enabling it from
+`/admin/torproxy`. Automatic circuit rotation is disabled as far as Tor allows
+(30-day maximum circuit lifetime); use **Request new IP** for manual `NEWNYM`.
+An exit can still change after a failure or process restart. The panel includes
+start/stop, manual identity change, Tor egress check and logs. Tor is TCP-only
+and should normally be used on selected routes rather than as the default for
+all streaming traffic.
+
+In the Admin Panel speed test, **Direct** uses Ookla. Every proxy route uses a
+real SOCKS5/HTTP proxied TCP throughput test, shows the egress IP, and does not
+fall back to the direct connection. Proxy routes run one 10-second download and
+one 10-second upload sample.
+
+Reference the endpoint from **Global Proxies**, a **Transport Route** or an extractor
+proxy to route EasyProxy traffic through it. TCP only: the SOCKS5 endpoint cannot
+carry UDP. A missing `DNS`, `MTU` and `PersistentKeepalive` in a pasted profile is
+filled with `1.1.1.1`, `1420` and `25`; IPv6 entries and wg-quick-only directives
+(`Table`, `PostUp`, ...) are stripped before the tunnel starts.
 
 ### 🧩 VixSrc FlareSolverr
 The Docker image also contains FlareSolverr, Chromium, and Xvfb. FlareSolverr is

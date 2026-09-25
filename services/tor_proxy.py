@@ -1,0 +1,278 @@
+"""Local Tor client exposed as a SOCKS5 proxy."""
+
+import asyncio
+import ipaddress
+import logging
+import os
+import re
+import shutil
+import signal
+import time
+
+import aiohttp
+from aiohttp_socks import ProxyConnector
+
+import config_store
+
+logger = logging.getLogger(__name__)
+
+TOR_DATA_DIR = os.path.join(config_store.CONFIG_DIR, "tor")
+TORRC_PATH = os.path.join(TOR_DATA_DIR, "torrc")
+TOR_LOG_PATH = os.path.join(TOR_DATA_DIR, "tor.log")
+TOR_CHECK_URL = "https://check.torproject.org/api/ip"
+TOR_CONTROL_HOST = "127.0.0.1"
+TOR_CONTROL_PORT = 9051
+TOR_BOOTSTRAP_TIMEOUT = 60
+TOR_MAX_CIRCUIT_DIRTINESS = "30 days"
+
+_BIND_RE = re.compile(r"^(?P<host>[A-Za-z0-9_.\-\[\]:]+):(?P<port>\d{1,5})$")
+_process: asyncio.subprocess.Process | None = None
+_lock = asyncio.Lock()
+
+
+class TorError(Exception):
+    """Raised for user-facing Tor errors."""
+
+
+def available() -> bool:
+    return bool(shutil.which("tor"))
+
+
+def get_bind() -> str:
+    return str(config_store.get("tor_bind", "127.0.0.1:9050") or "").strip()
+
+
+def set_bind(value: str) -> str:
+    bind = (value or "").strip()
+    match = _BIND_RE.match(bind)
+    if not match or not 1 <= int(match.group("port")) <= 65535:
+        raise TorError(f"Invalid bind address: {value!r} (expected host:port)")
+    host = match.group("host").strip("[]").lower()
+    if host != "localhost":
+        try:
+            is_loopback = ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            is_loopback = False
+        if not is_loopback:
+            raise TorError("TorProxy bind must use loopback (127.0.0.1, ::1 or localhost)")
+    config_store.set("tor_bind", bind)
+    return bind
+
+
+def is_enabled() -> bool:
+    return bool(config_store.get("tor_enabled", False))
+
+
+def set_enabled(value: bool) -> None:
+    config_store.set("tor_enabled", bool(value))
+
+
+def _pid() -> int | None:
+    return _process.pid if _process and _process.returncode is None else None
+
+
+def _split_bind(bind: str) -> tuple[str, int]:
+    match = _BIND_RE.match(bind)
+    if not match:
+        raise TorError(f"Invalid bind address: {bind!r} (expected host:port)")
+    host = match.group("host").strip("[]")
+    return host, int(match.group("port"))
+
+
+def _write_torrc() -> None:
+    os.makedirs(TOR_DATA_DIR, exist_ok=True)
+    host, port = _split_bind(get_bind())
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    lines = [
+        f"SocksPort {host}:{port}",
+        f"DataDirectory {TOR_DATA_DIR}",
+        "ClientOnly 1",
+        "AvoidDiskWrites 0",
+        f"MaxCircuitDirtiness {TOR_MAX_CIRCUIT_DIRTINESS}",
+        f"ControlPort {TOR_CONTROL_HOST}:{TOR_CONTROL_PORT}",
+        "CookieAuthentication 1",
+        f"CookieAuthFile {os.path.join(TOR_DATA_DIR, 'control_auth_cookie')}",
+        f"Log notice file {TOR_LOG_PATH}",
+    ]
+    # Debian's package user prevents Tor from running as root in Docker.
+    if os.name != "nt" and os.geteuid() == 0:
+        try:
+            import pwd
+            pwd.getpwnam("debian-tor")
+        except (ImportError, KeyError):
+            pass
+        else:
+            import grp
+            try:
+                os.chown(TOR_DATA_DIR, pwd.getpwnam("debian-tor").pw_uid, grp.getgrnam("debian-tor").gr_gid)
+            except (OSError, KeyError):
+                pass
+            lines.append("User debian-tor")
+    with open(TORRC_PATH, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
+    try:
+        os.chmod(TORRC_PATH, 0o644)
+    except OSError:
+        pass
+
+
+async def _port_ready(host: str, port: int) -> bool:
+    try:
+        reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=2)
+    except (OSError, asyncio.TimeoutError):
+        return False
+    writer.close()
+    await writer.wait_closed()
+    return True
+
+
+async def _control_command(reader, writer, command: str) -> None:
+    writer.write((command + "\r\n").encode("ascii"))
+    await writer.drain()
+    for _ in range(32):
+        line = (await asyncio.wait_for(reader.readline(), timeout=5)).decode("utf-8", "replace").strip()
+        if line.startswith("250 "):
+            return
+        if line.startswith("4") or line.startswith("5"):
+            raise TorError(line)
+    raise TorError("Unexpected Tor control response")
+
+
+async def new_identity() -> None:
+    """Ask Tor for a new circuit while keeping automatic rotation disabled."""
+    if _pid() is None:
+        raise TorError("Tor is not running")
+    cookie_path = os.path.join(TOR_DATA_DIR, "control_auth_cookie")
+    try:
+        with open(cookie_path, "rb") as handle:
+            cookie = handle.read()
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(TOR_CONTROL_HOST, TOR_CONTROL_PORT), timeout=5
+        )
+    except (OSError, asyncio.TimeoutError) as exc:
+        raise TorError("Tor control port is unavailable") from exc
+    try:
+        await _control_command(reader, writer, f"AUTHENTICATE {cookie.hex()}")
+        await _control_command(reader, writer, "SIGNAL NEWNYM")
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+async def start() -> None:
+    global _process
+    async with _lock:
+        if _process and _process.returncode is None:
+            return
+        if not available():
+            raise TorError("Tor is not installed; use the EasyProxy Docker image")
+        set_bind(get_bind())
+        _write_torrc()
+        _process = await asyncio.create_subprocess_exec(
+            "tor", "-f", TORRC_PATH, "--RunAsDaemon", "0",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        host, port = _split_bind(get_bind())
+        deadline = time.monotonic() + TOR_BOOTSTRAP_TIMEOUT
+        while time.monotonic() < deadline:
+            if _process.returncode is not None:
+                raise TorError("Tor exited during startup; inspect Tor logs")
+            if await _port_ready(host, port):
+                logger.info("Tor SOCKS5 ready on %s:%s", host, port)
+                return
+            await asyncio.sleep(1)
+        await stop()
+        raise TorError("Tor did not open its SOCKS5 port in time")
+
+
+async def stop() -> None:
+    global _process
+    process = _process
+    _process = None
+    if not process or process.returncode is not None:
+        return
+    process.send_signal(signal.SIGTERM)
+    try:
+        await asyncio.wait_for(process.wait(), timeout=10)
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.wait()
+
+
+async def restart() -> None:
+    await stop()
+    await start()
+
+
+async def check() -> dict:
+    result = {"ok": False, "egress_ip": "", "is_tor": False, "http_ms": None, "error": ""}
+    if _pid() is None:
+        result["error"] = "Tor is not running"
+        return result
+    connector = ProxyConnector.from_url(f"socks5://{get_bind()}", rdns=True)
+    started = time.perf_counter()
+    try:
+        timeout = aiohttp.ClientTimeout(total=25)
+        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+            async with session.get(TOR_CHECK_URL) as response:
+                payload = await response.json(content_type=None)
+        result["http_ms"] = round((time.perf_counter() - started) * 1000, 1)
+        result["egress_ip"] = str(payload.get("IP", ""))
+        result["is_tor"] = bool(payload.get("IsTor"))
+        result["ok"] = result["is_tor"] and bool(result["egress_ip"])
+        if not result["ok"]:
+            result["error"] = "The connection did not reach the Tor network"
+    except Exception as exc:  # noqa: BLE001 - surfaced in admin panel
+        result["error"] = str(exc)
+    return result
+
+
+async def logs(lines: int = 120) -> str:
+    try:
+        with open(TOR_LOG_PATH, "r", encoding="utf-8", errors="replace") as handle:
+            return "".join(handle.readlines()[-lines:])
+    except OSError:
+        return "No Tor log output."
+
+
+async def status(with_probe: bool = False) -> dict:
+    data = {
+        "running": _pid() is not None,
+        "pid": _pid(),
+        "bind": get_bind(),
+        "enabled": is_enabled(),
+        "available": available(),
+        "automatic_rotation": False,
+        "probe_ip": "",
+    }
+    if with_probe and data["running"]:
+        result = await check()
+        data["probe_ip"] = result.get("egress_ip", "")
+    return data
+
+
+async def ensure_running() -> None:
+    if available() and is_enabled() and _pid() is None:
+        try:
+            await start()
+        except TorError as exc:
+            logger.warning("Tor could not be started: %s", exc)
+
+
+async def keepalive_loop(interval: float = 30.0) -> None:
+    while True:
+        try:
+            await ensure_running()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - never kill the loop
+            logger.exception("Tor keepalive failed")
+        await asyncio.sleep(interval)
+
+
+__all__ = [
+    "TorError", "available", "get_bind", "set_bind", "is_enabled", "set_enabled",
+    "start", "stop", "restart", "new_identity", "check", "logs", "status", "keepalive_loop",
+]

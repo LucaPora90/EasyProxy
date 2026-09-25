@@ -1,6 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # ============================================================
-# EasyProxy Full - Termux One-Shot Setup (No WARP)
+# EasyProxy Full - Termux One-Shot Setup
 # ============================================================
 # Usage: Open Termux, then run:
 #   curl -fsSL --retry 3 https://raw.githubusercontent.com/realbestia1/EasyProxy/main/termux_setup.sh | bash
@@ -35,7 +35,7 @@ EP_REPO="https://github.com/realbestia1/EasyProxy.git"
 echo ""
 echo -e "${BLUE}==========================================${NC}"
 echo -e "${BLUE}  EasyProxy Full - Termux Setup          ${NC}"
-echo -e "${BLUE}  No WARP | proot-distro Ubuntu          ${NC}"
+echo -e "${BLUE}  WARP + WireGuard tunnels | proot-distro Ubuntu${NC}"
 echo -e "${BLUE}==========================================${NC}"
 echo ""
 
@@ -88,7 +88,7 @@ proot-distro login "$DISTRO_NAME" -- bash -s <<'UBUNTU_SETUP'
         python3 python3-venv python-is-python3 python3-pip git curl wget \
         libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 \
         libxdamage1 libxfixes3 libxrandr2 libgbm1 "$ASOUND_PACKAGE" libpango-1.0-0 libcairo2 \
-        libatspi2.0-0 fonts-liberation ca-certificates nodejs npm procps \
+        libatspi2.0-0 fonts-liberation ca-certificates nodejs npm procps jq wireguard-tools \
         libxshmfence1 libglu1-mesa libx11-xcb1 libxcb-dri3-0 libxss1 libxtst6 libxslt1.1
 
     if ! command -v node >/dev/null 2>&1; then
@@ -112,6 +112,47 @@ proot-distro login "$DISTRO_NAME" -- bash -s <<'UBUNTU_SETUP'
     command -v node
     node --version
     npm --version
+
+    echo "[INFO] Inside Ubuntu: Installing wireproxy (userspace WireGuard SOCKS5 relay)..."
+    WIREPROXY_VERSION="1.1.3"
+    case "$(dpkg --print-architecture)" in
+        amd64) WIREPROXY_ASSET="amd64" ;;
+        arm64) WIREPROXY_ASSET="arm64" ;;
+        armhf) WIREPROXY_ASSET="arm" ;;
+        *) WIREPROXY_ASSET="" ;;
+    esac
+    if [ -z "$WIREPROXY_ASSET" ]; then
+        echo "[WARN] Unsupported architecture for wireproxy: NordVPN and custom WireGuard tunnels stay unavailable."
+    elif command -v wireproxy >/dev/null 2>&1; then
+        echo "[INFO] wireproxy already installed: $(wireproxy -v)"
+    else
+        WIREPROXY_TARBALL="wireproxy_linux_${WIREPROXY_ASSET}.tar.gz"
+        WIREPROXY_URL="https://github.com/windtf/wireproxy/releases/download/v${WIREPROXY_VERSION}"
+        if curl -fL --retry 3 --connect-timeout 20 -o "/tmp/${WIREPROXY_TARBALL}" "${WIREPROXY_URL}/${WIREPROXY_TARBALL}" \
+            && curl -fL --retry 3 --connect-timeout 20 -o /tmp/wireproxy.checksums "${WIREPROXY_URL}/checksums.txt" \
+            && (cd /tmp && grep " ${WIREPROXY_TARBALL}\$" wireproxy.checksums | sha256sum -c -) \
+            && tar -xzf "/tmp/${WIREPROXY_TARBALL}" -C /usr/local/bin wireproxy \
+            && chmod +x /usr/local/bin/wireproxy; then
+            echo "[INFO] wireproxy installed: $(wireproxy -v)"
+        else
+            echo "[WARN] wireproxy install failed: NordVPN and custom WireGuard tunnels stay unavailable."
+        fi
+        rm -f "/tmp/${WIREPROXY_TARBALL}" /tmp/wireproxy.checksums
+    fi
+
+    echo "[INFO] Inside Ubuntu: Installing the Cloudflare WARP config generator..."
+    WARP_GENERATOR_COMMIT="d4616f154d654d5c159c193432159240c96614bb"
+    if command -v warp-register >/dev/null 2>&1; then
+        echo "[INFO] warp-register already installed."
+    elif curl -fL --retry 3 --connect-timeout 20 \
+        "https://raw.githubusercontent.com/lanrat/wireguard-warp-generator/${WARP_GENERATOR_COMMIT}/scripts/warp-register.sh" \
+        -o /usr/local/bin/warp-register; then
+        chmod 700 /usr/local/bin/warp-register
+        echo "[INFO] warp-register installed."
+    else
+        rm -f /usr/local/bin/warp-register
+        echo "[WARN] warp-register install failed: WARP stays unavailable."
+    fi
 
     EP_DIR="/root/EasyProxy"
     EP_REPO="https://github.com/realbestia1/EasyProxy.git"
@@ -240,6 +281,42 @@ echo "Pip: $("$VENV_PYTHON" -m pip --version 2>/dev/null || echo missing)"
 echo ""
 
 echo "Starting EasyProxy on port $PORT..."
+
+# Cloudflare WARP: register once, then expose the userspace SOCKS5 relay on
+# 127.0.0.1:1080, mirroring what entrypoint.sh does in the Docker image.
+WARP_CONFIG_FILE="${WARP_CONFIG_FILE:-/data/warp.conf}"
+export WARP_CONFIG_FILE
+if command -v warp-register >/dev/null 2>&1 && command -v wireproxy >/dev/null 2>&1; then
+    if [ ! -s "$WARP_CONFIG_FILE" ]; then
+        echo "Registering Cloudflare WARP (one time)..."
+        mkdir -p "$(dirname "$WARP_CONFIG_FILE")"
+        if WARP_DNS="1.1.1.1, 1.0.0.1" WARP_MTU="1280" WARP_ALLOWED_IPS="0.0.0.0/0" \
+            WARP_PERSISTENT_KEEPALIVE="25" WARP_DEVICE_TYPE="Linux" WARP_LOCALE="en_US" \
+            warp-register > "${WARP_CONFIG_FILE}.tmp"; then
+            chmod 600 "${WARP_CONFIG_FILE}.tmp"
+            mv -f "${WARP_CONFIG_FILE}.tmp" "$WARP_CONFIG_FILE"
+            echo "WARP profile saved in ${WARP_CONFIG_FILE}."
+        else
+            rm -f "${WARP_CONFIG_FILE}.tmp"
+            echo "WARP registration failed; continuing without WARP."
+        fi
+    fi
+    if [ -s "$WARP_CONFIG_FILE" ] && bash "$EP_DIR/scripts/warp_userspace_ctl.sh" start; then
+        # Wait for the SOCKS5 listener like entrypoint.sh does in Docker.
+        for _ in {1..20}; do
+            if (exec 3<>/dev/tcp/127.0.0.1/1080) 2>/dev/null; then
+                echo "WARP userspace SOCKS5 relay ready on 127.0.0.1:1080."
+                break
+            fi
+            sleep 1
+        done
+    else
+        echo "WARP tunnel unavailable; continuing without it."
+    fi
+else
+    echo "wireproxy or warp-register missing; WARP stays disabled."
+fi
+
 "$VENV_PYTHON" app.py &
 APP_PID=$!
 echo "$APP_PID" > "$PID_FILE"
@@ -354,6 +431,7 @@ fi
 
 # Compatibility cleanup for processes started by older EasyProxy launchers.
 pkill -TERM -f 'python3.*(app|easyproxy_start)' 2>/dev/null || true
+pkill -TERM -x wireproxy 2>/dev/null || true
 pkill -TERM Xvfb 2>/dev/null || true
 GUEST_STOP
     echo "Warning: could not stop guest processes through proot-distro login." >&2

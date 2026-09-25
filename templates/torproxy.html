@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TorProxy &mdash; EasyProxy</title>
+    <link rel="icon" type="image/x-icon" href="/favicon.ico">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/wg-panel.css">
+</head>
+<body>
+<div class="bg-glow"></div>
+<div class="container">
+    <div class="page-header">
+        <div class="hero-badge"><div class="hero-badge-dot"></div><span>Tor SOCKS5 Proxy</span></div>
+        <h1>TorProxy</h1>
+        <p class="subtitle">Tor client exposed as local SOCKS5 &mdash; v{{APP_VERSION}}</p>
+        <div class="header-actions"><a class="btn btn-sm" href="/admin/logout">Logout</a></div>
+    </div>
+    <div id="toast" class="toast"></div>
+    <div class="card">
+        <h2><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3a9 9 0 100 18 9 9 0 000-18z"/><path d="M3 12h18M12 3c2.5 3 2.5 15 0 18M12 3c-2.5 3-2.5 15 0 18"/></svg>Tor status <span id="status-pill" class="status">Checking...</span></h2>
+        <div class="row"><label>SOCKS5 bind</label><input type="text" id="bind" class="mono" placeholder="127.0.0.1:9050" aria-label="SOCKS5 bind address"><button class="btn btn-sm" onclick="saveBind()">Apply &amp; restart</button></div>
+        <div class="row"><label>Check Tor</label><span class="value mono" id="check-result">-</span><button class="btn btn-sm" onclick="runCheck()" style="margin-left:auto">Check</button></div>
+        <div class="row"><label>Egress IP</label><span class="value mono" id="egress">-</span></div>
+        <div class="row"><label>Process</label><span class="value mono" id="pid">-</span></div>
+        <div class="row"><button class="btn btn-primary btn-sm" onclick="startTor()">Start</button><button class="btn btn-primary btn-sm" onclick="newIdentity()">Request new IP</button><button class="btn btn-primary btn-sm" onclick="restartTor()">Restart</button><button class="btn btn-danger btn-sm" onclick="stopTor()">Stop</button><button class="btn btn-sm" onclick="toggleLogs()">Show logs</button></div>
+        <p class="hint">Automatic rotation disabled. Tor keeps the current circuit as long as possible; use <span class="mono">Request new IP</span> manually. A Tor exit can still change after failure or restart.</p>
+        <pre class="logs" id="logs" style="display:none"></pre>
+    </div>
+    <div class="card">
+        <h2><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M10 13a5 5 0 007 0l2-2a5 5 0 00-7-7l-1 1"/><path d="M14 11a5 5 0 00-7 0l-2 2a5 5 0 007 7l1-1"/></svg>Use it in EasyProxy</h2>
+        <p class="hint">Paste this URL into Global Proxies, a Transport Route or an extractor proxy:</p>
+        <code class="code" id="usage">socks5h://127.0.0.1:9050</code>
+        <p class="hint">Tor is TCP-only. Streaming may be slow; use it for privacy/specific routes, not as default for all traffic.</p>
+    </div>
+</div>
+<script>
+const params = new URLSearchParams(window.location.search);
+const apiPassword = params.get('api_password');
+function toast(message, kind) { const el = document.getElementById('toast'); el.textContent = message; el.className = 'toast show ' + (kind || ''); setTimeout(() => el.className = 'toast ' + (kind || ''), 3500); }
+async function api(path, options) { const url = path + (apiPassword ? (path.includes('?') ? '&' : '?') + 'api_password=' + encodeURIComponent(apiPassword) : ''); const response = await fetch(url, options); if (response.status === 401) { window.location.href = '/admin/login'; throw new Error('unauthorized'); } const data = await response.json().catch(() => ({})); if (!response.ok) throw new Error(data.error || ('HTTP ' + response.status)); return data; }
+function setText(id, value) { document.getElementById(id).textContent = value || '-'; }
+function render(state) { const pill = document.getElementById('status-pill'); pill.className = state.running ? 'status connected' : (state.enabled ? 'status disconnected' : 'status'); pill.textContent = !state.available ? 'Unavailable' : (state.running ? 'Connected' : (state.enabled ? 'Stopped' : 'Disabled')); const input = document.getElementById('bind'); if (document.activeElement !== input) input.value = state.bind || ''; document.getElementById('usage').textContent = 'socks5h://' + (state.bind || '127.0.0.1:9050'); setText('egress', state.probe_ip); setText('pid', state.pid ? ('tor pid ' + state.pid) : 'not running'); }
+async function refresh() { try { render(await api('/api/admin/tor/status')); } catch (error) { if (error.message !== 'unauthorized') toast(error.message, 'error'); } }
+async function command(name) { try { await api('/api/admin/tor/' + name, {method: 'POST'}); toast(name === 'stop' ? 'Tor stopped' : 'Tor ready', 'success'); refresh(); } catch (error) { toast(error.message, 'error'); } }
+function startTor() { command('start'); } function restartTor() { command('restart'); } function stopTor() { command('stop'); }
+async function saveBind() { try { await api('/api/admin/tor/bind', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({bind:document.getElementById('bind').value.trim()})}); toast('Bind saved', 'success'); refresh(); } catch (error) { toast(error.message, 'error'); } }
+async function newIdentity() { try { await api('/api/admin/tor/new-identity', {method:'POST'}); toast('New Tor identity requested', 'success'); setTimeout(runCheck, 1500); } catch (error) { toast(error.message, 'error'); } }
+async function runCheck() { const target = document.getElementById('check-result'); target.textContent = '...'; try { const data = await api('/api/admin/tor/check', {method:'POST'}); target.textContent = data.ok ? (data.http_ms + ' ms') : (data.error || 'failed'); setText('egress', data.egress_ip); toast(data.ok ? 'Tor OK' : 'Tor check failed', data.ok ? 'success' : 'error'); } catch (error) { target.textContent = error.message; } }
+async function toggleLogs() { const el = document.getElementById('logs'); if (el.style.display !== 'none') { el.style.display = 'none'; return; } try { const data = await api('/api/admin/tor/logs'); el.textContent = data.logs || 'No log output.'; el.style.display = 'block'; } catch (error) { toast(error.message, 'error'); } }
+refresh(); setInterval(refresh, 5000);
+</script>
+<script src="/static/ep-nav.js"></script>
+</body>
+</html>

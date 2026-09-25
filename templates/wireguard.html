@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Custom WireGuard &mdash; EasyProxy</title>
+    <link rel="icon" type="image/x-icon" href="/favicon.ico">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/wg-panel.css">
+</head>
+<body>
+<div class="bg-glow"></div>
+
+<div class="container">
+    <div class="page-header">
+        <div class="hero-badge">
+            <div class="hero-badge-dot"></div>
+            <span>WireGuard Tunnel</span>
+        </div>
+        <h1>Custom WireGuard</h1>
+        <p class="subtitle">Any WireGuard profile exposed as a local SOCKS5 proxy &mdash; v{{APP_VERSION}}</p>
+        <div class="header-actions">
+            <a class="btn btn-sm" href="/admin/logout">Logout</a>
+        </div>
+    </div>
+
+    <div id="toast" class="toast"></div>
+
+    <div class="card">
+        <h2>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3l7 3v6c0 4.5-3 7.9-7 9-4-1.1-7-4.5-7-9V6l7-3z"/></svg>
+            Tunnel status
+            <span id="status-pill" class="status">Checking...</span>
+        </h2>
+        <div class="row"><label>Endpoint</label><span class="value mono" id="endpoint">-</span></div>
+        <div class="row"><label>Interface</label><span class="value mono" id="address">-</span></div>
+        <div class="row"><label>Allowed IPs</label><span class="value mono" id="allowed">-</span></div>
+        <div class="row"><label>MTU / Keepalive</label><span class="value mono" id="mtu">-</span></div>
+        <div class="row">
+            <label>VPN check</label>
+            <span class="value mono" id="check-result">-</span>
+            <button class="btn btn-sm" id="btn-check" onclick="runCheck()" style="margin-left:auto">Check VPN</button>
+        </div>
+        <div class="row"><label>Egress IP</label><span class="value mono" id="egress">-</span></div>
+        <div class="row"><label>Process</label><span class="value mono" id="pid">-</span></div>
+        <div class="row">
+            <label for="bind">SOCKS5 bind</label>
+            <input type="text" id="bind" class="mono" placeholder="127.0.0.1:1082" aria-label="SOCKS5 bind address">
+            <button class="btn btn-sm" onclick="saveBind()">Apply &amp; restart</button>
+        </div>
+        <div class="row">
+            <button class="btn btn-primary btn-sm" id="btn-reconnect" onclick="reconnect()">Reconnect</button>
+            <button class="btn btn-danger btn-sm" id="btn-disconnect" onclick="disconnect()">Disconnect</button>
+            <button class="btn btn-sm" onclick="toggleLogs()">Show logs</button>
+        </div>
+        <pre class="logs" id="logs" style="display:none"></pre>
+    </div>
+
+    <div class="card">
+        <h2>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+            WireGuard profile
+        </h2>
+        <textarea id="config" class="mono" spellcheck="false" aria-label="WireGuard configuration"
+placeholder="[Interface]
+PrivateKey = ...
+Address = 10.0.0.2/32
+DNS = 1.1.1.1
+MTU = 1420
+
+[Peer]
+PublicKey = ...
+AllowedIPs = 0.0.0.0/0
+Endpoint = vpn.example.com:51820
+PersistentKeepalive = 25"></textarea>
+        <div class="row">
+            <button class="btn btn-primary btn-sm" id="btn-apply" onclick="applyConfig()">Apply profile</button>
+            <button class="btn btn-sm" onclick="loadConfig()">Reload saved profile</button>
+            <button class="btn btn-danger btn-sm" onclick="clearConfig()">Delete saved profile</button>
+        </div>
+        <p class="hint">
+            Needs <span class="mono">[Interface]</span> with PrivateKey and Address plus a <span class="mono">[Peer]</span> with
+            PublicKey and Endpoint. IPv6 addresses and wg-quick-only directives (Table, PostUp...) are stripped before the tunnel starts.
+            Missing DNS, MTU and PersistentKeepalive are filled with <span class="mono">1.1.1.1</span>,
+            <span class="mono">1420</span> and <span class="mono">25</span>; your own values are kept.
+        </p>
+    </div>
+
+    <div class="card">
+        <h2>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M10 13a5 5 0 007 0l2-2a5 5 0 00-7-7l-1 1"/><path d="M14 11a5 5 0 00-7 0l-2 2a5 5 0 007 7l1-1"/></svg>
+            Use it in EasyProxy
+        </h2>
+        <p class="hint">Paste this URL into Global Proxies, a Transport Route or an extractor proxy (remote DNS through the tunnel):</p>
+        <code class="code" id="usage">socks5h://127.0.0.1:1082</code>
+        <p class="hint">
+            Cloudflare WARP already listens on <span class="mono">127.0.0.1:1080</span>, so this tunnel uses its own port.
+            Change it above if you need something else. TCP only: the SOCKS5 endpoint cannot carry UDP.
+        </p>
+    </div>
+</div>
+
+<script>
+const params = new URLSearchParams(window.location.search);
+const apiPassword = params.get('api_password');
+let probeTick = 0;
+let configTouched = false;
+
+function toast(message, kind) {
+    const el = document.getElementById('toast');
+    el.textContent = message;
+    el.className = 'toast show ' + (kind || '');
+    setTimeout(() => { el.className = 'toast ' + (kind || ''); }, 3500);
+}
+
+async function api(path, options) {
+    const url = path + (apiPassword ? (path.includes('?') ? '&' : '?') + 'api_password=' + encodeURIComponent(apiPassword) : '');
+    const response = await fetch(url, options);
+    if (response.status === 401) { window.location.href = '/admin/login'; throw new Error('unauthorized'); }
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || ('HTTP ' + response.status));
+    return data;
+}
+
+function setText(id, value) {
+    document.getElementById(id).textContent = value || '-';
+}
+
+function renderStatus(state) {
+    const slot = state.slots.custom;
+    const pill = document.getElementById('status-pill');
+    if (!state.available) {
+        pill.className = 'status disconnected';
+        pill.textContent = 'Unavailable';
+    } else if (slot.running) {
+        pill.className = 'status connected';
+        pill.textContent = 'Connected';
+    } else if (slot.enabled) {
+        pill.className = 'status disconnected';
+        pill.textContent = 'Stopped';
+    } else {
+        pill.className = 'status';
+        pill.textContent = 'Disabled';
+    }
+
+    setText('endpoint', slot.profile && slot.profile.endpoint);
+    setText('address', slot.profile && slot.profile.address);
+    setText('allowed', slot.profile && slot.profile.allowed_ips);
+    setText('mtu', slot.profile && slot.profile.mtu ? (slot.profile.mtu + ' / ' + slot.profile.keepalive + 's') : '');
+    setText('egress', slot.probe_ip);
+    setText('pid', slot.running ? ('wireproxy pid ' + slot.pid) : 'not running');
+    const bindInput = document.getElementById('bind');
+    if (document.activeElement !== bindInput) bindInput.value = slot.bind || '';
+    document.getElementById('usage').textContent = 'socks5h://' + (slot.bind || '127.0.0.1:1082');
+    document.getElementById('btn-reconnect').disabled = !state.available;
+    document.getElementById('btn-disconnect').disabled = !state.available;
+
+    if (!configTouched && slot.config && document.getElementById('config').value !== slot.config) {
+        document.getElementById('config').value = slot.config;
+    }
+}
+
+async function refresh() {
+    try {
+        probeTick = (probeTick + 1) % 3;
+        renderStatus(await api('/api/admin/wg/status' + (probeTick === 0 ? '?probe=1' : '')));
+    } catch (error) {
+        if (error.message !== 'unauthorized') toast(error.message, 'error');
+    }
+}
+
+async function applyConfig() {
+    const button = document.getElementById('btn-apply');
+    button.disabled = true;
+    button.textContent = 'Applying...';
+    try {
+        const data = await api('/api/admin/wg/custom', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({config: document.getElementById('config').value})
+        });
+        configTouched = false;
+        toast('Tunnel started on ' + data.tunnel.bind, 'success');
+        refresh();
+        runCheck();
+    } catch (error) {
+        toast(error.message, 'error');
+    } finally {
+        button.disabled = false;
+        button.textContent = 'Apply profile';
+    }
+}
+
+async function loadConfig() {
+    try {
+        const state = await api('/api/admin/wg/status');
+        document.getElementById('config').value = state.slots.custom.config || '';
+        configTouched = false;
+        toast('Saved profile loaded');
+    } catch (error) { toast(error.message, 'error'); }
+}
+
+async function clearConfig() {
+    if (!confirm('Delete saved Custom WireGuard profile and stop its tunnel?')) return;
+    try {
+        await api('/api/admin/wg/custom/clear', {method: 'POST'});
+        document.getElementById('config').value = '';
+        configTouched = false;
+        toast('Saved profile deleted', 'success');
+        refresh();
+    } catch (error) { toast(error.message, 'error'); }
+}
+
+async function saveBind() {
+    const bind = document.getElementById('bind').value.trim();
+    try {
+        await api('/api/admin/wg/custom/bind', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({bind})
+        });
+        toast('Bind address saved', 'success');
+        refresh();
+    } catch (error) { toast(error.message, 'error'); }
+}
+
+async function reconnect() {
+    try {
+        await api('/api/admin/wg/custom/reconnect', {method: 'POST'});
+        toast('Tunnel restarted', 'success');
+        refresh();
+    } catch (error) { toast(error.message, 'error'); }
+}
+
+async function disconnect() {
+    try {
+        await api('/api/admin/wg/custom/disconnect', {method: 'POST'});
+        toast('Tunnel stopped', 'success');
+        refresh();
+    } catch (error) { toast(error.message, 'error'); }
+}
+
+async function toggleLogs() {
+    const logs = document.getElementById('logs');
+    if (logs.style.display !== 'none') { logs.style.display = 'none'; return; }
+    try {
+        const data = await api('/api/admin/wg/custom/logs');
+        logs.textContent = data.logs || 'No log output.';
+        logs.style.display = 'block';
+    } catch (error) { toast(error.message, 'error'); }
+}
+
+async function runCheck() {
+    const button = document.getElementById('btn-check');
+    const target = document.getElementById('check-result');
+    button.disabled = true;
+    button.textContent = 'Checking...';
+    target.textContent = '...';
+    try {
+        const data = await api('/api/admin/wg/custom/check', {method: 'POST'});
+        if (data.ok) {
+            target.textContent = data.ping_ms + ' ms ping / ' + data.http_ms + ' ms http  ·  ' + data.egress_ip;
+            toast('VPN OK: ' + data.ping_ms + ' ms', 'success');
+        } else {
+            target.textContent = data.error || 'failed';
+            toast('VPN check failed: ' + (data.error || 'unknown'), 'error');
+        }
+    } catch (error) {
+        target.textContent = error.message;
+        toast(error.message, 'error');
+    } finally {
+        button.disabled = false;
+        button.textContent = 'Check VPN';
+    }
+}
+
+document.getElementById('config').addEventListener('input', () => { configTouched = true; });
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+<script src="/static/ep-nav.js"></script>
+</body>
+</html>

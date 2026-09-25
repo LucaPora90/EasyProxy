@@ -7,9 +7,12 @@ import urllib.parse
 import urllib.request
 import platform
 import tarfile
+import threading
 import zipfile
 import tempfile
 import services.proxy_shared as _shared
+from services import wg_tunnels
+from services import tor_proxy
 from services.proxy_shared import (
     logger, web, APP_VERSION,
     check_password, get_client_ip, PlaylistBuilder, ClientSession, ClientTimeout,
@@ -1363,6 +1366,18 @@ class HLSProxyPagesMixin:
             from config import WARP_PROXY_URL
             if config_store.get("enable_warp", False):
                 routes.append({"name": "Via WARP", "proxy": WARP_PROXY_URL})
+            if (await tor_proxy.status()).get("running"):
+                routes.append({
+                    "name": "Via Tor",
+                    "proxy": f"socks5://{tor_proxy.get_bind()}",
+                })
+            # Secondary WireGuard tunnels: only when their wireproxy is running.
+            for slot, label in (("nordvpn", "Via NordVPN"), ("custom", "Via Custom WireGuard")):
+                if wg_tunnels.process_running(slot):
+                    routes.append({
+                        "name": label,
+                        "proxy": f"socks5://{wg_tunnels.get_bind(slot)}",
+                    })
             global_proxies = config_store.get("global_proxies", [])
             if global_proxies:
                 routes.append({"name": "Via Proxy", "proxy": global_proxies[0]})
@@ -1456,34 +1471,25 @@ class HLSProxyPagesMixin:
     def _run_speedtest(self, proxy_url=None):
         import subprocess
         import os as _os
+        if proxy_url:
+            return self._run_proxy_speedtest(proxy_url)
+
         exe = self._ensure_speedtest_exe()
+        command = [exe, "--format", "json", "--accept-license", "--accept-gdpr"]
+
+        # DIRECT must not inherit a proxy from the container/VPS shell.
+        env = _os.environ.copy()
+        for key in _PROXY_ENV_KEYS:
+            env.pop(key, None)
         try:
-            # Give every route an isolated proxy environment. In particular,
-            # DIRECT must not inherit a proxy from the container/VPS shell.
-            env = _os.environ.copy()
-            for key in _PROXY_ENV_KEYS:
-                env.pop(key, None)
-            if proxy_url:
-                scheme = proxy_url.split(":", 1)[0].lower()
-                if scheme.startswith("socks"):
-                    env["ALL_PROXY"] = proxy_url
-                    env["all_proxy"] = proxy_url
-                else:
-                    env["HTTPS_PROXY"] = proxy_url
-                    env["HTTP_PROXY"] = proxy_url
-                    env["https_proxy"] = proxy_url
-                    env["http_proxy"] = proxy_url
             result = subprocess.run(
-                [exe, "--format", "json", "--accept-license", "--accept-gdpr"],
+                command,
                 capture_output=True, text=True, timeout=60, env=env
             )
             if result.returncode != 0:
                 err = result.stderr
                 if "Network is unreachable" in err or "Cannot retrieve configuration" in err:
-                    if proxy_url:
-                        raise RuntimeError(f"Connection refused by proxy: {proxy_url}. Make sure WARP is connected or the proxy is reachable.")
-                    else:
-                        raise RuntimeError("No internet connection. Check your network.")
+                    raise RuntimeError("No internet connection. Check your network.")
                 raise RuntimeError(f"Speedtest failed: {err.split('[')[-1].rstrip(']') if '[' in err else err[:100]}")
             data = json.loads(result.stdout)
             return {
@@ -1500,3 +1506,163 @@ class HLSProxyPagesMixin:
             raise RuntimeError("Speedtest timed out after 60 seconds")
         except json.JSONDecodeError:
             raise RuntimeError("Failed to parse speedtest output")
+
+    def _proxy_curl_args(self, proxy_url):
+        """Return curl arguments that force DNS and TCP through one proxy."""
+        parsed = urllib.parse.urlparse(proxy_url)
+        scheme = (parsed.scheme or "").lower()
+        if scheme in ("socks5", "socks5h"):
+            proxy_flag = "--socks5-hostname"
+        elif scheme in ("http", "https"):
+            proxy_flag = "--proxy"
+        else:
+            raise RuntimeError(f"Unsupported proxy scheme: {scheme or 'missing'}")
+        if not parsed.hostname or not parsed.port:
+            raise RuntimeError(f"Invalid proxy URL: {proxy_url}")
+
+        username = urllib.parse.unquote(parsed.username or "")
+        password = urllib.parse.unquote(parsed.password or "")
+        if any(char.isspace() for char in username + password):
+            raise RuntimeError("Proxy credentials contain unsupported whitespace")
+
+        host = parsed.hostname
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        target = f"{host}:{parsed.port}"
+        args = [proxy_flag, target]
+        if scheme in ("http", "https"):
+            # The proxy itself is normally plain HTTP even when the URL was
+            # entered as https://; curl's --proxy-user handles auth safely.
+            args = [proxy_flag, f"http://{target}"]
+        if username or password:
+            args.extend(["--proxy-user", f"{username}:{password}"])
+        return args
+
+    def _run_proxy_curl(self, proxy_url, url, write_out, extra=None, timeout=60, allow_timeout=False):
+        import subprocess
+        curl = shutil.which("curl") or shutil.which("curl.exe")
+        if not curl:
+            raise RuntimeError("Proxy speedtest unavailable: curl is not installed")
+
+        env = os.environ.copy()
+        for key in _PROXY_ENV_KEYS:
+            env.pop(key, None)
+        command = [
+            curl,
+            "--silent", "--show-error", "--location", "--fail",
+            "--connect-timeout", "15", "--max-time", str(timeout),
+            *self._proxy_curl_args(proxy_url),
+        ]
+        if extra:
+            command.extend(extra)
+        command.extend(["--write-out", write_out, url])
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=timeout + 10, env=env)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"Proxy test timed out: {proxy_url}")
+        if result.returncode != 0 and not (allow_timeout and result.returncode == 28):
+            message = (result.stderr or "proxy connection failed").strip()
+            raise RuntimeError(f"Proxy test failed: {message[:180]}")
+        return result.stdout.strip()
+
+    def _run_proxy_stream_upload(self, proxy_url, url, duration=10):
+        """Stream zeroes for a fixed time through a proxy and return curl metrics."""
+        import subprocess
+        curl = shutil.which("curl") or shutil.which("curl.exe")
+        if not curl:
+            raise RuntimeError("Proxy speedtest unavailable: curl is not installed")
+
+        env = os.environ.copy()
+        for key in _PROXY_ENV_KEYS:
+            env.pop(key, None)
+        command = [
+            curl,
+            "--silent", "--show-error", "--location",
+            "--connect-timeout", "15", "--max-time", str(duration),
+            *self._proxy_curl_args(proxy_url),
+            "--request", "POST",
+            "--header", "Content-Type: application/octet-stream",
+            "--header", "Expect:",
+            "--upload-file", "-",
+            "--output", os.devnull,
+            "--write-out", "%{size_upload}\\t%{speed_upload}\\t%{time_total}",
+            url,
+        ]
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
+            env=env,
+        )
+
+        def feed_stdin():
+            chunk = b"0" * (1024 * 1024)
+            try:
+                while process.poll() is None:
+                    process.stdin.write(chunk)
+                    process.stdin.flush()
+            except (BrokenPipeError, OSError, ValueError):
+                pass
+            finally:
+                try:
+                    process.stdin.close()
+                except OSError:
+                    pass
+
+        feeder = threading.Thread(target=feed_stdin, daemon=True)
+        feeder.start()
+        try:
+            stdout, stderr = process.communicate(timeout=duration + 15)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            stdout, stderr = process.communicate()
+            raise RuntimeError(f"Proxy upload test timed out: {proxy_url}")
+        feeder.join(timeout=2)
+        if process.returncode not in (0, 28):
+            message = stderr.decode(errors="replace").strip() or "proxy connection failed"
+            raise RuntimeError(f"Proxy upload test failed: {message[:180]}")
+        return stdout.decode(errors="replace").strip()
+
+    def _run_proxy_speedtest(self, proxy_url):
+        """Measure real proxied TCP throughput; Ookla's static binary ignores proxies."""
+        devnull = os.devnull
+        ip = self._run_proxy_curl(
+            proxy_url,
+            "https://api.ipify.org",
+            "",
+            extra=["--output", "-"],
+        )
+        ping_ms = float(self._run_proxy_curl(
+            proxy_url,
+            "https://api.ipify.org",
+            "%{time_total}",
+            extra=["--output", devnull],
+        )) * 1000
+        download = self._run_proxy_curl(
+            proxy_url,
+            "https://proof.ovh.net/files/10Gb.dat",
+            "%{size_download}\\t%{speed_download}\\t%{time_total}",
+            extra=["--output", devnull],
+            timeout=20,
+            allow_timeout=True,
+        )
+        upload = self._run_proxy_stream_upload(proxy_url, "https://httpbin.org/post", duration=10)
+        download_bytes, download_speed, download_time = download.split("\t")
+        upload_bytes, upload_speed, upload_time = upload.split("\t")
+        if float(download_bytes) <= 0 or float(upload_bytes) <= 0:
+            raise RuntimeError(f"Proxy test returned no payload: {proxy_url}")
+
+        return {
+            "server": {
+                "sponsor": "Proxy throughput",
+                "name": "proof.ovh.net + httpbin.org",
+                "location": "via proxy",
+            },
+            "proxy_used": proxy_url,
+            "external_ip": ip,
+            "download_mbps": round(float(download_speed) * 8 / 1_000_000, 1),
+            "upload_mbps": round(float(upload_speed) * 8 / 1_000_000, 1),
+            "ping_ms": round(ping_ms, 1),
+        }

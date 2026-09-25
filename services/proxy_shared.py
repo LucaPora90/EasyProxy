@@ -58,6 +58,7 @@ from config import (
     mark_proxy_dead,
     get_extractor_proxies,
     ALL_PROXY_ERRORS,
+    is_warp_proxy_url,
 )
 from extractors.registry import *
 from extractors.provider_hooks import *
