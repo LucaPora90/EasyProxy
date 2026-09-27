@@ -1,4 +1,5 @@
 from services.proxy_shared import PlaylistBuilder, logger
+import asyncio
 import os
 from services.proxy_core import HLSProxyCoreMixin
 from services.proxy_dash import HLSProxyDashMixin
@@ -67,6 +68,7 @@ class HLSProxy(
         # Version information
         self.latest_version = "Checking..."
         self._latest_version_checked_at = 0.0
+        self._latest_version_lock = asyncio.Lock()
         self.warp_status = "Checking..."
         self._warp_ip = ""
         self._warp_status_checked_at = 0.0

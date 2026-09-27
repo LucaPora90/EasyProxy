@@ -98,6 +98,47 @@ class HLSProxyStreamingMixin:
         for key in sorted(cache.keys(), key=lambda k: cache[k][1] if isinstance(cache[k], tuple) else 0)[:trim_count]:
             cache.pop(key, None)
 
+    # In-flight coalescing for fully-buffered segments (image-wrapped payloads
+    # and similar): while the first viewer's fetch/unwrap is running, other
+    # viewers of the same segment wait for that result instead of repeating the
+    # upstream download and PNG/gzip work. Nothing is retained after it is
+    # served.
+    _SEGMENT_COALESCE_VOLATILE_HEADERS = frozenset({
+        "range",
+        "if-none-match",
+        "if-modified-since",
+        "if-match",
+        "if-range",
+        "accept-encoding",
+    })
+
+    @classmethod
+    def _segment_coalesce_key(cls, stream_url, headers):
+        stable = tuple(
+            sorted(
+                (k.lower(), v)
+                for k, v in headers.items()
+                if k.lower() not in cls._SEGMENT_COALESCE_VOLATILE_HEADERS
+            )
+        )
+        return (stream_url, stable)
+
+    @staticmethod
+    def _segment_coalesce_eligible(request):
+        if request.method != "GET" or request.query.get("range"):
+            return False
+        return not any(
+            header in request.headers
+            for header in ("Range", "If-None-Match", "If-Modified-Since")
+        )
+
+    def _segment_inflight_map(self):
+        inflight = getattr(self, "_segment_inflight", None)
+        if inflight is None:
+            inflight = {}
+            self._segment_inflight = inflight
+        return inflight
+
     async def handle_ts_segment(self, request):
         """Gestisce richieste per segmenti .ts"""
         try:
@@ -599,6 +640,9 @@ class HLSProxyStreamingMixin:
                 extractor=extractor_key or None,
             )
 
+        coalesce_key = None
+        coalesce_future = None
+
         try:
             self._touch_extractor_activity(
                 extractor_key,
@@ -715,6 +759,26 @@ class HLSProxyStreamingMixin:
 
             if is_special_cdn:
                 headers["Accept-Encoding"] = "identity"
+
+            if is_hls_segment_request and self._segment_coalesce_eligible(request):
+                coalesce_key = self._segment_coalesce_key(stream_url, headers)
+                inflight = self._segment_inflight_map()
+                pending = inflight.get(coalesce_key)
+                if pending is not None:
+                    logger.info(
+                        "Segment coalesce: waiting for in-flight fetch [%s]",
+                        log_context(),
+                    )
+                    shared = await asyncio.shield(pending)
+                    if shared is not None:
+                        shared_body, shared_headers = shared
+                        return web.Response(
+                            body=shared_body,
+                            status=200,
+                            headers=dict(shared_headers),
+                        )
+                coalesce_future = asyncio.get_running_loop().create_future()
+                inflight[coalesce_key] = coalesce_future
 
             def _cookie_summary(value: str | None) -> str:
                 if not value:
@@ -1086,8 +1150,11 @@ class HLSProxyStreamingMixin:
                     and 'mpegurl' not in content_type
                     and not content_type.startswith('text/')
                 )
+                # Image-wrapped segments need the full body to be unwrapped, so
+                # they must not take the chunk-by-chunk streaming path.
+                is_image_payload = content_type.startswith("image/")
 
-                if is_direct_media_stream or is_segment_like:
+                if (is_direct_media_stream or is_segment_like) and not is_image_payload:
                     stream_ext = os.path.splitext(stream_url.split("?", 1)[0].lower())[1]
                     is_fmp4_segment = stream_ext in {".m4s", ".mp4", ".m4a", ".m4v", ".m4i"}
                     requested_media_type = request.query.get("media_type", "").lower()
@@ -1343,9 +1410,20 @@ class HLSProxyStreamingMixin:
                 # Streaming normale per altri tipi di contenuto (segmenti binari)
                 # Il body è già stato letto in content_bytes, usiamo quello.
                 segment_was_stripped = False
-                if request.path.endswith(".ts") or stream_url.endswith(".ts"):
+                is_wrapped_image_segment = (
+                    is_image_payload
+                    or content_bytes[:8] == b"\x89PNG\r\n\x1a\n"
+                    or (content_bytes[:4] == b"RIFF" and content_bytes[8:12] == b"WEBP")
+                )
+                if (
+                    request.path.endswith(".ts")
+                    or stream_url.endswith(".ts")
+                    or is_wrapped_image_segment
+                ):
                     original_len = len(content_bytes)
-                    content_bytes = self._strip_fake_png_header_from_ts(content_bytes)
+                    content_bytes = await asyncio.to_thread(
+                        self._strip_fake_png_header_from_ts, content_bytes
+                    )
                     segment_was_stripped = len(content_bytes) != original_len
 
                 response_headers = {}
@@ -1377,6 +1455,8 @@ class HLSProxyStreamingMixin:
                 ).lower():
                     set_response_header(response_headers, "Content-Type", "text/vtt; charset=utf-8")
                 if segment_was_stripped:
+                    if response_headers.get("content-type", "").lower().startswith("image/"):
+                        set_response_header(response_headers, "Content-Type", "video/mp2t")
                     set_response_header(
                         response_headers, "Content-Length", str(len(content_bytes))
                     )
@@ -1403,6 +1483,11 @@ class HLSProxyStreamingMixin:
                 set_response_header(
                     response_headers, "Content-Length", str(len(content_bytes))
                 )
+
+                if coalesce_future is not None and response_status == 200:
+                    coalesce_future.set_result(
+                        (content_bytes, dict(response_headers))
+                    )
 
                 return web.Response(
                     body=content_bytes,
@@ -1523,6 +1608,12 @@ class HLSProxyStreamingMixin:
         finally:
             if session and not session.closed and session_proxy is not None:
                 await session.close()
+            if coalesce_future is not None:
+                inflight = getattr(self, "_segment_inflight", None)
+                if inflight is not None and inflight.get(coalesce_key) is coalesce_future:
+                    inflight.pop(coalesce_key, None)
+                if not coalesce_future.done():
+                    coalesce_future.set_result(None)
 
     async def _reextract_and_retry_segment(
         self, request, stream_url, headers, bypass_warp, forced_proxy, force_direct, disable_ssl

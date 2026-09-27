@@ -104,6 +104,7 @@ const params = new URLSearchParams(window.location.search);
 const apiPassword = params.get('api_password');
 let probeTick = 0;
 let serversLoaded = false;
+const checkStorageKey = 'easyproxy:last-check:nordvpn';
 
 function toast(message, kind) {
     const el = document.getElementById('toast');
@@ -123,6 +124,23 @@ async function api(path, options) {
 
 function setText(id, value) {
     document.getElementById(id).textContent = value || '-';
+}
+
+function persistCheckResult(value) {
+    const target = document.getElementById('check-result');
+    target.textContent = value || '-';
+    target.title = 'Last check: ' + new Date().toLocaleString();
+    try { localStorage.setItem(checkStorageKey, JSON.stringify({value, at: Date.now()})); } catch (_) {}
+}
+
+function restoreCheckResult() {
+    try {
+        const saved = JSON.parse(localStorage.getItem(checkStorageKey) || 'null');
+        if (saved && saved.value) {
+            document.getElementById('check-result').textContent = saved.value;
+            document.getElementById('check-result').title = saved.at ? 'Last check: ' + new Date(saved.at).toLocaleString() : '';
+        }
+    } catch (_) {}
 }
 
 function renderStatus(state) {
@@ -145,7 +163,7 @@ function renderStatus(state) {
     setText('srv', slot.server);
     setText('endpoint', slot.profile && slot.profile.endpoint);
     setText('mtu', slot.profile && slot.profile.mtu ? (slot.profile.mtu + ' / ' + slot.profile.keepalive + 's') : '');
-    setText('egress', slot.probe_ip);
+    if (slot.probe_ip) setText('egress', slot.probe_ip);
     setText('pid', slot.running ? ('wireproxy pid ' + slot.pid) : 'not running');
     const tokenBadge = document.getElementById('token-state');
     tokenBadge.textContent = slot.token_set ? 'saved' : 'not saved';
@@ -226,14 +244,15 @@ async function runCheck() {
     try {
         const data = await api('/api/admin/wg/nordvpn/check', {method: 'POST'});
         if (data.ok) {
-            target.textContent = data.ping_ms + ' ms ping / ' + data.http_ms + ' ms http  ·  ' + data.egress_ip;
+            persistCheckResult(data.ping_ms + ' ms ping / ' + data.http_ms + ' ms http  ·  ' + data.egress_ip);
+            setText('egress', data.egress_ip);
             toast('VPN OK: ' + data.ping_ms + ' ms', 'success');
         } else {
-            target.textContent = data.error || 'failed';
+            persistCheckResult(data.error || 'failed');
             toast('VPN check failed: ' + (data.error || 'unknown'), 'error');
         }
     } catch (error) {
-        target.textContent = error.message;
+        persistCheckResult(error.message);
         toast(error.message, 'error');
     } finally {
         button.disabled = false;
@@ -330,6 +349,7 @@ document.getElementById('servers').addEventListener('click', async event => {
     }
 });
 
+restoreCheckResult();
 refresh();
 setInterval(refresh, 5000);
 </script>

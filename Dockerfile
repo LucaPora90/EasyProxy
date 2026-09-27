@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     jq \
     wireguard-tools \
     tor \
+    tor-geoipdb \
     tar \
     nodejs \
     node-undici \

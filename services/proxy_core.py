@@ -1,5 +1,6 @@
 import asyncio
 import gc
+import gzip
 import hmac
 import logging
 import os
@@ -539,39 +540,123 @@ class HLSProxyCoreMixin:
         Can be called on-demand (e.g. on page refresh).
         Uses its own temporary session to avoid resetting the shared session idle timer.
         """
-        now = time.monotonic()
-        if now - getattr(self, "_latest_version_checked_at", 0.0) < 3600.0:
-            return
-        # Set before I/O so simultaneous page/API requests cannot create
-        # duplicate GitHub sessions. Background task retries on next interval.
-        self._latest_version_checked_at = now
+        lock = getattr(self, "_latest_version_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._latest_version_lock = lock
+
+        # Serialize foreground page loads and the background check. The old
+        # implementation marked the check as complete before doing I/O, so a
+        # page could render "Checking..." while another task was still fetching.
+        async with lock:
+            now = time.monotonic()
+            checked_at = getattr(self, "_latest_version_checked_at", 0.0)
+            if checked_at > 0.0 and now - checked_at < 3600.0:
+                if self.latest_version == "Checking...":
+                    self.latest_version = "Unknown"
+                return
+
+            try:
+                cache_buster = int(time.time())
+                url = f"https://raw.githubusercontent.com/realbestia1/EasyProxy/main/config.py?t={cache_buster}"
+
+                connector = TCPConnector(limit=1, limit_per_host=1, keepalive_timeout=5)
+                timeout = ClientTimeout(total=5)
+                async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+                    async with session.get(url, timeout=2) as resp:
+                        if resp.status == 200:
+                            text = await resp.text()
+                            match = re.search(r'APP_VERSION\s*=\s*["\']([^"\']+)["\']', text)
+                            if match:
+                                new_version = match.group(1)
+                                if self.latest_version != new_version:
+                                    self.latest_version = new_version
+                                    logger.info(f"🆕 Latest version updated: {self.latest_version}")
+                            else:
+                                self.latest_version = "Unknown"
+                        else:
+                            self.latest_version = "Error"
+            except Exception as e:
+                self.latest_version = "Unknown"
+                logger.debug(f"Version check skipped or failed: {e}")
+            finally:
+                self._latest_version_checked_at = time.monotonic()
+
+    @staticmethod
+    def _png_trailing_ts(content: bytes) -> bytes | None:
+        """TS packet(s) appended after the PNG IEND chunk (daddyliveplayer.st)."""
+        off = 8
+        while off + 8 <= len(content):
+            length = int.from_bytes(content[off:off + 4], "big")
+            kind = content[off + 4:off + 8]
+            off += 8 + length + 4
+            if kind == b"IEND":
+                tail = content[off:]
+                if len(tail) > 188 and tail[0] == 0x47 and tail[188] == 0x47:
+                    return tail
+                return None
+            if length > len(content) - off:
+                return None
+        return None
+
+    @staticmethod
+    def _webp_exif_ts(content: bytes) -> bytes | None:
+        """TS packet(s) stored in the WebP EXIF chunk (daddyliveplayer.st)."""
+        off = 12
+        while off + 8 <= len(content):
+            kind = content[off:off + 4]
+            length = int.from_bytes(content[off + 4:off + 8], "little")
+            off += 8
+            if off + length > len(content):
+                return None
+            if kind == b"EXIF":
+                data = content[off:off + length]
+                if len(data) > 188 and data[0] == 0x47 and data[188] == 0x47:
+                    return bytes(data)
+                return None
+            off += length + (length & 1)
+        return None
+
+    @staticmethod
+    def _unwrap_image_ts_payload(content: bytes) -> bytes | None:
+        """Recover raw MPEG-TS wrapped in an image container.
+
+        daddyliveplayer.st / dlive.sx obfuscate premium channels by shipping
+        every segment as a WebP/PNG image. The real TS payload is either the
+        EXIF chunk (WebP), the bytes after the PNG IEND chunk, or a gzip
+        payload hidden in the PNG pixel data behind a "TIKTIKPX" magic and a
+        big-endian length. Mirrors the provider's own JS unwrapper.
+        """
+        if content.startswith(b"RIFF") and content[8:12] == b"WEBP":
+            return HLSProxyCoreMixin._webp_exif_ts(content)
+        if not content.startswith(b"\x89PNG\r\n\x1a\n"):
+            return None
+
+        trailing = HLSProxyCoreMixin._png_trailing_ts(content)
+        if trailing is not None:
+            return trailing
 
         try:
-            cache_buster = int(time.time())
-            url = f"https://raw.githubusercontent.com/realbestia1/EasyProxy/main/config.py?t={cache_buster}"
-
-            connector = TCPConnector(limit=1, limit_per_host=1, keepalive_timeout=5)
-            timeout = ClientTimeout(total=5)
-            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-                async with session.get(url, timeout=2) as resp:
-                    if resp.status == 200:
-                        text = await resp.text()
-                        match = re.search(r'APP_VERSION\s*=\s*["\']([^"\']+)["\']', text)
-                        if match:
-                            new_version = match.group(1)
-                            if self.latest_version != new_version:
-                                self.latest_version = new_version
-                                logger.info(f"🆕 Latest version updated: {self.latest_version}")
-                        else:
-                            if self.latest_version == "Checking...":
-                                self.latest_version = "Unknown"
-                    else:
-                        if self.latest_version == "Checking...":
-                            self.latest_version = "Error"
-        except Exception as e:
-            if self.latest_version == "Checking...":
-                self.latest_version = "Unknown"
-            logger.debug(f"Version check skipped or failed: {e}")
+            import io
+            from PIL import Image
+            raw = Image.open(io.BytesIO(content)).convert("RGB").tobytes()
+        except Exception:
+            return None
+        if raw[:8] != b"TIKTIKPX":
+            return None
+        length = int.from_bytes(raw[8:12], "big")
+        if length < 2 or 12 + length > len(raw):
+            return None
+        gz = raw[12:12 + length]
+        if gz[:2] != b"\x1f\x8b":
+            return None
+        try:
+            ts = gzip.decompress(gz)
+        except Exception:
+            return None
+        if len(ts) <= 188 or ts[0] != 0x47 or ts[188] != 0x47:
+            return None
+        return ts
 
     @staticmethod
     def _strip_fake_png_header_from_ts(content: bytes) -> bytes:
@@ -582,6 +667,9 @@ class HLSProxyCoreMixin:
         TS sync byte and tolerates this; stricter players (MPV/hls.js used by
         Stremio PC) do not, and stall forever.
 
+        daddyliveplayer.st goes further and hides TS inside the WebP/PNG image
+        itself, so try the full image unwrap first.
+
         We locate the first 0x47 sync byte that is followed by another 0x47 at
         +188 bytes (the TS packet size), then strip everything before it. If no
         such pattern is found we fall back to the legacy 8-byte PNG signature
@@ -590,8 +678,20 @@ class HLSProxyCoreMixin:
         if not content:
             return content
 
-        # Fast path: not a PNG at all -> nothing to do.
         png_sig = b"\x89PNG\r\n\x1a\n"
+        is_image = content.startswith(png_sig) or (
+            content.startswith(b"RIFF") and content[8:12] == b"WEBP"
+        )
+        if is_image:
+            unwrapped = HLSProxyCoreMixin._unwrap_image_ts_payload(content)
+            if unwrapped is not None:
+                logger.info(
+                    "Unwrapped TS payload from image segment (%d -> %d bytes)",
+                    len(content), len(unwrapped),
+                )
+                return unwrapped
+
+        # Fast path: not a PNG at all -> nothing to do.
         if not content.startswith(png_sig):
             return content
 

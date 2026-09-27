@@ -1037,8 +1037,13 @@ async function toggleWarp() {
 
 async function refreshWarpStatus() {
     try {
-        const r = await fetch('/api/admin/config');
+        const params = new URLSearchParams(window.location.search);
+        const pw = params.get('api_password');
+        const url = '/api/admin/config' + (pw ? '?api_password=' + encodeURIComponent(pw) : '');
+        const r = await fetch(url);
+        if (!r.ok) return;
         const data = await r.json();
+        if (!data.warp_status) return;
         config.warp_status = data.warp_status;
         config.warp_ip = data.warp_ip || '';
         const ws = document.getElementById('warp-status');

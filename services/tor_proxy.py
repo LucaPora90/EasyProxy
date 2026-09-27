@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import time
 
 import aiohttp
@@ -20,13 +21,17 @@ TOR_DATA_DIR = os.path.join(config_store.CONFIG_DIR, "tor")
 TORRC_PATH = os.path.join(TOR_DATA_DIR, "torrc")
 TOR_LOG_PATH = os.path.join(TOR_DATA_DIR, "tor.log")
 TOR_CHECK_URL = "https://check.torproject.org/api/ip"
+TOR_GEOIP_PATH = "/usr/share/tor/geoip"
 TOR_CONTROL_HOST = "127.0.0.1"
 TOR_CONTROL_PORT = 9051
-TOR_BOOTSTRAP_TIMEOUT = 60
+TOR_BOOTSTRAP_TIMEOUT = 90
 TOR_MAX_CIRCUIT_DIRTINESS = "30 days"
 
 _BIND_RE = re.compile(r"^(?P<host>[A-Za-z0-9_.\-\[\]:]+):(?P<port>\d{1,5})$")
+_FINGERPRINT_RE = re.compile(r"^\$?[0-9A-Fa-f]{40}$")
 _process: asyncio.subprocess.Process | None = None
+_bootstrap_level: int | None = None
+_exclude_nodes = ""
 _lock = asyncio.Lock()
 
 
@@ -59,6 +64,33 @@ def set_bind(value: str) -> str:
     return bind
 
 
+_EXIT_NODES_RE = re.compile(r"^[A-Za-z0-9${},~=_.\-]+$")
+
+
+def get_exit_nodes() -> str:
+    return str(config_store.get("tor_exit_nodes", "") or "").strip()
+
+
+def set_exit_nodes(value: str) -> str:
+    nodes = (value or "").strip()
+    if nodes and (len(nodes) > 200 or not _EXIT_NODES_RE.match(nodes)):
+        raise TorError(f"Invalid exit nodes: {value!r}")
+    config_store.set("tor_exit_nodes", nodes)
+    return nodes
+
+
+def get_exit_country() -> str:
+    return str(config_store.get("tor_exit_country", "") or "").strip().lower()
+
+
+def set_exit_country(value: str) -> str:
+    country = (value or "").strip().lower().strip("{}")
+    if country and not re.fullmatch(r"[a-z]{2}", country):
+        raise TorError(f"Invalid country code: {value!r}")
+    config_store.set("tor_exit_country", country)
+    return country
+
+
 def is_enabled() -> bool:
     return bool(config_store.get("tor_enabled", False))
 
@@ -79,8 +111,52 @@ def _split_bind(bind: str) -> tuple[str, int]:
     return host, int(match.group("port"))
 
 
-def _write_torrc() -> None:
+def _tor_identity() -> tuple[int | None, int | None]:
+    """Return the Debian Tor uid/gid when the app can prepare them."""
+    if os.name == "nt" or getattr(os, "geteuid", lambda: 1)() != 0:
+        return None, None
+    try:
+        import pwd
+        account = pwd.getpwnam("debian-tor")
+    except (ImportError, KeyError):
+        return None, None
+    # Use the account's primary gid; the group name is not guaranteed to
+    # match the username on every VPS image.
+    return account.pw_uid, account.pw_gid
+
+
+def _repair_tor_data_permissions(tor_uid: int, tor_gid: int) -> None:
+    """Make the bind-mounted Tor state readable/writable by debian-tor."""
+    parent_dir = os.path.dirname(os.path.abspath(TOR_DATA_DIR))
+    parent_mode = stat.S_IMODE(os.stat(parent_dir).st_mode)
+    # Tor only needs to traverse the /data mount; keep its contents private.
+    os.chmod(parent_dir, parent_mode | stat.S_IXOTH)
     os.makedirs(TOR_DATA_DIR, exist_ok=True)
+    os.chown(TOR_DATA_DIR, tor_uid, tor_gid)
+    os.chmod(TOR_DATA_DIR, 0o700)
+    for root, dirs, files in os.walk(TOR_DATA_DIR):
+        for name in dirs:
+            path = os.path.join(root, name)
+            os.chown(path, tor_uid, tor_gid)
+            os.chmod(path, 0o700)
+        for name in files:
+            path = os.path.join(root, name)
+            os.chown(path, tor_uid, tor_gid)
+            os.chmod(path, 0o600)
+
+
+def _write_torrc() -> None:
+    tor_uid, tor_gid = _tor_identity()
+    run_as_debian_tor = tor_uid is not None and tor_gid is not None
+    if run_as_debian_tor:
+        try:
+            _repair_tor_data_permissions(tor_uid, tor_gid)
+        except OSError as exc:
+            raise TorError(
+                f"Cannot set permissions on {TOR_DATA_DIR} for debian-tor: {exc}"
+            ) from exc
+    else:
+        os.makedirs(TOR_DATA_DIR, exist_ok=True)
     host, port = _split_bind(get_bind())
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
@@ -90,31 +166,36 @@ def _write_torrc() -> None:
         "ClientOnly 1",
         "AvoidDiskWrites 0",
         f"MaxCircuitDirtiness {TOR_MAX_CIRCUIT_DIRTINESS}",
+    ]
+    exit_nodes = get_exit_nodes()
+    if exit_nodes:
+        if "{" in exit_nodes and not os.path.exists(TOR_GEOIP_PATH):
+            raise TorError(
+                "Tor GeoIP database is missing (install tor-geoipdb); "
+                "cannot select an exit country"
+            )
+        # Pin the exit so the egress IP never changes between circuits.
+        lines.append(f"ExitNodes {exit_nodes}")
+        lines.append("StrictNodes 1")
+    if _exclude_nodes:
+        lines.append(f"ExcludeNodes {_exclude_nodes}")
+    lines += [
         f"ControlPort {TOR_CONTROL_HOST}:{TOR_CONTROL_PORT}",
         "CookieAuthentication 1",
         f"CookieAuthFile {os.path.join(TOR_DATA_DIR, 'control_auth_cookie')}",
         f"Log notice file {TOR_LOG_PATH}",
     ]
     # Debian's package user prevents Tor from running as root in Docker.
-    if os.name != "nt" and os.geteuid() == 0:
-        try:
-            import pwd
-            pwd.getpwnam("debian-tor")
-        except (ImportError, KeyError):
-            pass
-        else:
-            import grp
-            try:
-                os.chown(TOR_DATA_DIR, pwd.getpwnam("debian-tor").pw_uid, grp.getgrnam("debian-tor").gr_gid)
-            except (OSError, KeyError):
-                pass
-            lines.append("User debian-tor")
+    if run_as_debian_tor:
+        lines.append("User debian-tor")
     with open(TORRC_PATH, "w", encoding="utf-8") as handle:
         handle.write("\n".join(lines) + "\n")
     try:
-        os.chmod(TORRC_PATH, 0o644)
-    except OSError:
-        pass
+        if run_as_debian_tor:
+            os.chown(TORRC_PATH, tor_uid, tor_gid)
+        os.chmod(TORRC_PATH, 0o600)
+    except OSError as exc:
+        raise TorError(f"Cannot set permissions on {TORRC_PATH}: {exc}") from exc
 
 
 async def _port_ready(host: str, port: int) -> bool:
@@ -139,10 +220,8 @@ async def _control_command(reader, writer, command: str) -> None:
     raise TorError("Unexpected Tor control response")
 
 
-async def new_identity() -> None:
-    """Ask Tor for a new circuit while keeping automatic rotation disabled."""
-    if _pid() is None:
-        raise TorError("Tor is not running")
+async def _control_lines(command: str) -> list[str]:
+    """Run a read-only control command and return its (unprefixed) response lines."""
     cookie_path = os.path.join(TOR_DATA_DIR, "control_auth_cookie")
     try:
         with open(cookie_path, "rb") as handle:
@@ -154,51 +233,331 @@ async def new_identity() -> None:
         raise TorError("Tor control port is unavailable") from exc
     try:
         await _control_command(reader, writer, f"AUTHENTICATE {cookie.hex()}")
-        await _control_command(reader, writer, "SIGNAL NEWNYM")
+        writer.write((command + "\r\n").encode("ascii"))
+        await writer.drain()
+        lines = []
+        in_data = False
+        for _ in range(4096):
+            line = (await asyncio.wait_for(reader.readline(), timeout=10)).decode("utf-8", "replace").rstrip("\r\n")
+            if in_data:
+                if line == ".":
+                    in_data = False
+                else:
+                    lines.append(line)
+                continue
+            if line == "250 OK":
+                return lines
+            if line.startswith("250+"):
+                in_data = True
+            elif line.startswith("250-"):
+                lines.append(line[4:])
+            elif line.startswith("250 "):
+                lines.append(line[4:])
+            elif line.startswith("4") or line.startswith("5"):
+                raise TorError(line)
+        raise TorError("Unexpected Tor control response")
     finally:
         writer.close()
-        await writer.wait_closed()
+        try:
+            await writer.wait_closed()
+        except OSError:
+            pass
 
 
-async def start() -> None:
-    global _process
-    async with _lock:
-        if _process and _process.returncode is None:
+async def _bootstrap_progress() -> int | None:
+    """Return Tor's bootstrap percentage, or None while the control port is not ready."""
+    cookie_path = os.path.join(TOR_DATA_DIR, "control_auth_cookie")
+    try:
+        with open(cookie_path, "rb") as handle:
+            cookie = handle.read()
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(TOR_CONTROL_HOST, TOR_CONTROL_PORT), timeout=5
+        )
+    except (OSError, asyncio.TimeoutError):
+        return None
+    try:
+        await _control_command(reader, writer, f"AUTHENTICATE {cookie.hex()}")
+        writer.write(b"GETINFO status/bootstrap-phase\r\n")
+        await writer.drain()
+        for _ in range(64):
+            line = (await asyncio.wait_for(reader.readline(), timeout=5)).decode("utf-8", "replace")
+            match = re.search(r"PROGRESS=(\d+)", line)
+            if match:
+                return int(match.group(1))
+        return None
+    except (OSError, asyncio.TimeoutError, TorError):
+        return None
+    finally:
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except OSError:
+            pass
+
+
+async def _control_pid() -> int | None:
+    """Return the PID of the Tor process serving the control port."""
+    try:
+        for line in await _control_lines("GETINFO process/pid"):
+            if line.startswith("process/pid="):
+                return int(line.split("=", 1)[1])
+    except (TorError, ValueError):
+        return None
+    return None
+
+
+def _log_tail(lines: int = 24) -> str:
+    try:
+        with open(TOR_LOG_PATH, "r", encoding="utf-8", errors="replace") as handle:
+            content = "".join(handle.readlines()[-lines:]).strip()
+    except OSError:
+        return "No Tor log output."
+    return content or "No Tor log output."
+
+
+async def _terminate(process: asyncio.subprocess.Process | None) -> None:
+    if not process or process.returncode is not None:
+        return
+    try:
+        process.send_signal(signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        await asyncio.wait_for(process.wait(), timeout=10)
+    except asyncio.TimeoutError:
+        try:
+            process.kill()
+        except ProcessLookupError:
             return
+        await process.wait()
+
+
+async def _process_output(process: asyncio.subprocess.Process) -> str:
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=2)
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        return ""
+    chunks = []
+    for payload in (stderr, stdout):
+        if payload:
+            text = payload.decode("utf-8", "replace").strip()
+            if text:
+                chunks.append(text)
+    return " | ".join(chunks)
+
+
+async def _verify_config() -> None:
+    process = await asyncio.create_subprocess_exec(
+        "tor", "--verify-config", "-f", TORRC_PATH,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.wait()
+        raise TorError("Tor configuration verification timed out")
+    output = " ".join(
+        part.decode("utf-8", "replace").strip()
+        for part in (stderr, stdout)
+        if part and part.decode("utf-8", "replace").strip()
+    )
+    if process.returncode != 0:
+        raise TorError(f"Invalid Tor configuration (code {process.returncode}): {output or 'no output'}")
+
+
+async def new_identity() -> None:
+    """Switch to a fresh exit, keeping any country selection.
+
+    With a country preference the new relay is chosen inside that country and
+    pinned, excluding the relay currently pinned so the egress IP really
+    changes. A single-relay pin without a country is released as before. A
+    restart is required: SIGNAL NEWNYM alone leaves the old circuits alive
+    (MaxCircuitDirtiness is 30 days) and they keep serving new streams, so the
+    previous IP can come back.
+    """
+    if _pid() is None:
+        raise TorError("Tor is not running")
+    country = get_exit_country()
+    if country:
+        current = get_exit_nodes()
+        exclude = f"${current.lstrip('$')}" if _FINGERPRINT_RE.fullmatch(current or "") else ""
+        await _pin_country_exit(country, exclude=exclude)
+        return
+    selection = get_exit_nodes()
+    if selection and "{" not in selection and "," not in selection:
+        set_exit_nodes("")
+    await restart()
+
+
+def _country_selection(value: str) -> str | None:
+    match = re.fullmatch(r"\{([A-Za-z]{2})\}", (value or "").strip())
+    return match.group(1).lower() if match else None
+
+
+async def _pin_country_exit(country: str, exclude: str = "") -> None:
+    """Let Tor pick an exit in the country, then pin the relay it picked.
+
+    The country stays stored as preference; the fingerprint pin keeps the
+    egress IP fixed until the next new-identity request.
+    """
+    global _exclude_nodes
+    set_exit_nodes("{" + country + "}")
+    _exclude_nodes = exclude
+    try:
+        await restart()
+        fingerprint = await current_exit_fingerprint()
+    finally:
+        _exclude_nodes = ""
+    set_exit_nodes(fingerprint)
+    await restart()
+
+
+async def apply_exit_nodes(value: str) -> None:
+    """Apply an exit selection, rolling back to the previous one on failure.
+
+    A single country code (`{it}`) picks and pins an exit relay in that
+    country. Anything else (fingerprint, nickname, set, empty) is written to
+    ExitNodes as-is. A failed selection can leave Tor unable to bootstrap:
+    restoring the previous one keeps a working Tor instead of leaving it
+    stopped.
+    """
+    value = (value or "").strip()
+    previous_nodes = get_exit_nodes()
+    previous_country = get_exit_country()
+    country = _country_selection(value)
+    try:
+        if country:
+            set_exit_country(country)
+            await _pin_country_exit(country)
+        elif value:
+            set_exit_country("")
+            set_exit_nodes(value)
+            await restart()
+        else:
+            set_exit_country("")
+            set_exit_nodes("")
+            await restart()
+    except TorError as exc:
+        set_exit_nodes(previous_nodes)
+        set_exit_country(previous_country)
+        message = str(exc)
+        try:
+            await start()
+            message += "; previous exit selection restored"
+        except TorError as rollback_exc:
+            message += f"; rollback failed: {rollback_exc}"
+        raise TorError(message) from exc
+
+
+async def _pin_current_exit() -> None:
+    """Pin the exit Tor is currently using, then rebuild every circuit on it."""
+    fingerprint = await current_exit_fingerprint()
+    set_exit_nodes(fingerprint)
+    await restart()
+
+
+async def _pin_default_exit() -> None:
+    """Pin an exit according to the stored preference (country or current)."""
+    country = get_exit_country()
+    if country:
+        await _pin_country_exit(country)
+    else:
+        await _pin_current_exit()
+
+
+async def _start() -> None:
+    global _process, _bootstrap_level
+    async with _lock:
+        if _process is not None:
+            if _process.returncode is None:
+                return
+            _process = None
         if not available():
             raise TorError("Tor is not installed; use the EasyProxy Docker image")
         set_bind(get_bind())
         _write_torrc()
-        _process = await asyncio.create_subprocess_exec(
-            "tor", "-f", TORRC_PATH, "--RunAsDaemon", "0",
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
+        await _verify_config()
         host, port = _split_bind(get_bind())
         deadline = time.monotonic() + TOR_BOOTSTRAP_TIMEOUT
-        while time.monotonic() < deadline:
-            if _process.returncode is not None:
-                raise TorError("Tor exited during startup; inspect Tor logs")
-            if await _port_ready(host, port):
-                logger.info("Tor SOCKS5 ready on %s:%s", host, port)
-                return
-            await asyncio.sleep(1)
-        await stop()
-        raise TorError("Tor did not open its SOCKS5 port in time")
+        ready = False
+        process = None
+        try:
+            while time.monotonic() < deadline:
+                process = await asyncio.create_subprocess_exec(
+                    "tor", "-f", TORRC_PATH, "--RunAsDaemon", "0",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                _process = process
+                _bootstrap_level = None
+                respawn = False
+                while time.monotonic() < deadline:
+                    if process.returncode is not None:
+                        _process = None
+                        output = await _process_output(process)
+                        detail = " | ".join(part for part in (output, _log_tail()) if part and part != "No Tor log output.")
+                        # A previous container/app instance may still be shutting
+                        # down and hold the ports or the data directory lock.
+                        stale_instance = any(
+                            marker in detail
+                            for marker in (
+                                "same data directory",
+                                "Address already in use. Is Tor already running?",
+                            )
+                        )
+                        if stale_instance and time.monotonic() + 5 < deadline:
+                            logger.warning(
+                                "Another Tor instance is still shutting down; retrying in 5s"
+                            )
+                            await asyncio.sleep(5)
+                            respawn = True
+                            break
+                        raise TorError(
+                            f"Tor exited during startup (code {process.returncode}): {detail or 'no Tor output'}"
+                        )
+                    if await _port_ready(host, port):
+                        level = await _bootstrap_progress()
+                        if level is not None:
+                            _bootstrap_level = level
+                        # A dying/foreign Tor instance can hold the ports while
+                        # ours waits on the data directory lock.
+                        if level == 100 and await _control_pid() == process.pid:
+                            logger.info("Tor SOCKS5 ready and bootstrapped on %s:%s", host, port)
+                            ready = True
+                            return
+                    await asyncio.sleep(1)
+                if not respawn:
+                    break
+            raise TorError(f"Tor did not bootstrap in time: {_log_tail()}")
+        finally:
+            if not ready:
+                _bootstrap_level = None
+                if _process is process:
+                    _process = None
+                await _terminate(process)
+            elif _process is process and process.returncode is not None:
+                _process = None
+
+
+async def start() -> None:
+    """Start Tor and pin its exit automatically when no pin exists yet."""
+    await _start()
+    if not get_exit_nodes():
+        try:
+            await _pin_default_exit()
+        except TorError as exc:
+            logger.warning("Could not auto-pin a Tor exit: %s", exc)
 
 
 async def stop() -> None:
-    global _process
-    process = _process
-    _process = None
-    if not process or process.returncode is not None:
-        return
-    process.send_signal(signal.SIGTERM)
-    try:
-        await asyncio.wait_for(process.wait(), timeout=10)
-    except asyncio.TimeoutError:
-        process.kill()
-        await process.wait()
+    global _process, _bootstrap_level
+    async with _lock:
+        process = _process
+        _process = None
+        _bootstrap_level = None
+        await _terminate(process)
 
 
 async def restart() -> None:
@@ -229,12 +588,39 @@ async def check() -> dict:
     return result
 
 
+_NS_IP_RE = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b")
+
+
+async def _fingerprint_for_ip(egress_ip: str) -> str:
+    fingerprints = []
+    for line in await _control_lines("GETINFO circuit-status"):
+        if " BUILT " not in line:
+            continue
+        path = next((part for part in line.split() if part.startswith("$")), "")
+        if path:
+            fingerprints.append(path.split(",")[-1].split("~")[0].lstrip("$"))
+    for fingerprint in dict.fromkeys(fingerprints):
+        try:
+            ns_lines = await _control_lines(f"GETINFO ns/id/{fingerprint}")
+        except TorError:
+            continue
+        for ns_line in ns_lines:
+            if ns_line.startswith("r ") and egress_ip in _NS_IP_RE.findall(ns_line):
+                return fingerprint
+    raise TorError(f"Could not map exit IP {egress_ip} to a relay fingerprint")
+
+
+async def current_exit_fingerprint() -> str:
+    """Resolve the relay fingerprint currently used as exit, to pin it."""
+    result = await check()
+    egress_ip = result.get("egress_ip", "")
+    if not egress_ip:
+        raise TorError(result.get("error") or "Tor is not reachable")
+    return await _fingerprint_for_ip(egress_ip)
+
+
 async def logs(lines: int = 120) -> str:
-    try:
-        with open(TOR_LOG_PATH, "r", encoding="utf-8", errors="replace") as handle:
-            return "".join(handle.readlines()[-lines:])
-    except OSError:
-        return "No Tor log output."
+    return _log_tail(lines)
 
 
 async def status(with_probe: bool = False) -> dict:
@@ -245,6 +631,9 @@ async def status(with_probe: bool = False) -> dict:
         "enabled": is_enabled(),
         "available": available(),
         "automatic_rotation": False,
+        "exit_nodes": get_exit_nodes(),
+        "exit_country": get_exit_country(),
+        "bootstrap": _bootstrap_level,
         "probe_ip": "",
     }
     if with_probe and data["running"]:
@@ -259,6 +648,12 @@ async def ensure_running() -> None:
             await start()
         except TorError as exc:
             logger.warning("Tor could not be started: %s", exc)
+            return
+    if _pid() is not None and not get_exit_nodes():
+        try:
+            await _pin_default_exit()
+        except TorError as exc:
+            logger.warning("Could not pin a Tor exit: %s", exc)
 
 
 async def keepalive_loop(interval: float = 30.0) -> None:
@@ -274,5 +669,7 @@ async def keepalive_loop(interval: float = 30.0) -> None:
 
 __all__ = [
     "TorError", "available", "get_bind", "set_bind", "is_enabled", "set_enabled",
+    "get_exit_nodes", "set_exit_nodes", "get_exit_country", "set_exit_country",
+    "apply_exit_nodes", "current_exit_fingerprint",
     "start", "stop", "restart", "new_identity", "check", "logs", "status", "keepalive_loop",
 ]

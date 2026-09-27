@@ -67,6 +67,20 @@ def setup_tor_proxy_routes(app: web.Application) -> None:
         except tor_proxy.TorError as exc:
             return _json({"error": str(exc)}, status=400)
 
+    async def exit_nodes(request):
+        if not await guard(request):
+            return _unauthorized()
+        try:
+            payload = await request.json()
+            value = str(payload.get("exit_nodes", ""))
+            if tor_proxy.is_enabled():
+                await tor_proxy.apply_exit_nodes(value)
+            else:
+                tor_proxy.set_exit_nodes(value)
+            return _json({"status": "ok", "tor": await tor_proxy.status()})
+        except tor_proxy.TorError as exc:
+            return _json({"error": str(exc)}, status=400)
+
     async def check(request):
         if not await guard(request):
             return _unauthorized()
@@ -92,6 +106,7 @@ def setup_tor_proxy_routes(app: web.Application) -> None:
     app.router.add_post("/api/admin/tor/stop", functools.partial(action, name="stop"))
     app.router.add_post("/api/admin/tor/restart", functools.partial(action, name="restart"))
     app.router.add_post("/api/admin/tor/bind", bind)
+    app.router.add_post("/api/admin/tor/exit-nodes", exit_nodes)
     app.router.add_post("/api/admin/tor/check", check)
     app.router.add_post("/api/admin/tor/new-identity", new_identity)
     app.router.add_get("/api/admin/tor/logs", logs)

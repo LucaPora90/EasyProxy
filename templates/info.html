@@ -884,6 +884,8 @@
                     </p>
                     <ul class="feature-list">
                         <li class="feature-item"><span class="feature-bullet">&bull;</span><span><code>d</code> parameter for target URL</span></li>
+                        <li class="feature-item"><span class="feature-bullet">&bull;</span><span><code>host=&lt;HOST&gt;</code> (optional): force a specific extractor</span></li>
+                        <li class="feature-item"><span class="feature-bullet">&bull;</span><span><code>max_res=true</code> (optional): serve only the highest variant</span></li>
                         <li class="feature-item"><span class="feature-bullet">&bull;</span><span>Drop-in compatibility for external clients</span></li>
                     </ul>
                 </div>
@@ -1000,17 +1002,19 @@
                 <div class="endpoint-card">
                     <div class="endpoint-header">
                         <span class="endpoint-method method-get">GET</span>
-                        <code class="endpoint-path">/record?url=&lt;STREAM_URL&gt;&amp;name=&lt;TITLE&gt;&amp;duration=&lt;SECONDS&gt;</code>
+                        <code class="endpoint-path">/record?url=&lt;STREAM_URL&gt;&amp;name=&lt;TITLE&gt;&amp;duration=&lt;SECONDS&gt;&amp;extractor=&lt;HOST&gt;&amp;max_res=1</code>
                     </div>
                     <p class="endpoint-description">
-                        <strong>DVR Recording</strong> &mdash; Start recording a live stream while watching. Optional title and duration parameters. Full recording management via the web interface.
+                        <strong>DVR Recording</strong> &mdash; Start recording a live stream while watching. Optional title, duration, forced extractor and max-res parameters. Full recording management via the web interface.
                     </p>
                     <ul class="feature-list">
                         <li class="feature-item"><span class="feature-bullet">&bull;</span><span>Record while you watch (Smart Mode)</span></li>
                         <li class="feature-item"><span class="feature-bullet">&bull;</span><span>Optional title and duration support</span></li>
+                        <li class="feature-item"><span class="feature-bullet">&bull;</span><span><code>extractor=&lt;HOST&gt;</code>: force a specific extractor instead of auto-detection</span></li>
+                        <li class="feature-item"><span class="feature-bullet">&bull;</span><span><code>max_res=1</code>: record only the highest video variant</span></li>
                         <li class="feature-item"><span class="feature-bullet">&bull;</span><span>Full management at <code>/recordings</code></span></li>
                     </ul>
-                    <div class="example-block">/record?url=https://stream.m3u8&name=LiveTV&duration=3600</div>
+                    <div class="example-block">/record?url=https://stream.m3u8&name=LiveTV&duration=3600&extractor=vavoo&max_res=1</div>
                 </div>
             </section>
 

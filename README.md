@@ -142,9 +142,12 @@ Tor is installed in the Docker image and starts only after enabling it from
 `/admin/torproxy`. Automatic circuit rotation is disabled as far as Tor allows
 (30-day maximum circuit lifetime); use **Request new IP** for manual `NEWNYM`.
 An exit can still change after a failure or process restart. The panel includes
-start/stop, manual identity change, Tor egress check and logs. Tor is TCP-only
-and should normally be used on selected routes rather than as the default for
-all streaming traffic.
+start/stop, manual identity change, Tor egress check and logs. **Exit country**
+is a list loaded live from Tor (onionoo) with only the countries currently
+running exit relays; picking one pins the relay Tor selects in that country, so
+the egress IP stays fixed until **Request new IP**, which picks another relay
+in the same country. Tor is TCP-only and should normally be used on selected
+routes rather than as the default for all streaming traffic.
 
 In the Admin Panel speed test, **Direct** uses Ookla. Every proxy route uses a
 real SOCKS5/HTTP proxied TCP throughput test, shows the egress IP, and does not
@@ -179,6 +182,8 @@ http://localhost:7860/proxy/manifest.m3u8?url=<URL>
 **Options:**
 - `&clearkey=KID:KEY`: Provide keys for DASH streams.
 - `&warp=off`: Force the request to bypass the WARP VPN and use the server's real IP (Direct Connection).
+- `&host=<HOST>`: Force a specific extractor instead of auto-detection (e.g., `&host=vavoo`).
+- `&max_res=true`: Serve only the highest video variant.
 - `&h_<Header Name>=<Value>`: Pass custom headers (e.g., `&h_User-Agent=VLC`).
 
 ### 🔍 Stream Extractor
@@ -191,7 +196,8 @@ http://localhost:7860/extractor/video?d=<URL>&redirect_stream=true
 ### 📼 DVR & Recordings
 Manage your recordings via the `/recordings` web UI or API.
 - `/record?url=<URL>&name=<NAME>`: Start recording and watch simultaneously.
-- `/api/recordings/start`: Trigger a background recording.
+- Optional parameters: `extractor=<HOST>` (force a specific extractor instead of auto-detection), `max_res=1` (record only the highest video variant), `duration=<SECONDS>`, `key_id=<KID>&key=<KEY>` (ClearKey DRM).
+- `/api/recordings/start`: Trigger a background recording (JSON body accepts the same options: `extractor`, `max_res`).
 
 ---
 

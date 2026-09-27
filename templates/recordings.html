@@ -826,6 +826,51 @@
                     <label class="form-label" for="url">Stream URL *</label>
                     <input type="url" id="url" class="form-input" placeholder="https://example.com/stream.m3u8" required>
                 </div>
+                <div class="form-group">
+                    <label class="form-label" for="extractor">Extractor</label>
+                    <input type="text" id="extractor" class="form-input" list="extractorList" placeholder="Auto-detect (leave empty)">
+                    <datalist id="extractorList">
+                        <option value="vavoo"></option>
+                        <option value="vixsrc"></option>
+                        <option value="vixcloud"></option>
+                        <option value="ads"></option>
+                        <option value="sportsonline"></option>
+                        <option value="mixdrop"></option>
+                        <option value="voe"></option>
+                        <option value="streamtape"></option>
+                        <option value="orion"></option>
+                        <option value="freeshot"></option>
+                        <option value="doodstream"></option>
+                        <option value="fastream"></option>
+                        <option value="filelions"></option>
+                        <option value="filemoon"></option>
+                        <option value="lulustream"></option>
+                        <option value="okru"></option>
+                        <option value="streamwish"></option>
+                        <option value="streamhg"></option>
+                        <option value="supervideo"></option>
+                        <option value="dropload"></option>
+                        <option value="uqload"></option>
+                        <option value="vidmoly"></option>
+                        <option value="vidlink"></option>
+                        <option value="vidoza"></option>
+                        <option value="turbovidplay"></option>
+                        <option value="livetv"></option>
+                        <option value="f16px"></option>
+                        <option value="guardabest"></option>
+                        <option value="sports99"></option>
+                        <option value="dlstreams"></option>
+                        <option value="embedst"></option>
+                        <option value="vidsonic"></option>
+                        <option value="vidxgo"></option>
+                        <option value="vidfast"></option>
+                        <option value="cinejoy"></option>
+                        <option value="mediaset"></option>
+                        <option value="wittytv"></option>
+                        <option value="raiplay"></option>
+                    </datalist>
+                    <div class="checkbox-desc">Forces a specific extractor instead of auto-detection. Useful when the URL is not recognized.</div>
+                </div>
                 <div class="form-row">
                     <div class="form-group">
                         <label class="form-label" for="name">Recording Name</label>
@@ -856,6 +901,13 @@
                         <div>
                             <span>Add <code>disable_ssl=1</code></span>
                             <div class="checkbox-desc">Disables SSL certificate verification for this stream. Useful for self-signed or unverified SSL CDNs.</div>
+                        </div>
+                    </label>
+                    <label class="checkbox-label">
+                        <input id="recordingMaxRes" type="checkbox">
+                        <div>
+                            <span>Add <code>max_res=true</code></span>
+                            <div class="checkbox-desc">Records only the highest video variant, disabling adaptive bitrate switching. Applies to HLS and MPD sources.</div>
                         </div>
                     </label>
                 </div>
@@ -1061,9 +1113,11 @@
             const url = document.getElementById('url').value;
             const name = document.getElementById('name').value;
             const duration = document.getElementById('duration').value;
+            const extractor = document.getElementById('extractor').value.trim();
             const bypassWarp = document.getElementById('recordingBypassWarp').checked;
             const bypassProxy = document.getElementById('recordingBypassProxy').checked;
             const disableSSL = document.getElementById('recordingDisableSSL').checked;
+            const maxRes = document.getElementById('recordingMaxRes').checked;
 
             const startBtn = document.getElementById('startBtn');
             startBtn.disabled = true;
@@ -1071,9 +1125,11 @@
 
             try {
                 const body = { url, name: name || undefined, duration: duration ? parseInt(duration) : undefined };
+                if (extractor) body.extractor = extractor;
                 if (bypassWarp) body.warp = 'off';
                 if (bypassProxy) body.proxy = 'off';
                 if (disableSSL) body.disable_ssl = '1';
+                if (maxRes) body.max_res = 'true';
                 const response = await fetch(`/api/recordings/start${getAuthParams()}`, {
                     method: 'POST',
                     headers: getAuthHeaders(),

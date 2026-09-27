@@ -46,7 +46,7 @@ _SOCKET_CHECK_EXECUTOR = ThreadPoolExecutor(
 )
 
 
-APP_VERSION = "2.13.1"
+APP_VERSION = "2.13.10"
 
 _MEMORY_PROFILE_FRAMES = 15
 _memory_profile_baseline = None
@@ -1293,6 +1293,8 @@ def get_system_stats():
     # readings so /api/info can identify whether Python or wireproxy is hot.
     proxy_cpu_percent = cpu_percent
     process_cpu = {}
+    p_cpu = 0.0
+    cores = os.cpu_count() or 1
     try:
         # Use persistent Process objects: psutil.cpu_percent() needs a previous
         # baseline reading, otherwise it always returns 0.0.
@@ -1313,8 +1315,11 @@ def get_system_stats():
                 del _cpu_children[pid]
         for pid, child in current_children.items():
             if pid not in _cpu_children:
+                try:
+                    child.cpu_percent(interval=None)  # establish baseline
+                except Exception:
+                    continue
                 _cpu_children[pid] = child
-                child.cpu_percent(interval=None)  # establish baseline
 
         p_cpu = _cpu_proc.cpu_percent(interval=None)
         process_cpu[_cpu_proc.pid] = p_cpu
@@ -1327,7 +1332,6 @@ def get_system_stats():
                 pass
         get_system_stats._cpu_children = _cpu_children
 
-        cores = os.cpu_count() or 1
         proxy_cpu_percent = min(100.0, p_cpu / cores)
         for snapshot in process_tree:
             raw = process_cpu.get(snapshot.get("pid"), 0.0)

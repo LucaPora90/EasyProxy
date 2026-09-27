@@ -340,7 +340,10 @@ class HLSProxyManifestHandlerMixin:
                         continue
                     stream_headers[header_name] = header_value
             else:
-                extractor = await self.get_extractor(target_url, combined_headers, bypass_warp=bypass_warp)
+                forced_host = request.query.get("host")
+                extractor = await self.get_extractor(
+                    target_url, combined_headers, host=forced_host, bypass_warp=bypass_warp
+                )
 
                 # The first resolver call identifies the extractor. Apply its
                 # admin routing policy before the actual extraction, then use a
@@ -363,7 +366,7 @@ class HLSProxyManifestHandlerMixin:
                     SELECTED_PROXY_CONTEXT.set(None)
                     STRICT_PROXY_CONTEXT.set(False)
                     extractor = await self.get_extractor(
-                        target_url, combined_headers, bypass_warp=bypass_warp
+                        target_url, combined_headers, host=forced_host, bypass_warp=bypass_warp
                     )
                     resolved_key = self._extractor_key_for_instance(extractor)
                     if not extractor_key or (resolved_key and not resolved_key.startswith("generic")):
@@ -820,7 +823,10 @@ class HLSProxyManifestHandlerMixin:
                 logger.warning("Proxy died during playlist fetch, re-extracting %s (orig URL: %s)", target_url, extraction_url)
                 extractor2 = None
                 try:
-                    extractor2 = await self.get_extractor(extraction_url, combined_headers, bypass_warp=bypass_warp)
+                    extractor2 = await self.get_extractor(
+                        extraction_url, combined_headers,
+                        host=request.query.get("host"), bypass_warp=bypass_warp
+                    )
                     if not extractor2:
                         logger.warning("No extractor found for %s during re-extraction", extraction_url)
                         return web.Response(text="Re-extraction failed: no extractor found", status=502)
