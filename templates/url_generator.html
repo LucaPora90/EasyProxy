@@ -561,6 +561,7 @@
 
         @media (max-width: 600px) {
             .container { padding: 1rem; }
+            .back-link { display: flex; width: fit-content; margin-left: auto; }
             .glass-card { padding: 1.25rem; }
             .checkbox-grid { grid-template-columns: 1fr; }
             .btn-row { flex-direction: column; }
@@ -617,6 +618,17 @@
                     <label>Request Headers</label>
                     <textarea id="requestHeaders" rows="5" placeholder='{"User-Agent":"Mozilla/5.0","Referer":"https://site.example/"}'></textarea>
                 </div>
+                <div class="form-group">
+                    <label for="proxyMode">Proxy route</label>
+                    <select id="proxyMode">
+                        <option value="">Auto — transport route / extractor / global / WARP</option>
+                        <option value="off">Direct — proxy=off</option>
+                        <option value="torproxy">Force Tor — proxy=torproxy</option>
+                        <option value="nordvpn">Force NordVPN — proxy=nordvpn</option>
+                        <option value="cwg">Force Custom WireGuard — proxy=cwg</option>
+                    </select>
+                    <div class="checkbox-desc">Force routes the whole stream through that tunnel; if the tunnel is down the request fails instead of falling back.</div>
+                </div>
                 <div class="checkbox-grid">
                     <label class="checkbox-label">
                         <input id="proxyRedirectStream" type="checkbox">
@@ -630,13 +642,6 @@
                         <div>
                             <span>Add <code>warp=off</code></span>
                             <div class="checkbox-desc">Bypasses the Cloudflare WARP VPN for this specific stream, forcing the connection via the server's real IP.</div>
-                        </div>
-                    </label>
-                    <label class="checkbox-label">
-                        <input id="proxyBypassProxy" type="checkbox">
-                        <div>
-                            <span>Add <code>proxy=off</code></span>
-                            <div class="checkbox-desc">Bypasses all configured custom proxies (global/per-extractor) for this stream, falling back to WARP/Direct.</div>
                         </div>
                     </label>
                     <label class="checkbox-label">
@@ -707,7 +712,7 @@
 
                             <option value="turbovidplay">TurboVidPlay</option>
                             <option value="livetv">LiveTV</option>
-                            <option value="f16px">F16Px</option>
+                            <option value="f16px">F16Px / Byse</option>
                             <option value="guardabest">Guardabest</option>
                             <option value="sports99">Sports99 / CDNLiveTV</option>
                             <option value="embedst">EmbedSports / Streamed</option>
@@ -746,6 +751,17 @@
                     </select>
                     <div class="form-hint">Select the appropriate extension for your source. VixSrc → <code>.m3u8</code>, Mixdrop → <code>.mp4</code>, DASH streams → <code>.mpd</code>.</div>
                 </div>
+                <div class="form-group">
+                    <label for="extractorProxyMode">Proxy route</label>
+                    <select id="extractorProxyMode">
+                        <option value="">Auto — transport route / extractor / global / WARP</option>
+                        <option value="off">Direct — proxy=off</option>
+                        <option value="torproxy">Force Tor — proxy=torproxy</option>
+                        <option value="nordvpn">Force NordVPN — proxy=nordvpn</option>
+                        <option value="cwg">Force Custom WireGuard — proxy=cwg</option>
+                    </select>
+                    <div class="checkbox-desc">Force routes the whole stream through that tunnel; if the tunnel is down the request fails instead of falling back.</div>
+                </div>
                 <div class="checkbox-grid">
                     <label class="checkbox-label">
                         <input id="extractorRedirectStream" type="checkbox">
@@ -759,13 +775,6 @@
                         <div>
                             <span>Add <code>warp=off</code></span>
                             <div class="checkbox-desc">Bypasses the Cloudflare WARP VPN for this specific stream, forcing the connection via the server's real IP.</div>
-                        </div>
-                    </label>
-                    <label class="checkbox-label">
-                        <input id="extractorBypassProxy" type="checkbox">
-                        <div>
-                            <span>Add <code>proxy=off</code></span>
-                            <div class="checkbox-desc">Bypasses all configured custom proxies (global/per-extractor) for this stream, falling back to WARP/Direct.</div>
                         </div>
                     </label>
                     <label class="checkbox-label">
@@ -842,22 +851,34 @@
                         <div><span>Bypass audio language check</span><div class="checkbox-desc">Use only when the requested language is present but the playlist labels it incorrectly.</div></div>
                     </label>
                 </div>
+                <div class="form-group">
+                    <label for="dualVideoProxyMode">Video proxy route</label>
+                    <select id="dualVideoProxyMode">
+                        <option value="">Auto — transport route / extractor / global / WARP</option>
+                        <option value="off">Direct — proxy=off</option>
+                        <option value="torproxy">Force Tor — proxy=torproxy</option>
+                        <option value="nordvpn">Force NordVPN — proxy=nordvpn</option>
+                        <option value="cwg">Force Custom WireGuard — proxy=cwg</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="dualAudioProxyMode">Audio proxy route</label>
+                    <select id="dualAudioProxyMode">
+                        <option value="">Auto — transport route / extractor / global / WARP</option>
+                        <option value="off">Direct — proxy=off</option>
+                        <option value="torproxy">Force Tor — proxy=torproxy</option>
+                        <option value="nordvpn">Force NordVPN — proxy=nordvpn</option>
+                        <option value="cwg">Force Custom WireGuard — proxy=cwg</option>
+                    </select>
+                </div>
                 <div class="checkbox-grid">
                     <label class="checkbox-label">
                         <input id="dualVideoWarpOff" type="checkbox">
                         <div><span>Video <code>warp=off</code></span><div class="checkbox-desc">Bypass WARP for the video source.</div></div>
                     </label>
                     <label class="checkbox-label">
-                        <input id="dualVideoProxyOff" type="checkbox">
-                        <div><span>Video <code>proxy=off</code></span><div class="checkbox-desc">Bypass configured proxies for the video source.</div></div>
-                    </label>
-                    <label class="checkbox-label">
                         <input id="dualAudioWarpOff" type="checkbox">
                         <div><span>Audio <code>warp=off</code></span><div class="checkbox-desc">Bypass WARP for the audio source.</div></div>
-                    </label>
-                    <label class="checkbox-label">
-                        <input id="dualAudioProxyOff" type="checkbox">
-                        <div><span>Audio <code>proxy=off</code></span><div class="checkbox-desc">Bypass configured proxies for the audio source.</div></div>
                     </label>
                 </div>
                 <div class="btn-row">
@@ -1058,7 +1079,7 @@
             const apiPassword = document.getElementById('apiPassword').value.trim();
             const redirectStream = document.getElementById('proxyRedirectStream').checked;
             const bypassWarp = document.getElementById('proxyBypassWarp').checked;
-            const bypassProxy = document.getElementById('proxyBypassProxy').checked;
+            const proxyMode = document.getElementById('proxyMode').value;
             const disableSSL = document.getElementById('proxyDisableSSL').checked;
             const forceNativeMpd = document.getElementById('proxyNativeMpd').checked;
             const maxRes = document.getElementById('proxyMaxRes').checked;
@@ -1078,7 +1099,7 @@
                     endpoint: endpoint,
                     request_headers: {},
                     warp: bypassWarp ? 'off' : 'on',
-                    proxy: bypassProxy ? 'off' : 'on',
+                    proxy: proxyMode || 'on',
                     disable_ssl: disableSSL ? '1' : '0'
                 }]
             };
@@ -1103,13 +1124,12 @@
 
                 const data = JSON.parse(text);
                 let urls = data.urls || [];
-                const bypassProxy = document.getElementById('proxyBypassProxy').checked;
-                if (redirectStream || bypassWarp || bypassProxy || disableSSL || maxRes) {
+                if (redirectStream || bypassWarp || proxyMode || disableSSL || maxRes) {
                     urls = urls.map(u => {
                         const urlObj = new URL(u);
                         if (redirectStream) urlObj.searchParams.set('redirect_stream', 'true');
                         if (bypassWarp) urlObj.searchParams.set('warp', 'off');
-                        if (bypassProxy) urlObj.searchParams.set('proxy', 'off');
+                        if (proxyMode) urlObj.searchParams.set('proxy', proxyMode);
                         if (disableSSL) urlObj.searchParams.set('disable_ssl', '1');
                         if (maxRes) urlObj.searchParams.set('max_res', 'true');
                         return urlObj.toString();
@@ -1130,7 +1150,7 @@
             const apiPassword = document.getElementById('apiPassword').value.trim();
             const redirectStream = document.getElementById('extractorRedirectStream').checked;
             const bypassWarp = document.getElementById('extractorBypassWarp').checked;
-            const bypassProxy = document.getElementById('extractorBypassProxy').checked;
+            const proxyMode = document.getElementById('extractorProxyMode').value;
             const disableSSL = document.getElementById('extractorDisableSSL').checked;
             const maxRes = document.getElementById('extractorMaxRes').checked;
             const result = document.getElementById('extractorResult');
@@ -1147,7 +1167,7 @@
             params.set('d', url);
             if (redirectStream) params.set('redirect_stream', 'true');
             if (bypassWarp) params.set('warp', 'off');
-            if (bypassProxy) params.set('proxy', 'off');
+            if (proxyMode) params.set('proxy', proxyMode);
             if (disableSSL) params.set('disable_ssl', '1');
             if (maxRes) params.set('max_res', 'true');
             if (apiPassword) params.set('api_password', apiPassword);
@@ -1208,10 +1228,14 @@
             const audio = audioExtractor
                 ? { extractor: audioExtractor, d: audioUrl }
                 : { url: audioUrl };
+            const videoProxyMode = document.getElementById('dualVideoProxyMode').value;
+            const audioProxyMode = document.getElementById('dualAudioProxyMode').value;
             if (document.getElementById('dualVideoWarpOff').checked) video.warp_off = true;
-            if (document.getElementById('dualVideoProxyOff').checked) video.proxy_off = true;
+            if (videoProxyMode === 'off') video.proxy_off = true;
+            else if (videoProxyMode) video.proxy = videoProxyMode;
             if (document.getElementById('dualAudioWarpOff').checked) audio.warp_off = true;
-            if (document.getElementById('dualAudioProxyOff').checked) audio.proxy_off = true;
+            if (audioProxyMode === 'off') audio.proxy_off = true;
+            else if (audioProxyMode) audio.proxy = audioProxyMode;
 
             const payload = { video, audio, audio_lang: audioLanguage };
             if (bypassAudioLanguage) payload.bypass_audio_language = true;
@@ -1272,8 +1296,8 @@
             }
         }
 
-        const proxyInputs = ['proxyEndpoint', 'destinationUrl', 'requestHeaders', 'proxyRedirectStream', 'proxyBypassWarp', 'proxyBypassProxy', 'proxyDisableSSL', 'proxyNativeMpd', 'proxyMaxRes'];
-        const extractorInputs = ['extractorHost', 'extractorUrl', 'extractorExtension', 'extractorRedirectStream', 'extractorBypassWarp', 'extractorBypassProxy', 'extractorDisableSSL', 'extractorMaxRes'];
+        const proxyInputs = ['proxyEndpoint', 'destinationUrl', 'requestHeaders', 'proxyRedirectStream', 'proxyBypassWarp', 'proxyMode', 'proxyDisableSSL', 'proxyNativeMpd', 'proxyMaxRes'];
+        const extractorInputs = ['extractorHost', 'extractorUrl', 'extractorExtension', 'extractorRedirectStream', 'extractorBypassWarp', 'extractorProxyMode', 'extractorDisableSSL', 'extractorMaxRes'];
 
         function sortSelectOptions(selectId) {
             const select = document.getElementById(selectId);
@@ -1284,7 +1308,7 @@
         }
 
         ['extractorHostSelect', 'dualVideoExtractorSelect', 'dualAudioExtractorSelect'].forEach(sortSelectOptions);
-        const dualInputs = ['dualVideoUrl', 'dualVideoExtractor', 'dualVideoExtractorSelect', 'dualAudioUrl', 'dualAudioExtractor', 'dualAudioExtractorSelect', 'dualAudioLanguage', 'dualBypassAudioLanguage', 'dualVideoWarpOff', 'dualVideoProxyOff', 'dualAudioWarpOff', 'dualAudioProxyOff'];
+        const dualInputs = ['dualVideoUrl', 'dualVideoExtractor', 'dualVideoExtractorSelect', 'dualAudioUrl', 'dualAudioExtractor', 'dualAudioExtractorSelect', 'dualAudioLanguage', 'dualBypassAudioLanguage', 'dualVideoWarpOff', 'dualVideoProxyMode', 'dualAudioWarpOff', 'dualAudioProxyMode'];
 
         function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
         const autoProxy = debounce(() => { if (document.getElementById('destinationUrl').value.trim()) generateProxyUrl(); }, 300);

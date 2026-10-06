@@ -15,6 +15,7 @@ from config import (
     SELECTED_PROXY_CONTEXT,
     STRICT_PROXY_CONTEXT,
     get_proxy_for_url,
+    resolve_proxy_alias,
 )
 
 
@@ -96,7 +97,7 @@ def from_values(*sources: Mapping | None) -> RoutingOptions:
             values.update(source)
 
     raw_proxy = values.get("proxy") or values.get("proxy_url") or ""
-    raw_proxy = unquote(str(raw_proxy).strip())
+    raw_proxy = resolve_proxy_alias(unquote(str(raw_proxy).strip()))
     proxy_off = (
         str(raw_proxy).lower() == "off"
         or _as_bool(values.get("proxy_off"))

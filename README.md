@@ -182,6 +182,7 @@ http://localhost:7860/proxy/manifest.m3u8?url=<URL>
 **Options:**
 - `&clearkey=KID:KEY`: Provide keys for DASH streams.
 - `&warp=off`: Force the request to bypass the WARP VPN and use the server's real IP (Direct Connection).
+- `&proxy=off|torproxy|nordvpn|cwg`: Bypass all configured proxies (`off`) or force the whole stream through Tor (`torproxy`), NordVPN (`nordvpn`) or the custom WireGuard tunnel (`cwg`). Omit for automatic routing.
 - `&host=<HOST>`: Force a specific extractor instead of auto-detection (e.g., `&host=vavoo`).
 - `&max_res=true`: Serve only the highest video variant.
 - `&h_<Header Name>=<Value>`: Pass custom headers (e.g., `&h_User-Agent=VLC`).
@@ -196,7 +197,7 @@ http://localhost:7860/extractor/video?d=<URL>&redirect_stream=true
 ### 📼 DVR & Recordings
 Manage your recordings via the `/recordings` web UI or API.
 - `/record?url=<URL>&name=<NAME>`: Start recording and watch simultaneously.
-- Optional parameters: `extractor=<HOST>` (force a specific extractor instead of auto-detection), `max_res=1` (record only the highest video variant), `duration=<SECONDS>`, `key_id=<KID>&key=<KEY>` (ClearKey DRM).
+- Optional parameters: `extractor=<HOST>` (force a specific extractor instead of auto-detection), `max_res=1` (record only the highest video variant), `duration=<SECONDS>`, `key_id=<KID>&key=<KEY>` (ClearKey DRM), `proxy=off|torproxy|nordvpn|cwg` (bypass or force a proxy route).
 - `/api/recordings/start`: Trigger a background recording (JSON body accepts the same options: `extractor`, `max_res`).
 
 ---

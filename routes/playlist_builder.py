@@ -143,8 +143,13 @@ class PlaylistBuilder:
                 if bypass_warp:
                     processed_url_content += "&warp=off"
                 
-                if bypass_proxies:
+                proxy_route = str(bypass_proxies or '').strip().lower()
+                if proxy_route in ('off', 'true', '1'):
                     processed_url_content += "&proxy=off"
+                elif proxy_route not in ('', 'false', '0', 'on'):
+                    processed_url_content += (
+                        f"&proxy={urllib.parse.quote(proxy_route, safe='')}"
+                    )
                 
                 yield processed_url_content + '\n'
             else:
@@ -215,7 +220,9 @@ class PlaylistBuilder:
                     if '=' in part:
                         k, v = part.split('=', 1)
                         k = k.lower()
-                        if k in ('warp', 'proxy'):
+                        if k == 'proxy':
+                            options[k] = v.lower()
+                        elif k == 'warp':
                             options[k] = v.lower() == 'off'
                         else:
                             options[k] = v.lower() == 'true'

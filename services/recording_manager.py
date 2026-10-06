@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Dict, List, Optional, Any, Tuple
-from urllib.parse import urlencode
+from urllib.parse import urlencode, parse_qsl, urlsplit
 
 import aiohttp
 import config_store
@@ -197,6 +197,14 @@ class RecordingManager:
             params['host'] = extractor
         if max_res:
             params['max_res'] = 'true'
+        # Routing flags live in the source URL query (appended by the start
+        # handlers). Promote them to the outer proxy request, otherwise the
+        # internal /proxy/... call never sees them.
+        flags = dict(parse_qsl(urlsplit(url).query))
+        if flags.get('warp') == 'off':
+            params['warp'] = 'off'
+        if flags.get('proxy') and flags['proxy'] != 'on':
+            params['proxy'] = flags['proxy']
         if API_PASSWORD:
             params['api_password'] = API_PASSWORD
         return params

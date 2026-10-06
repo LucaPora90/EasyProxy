@@ -274,7 +274,10 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
                         request_headers, proxies=proxy_list
                     )
                 return self.extractors[key]
-            elif host == "f16px":
+            elif host in ["f16px", "byse"]:
+                key = _cache_key("f16px", bypass_warp)
+                proxy = get_proxy_for_url("f16px", bypass_warp=bypass_warp)
+                proxy_list = _build_proxy_list(proxy, "f16px")
                 if key not in self.extractors:
                     self.extractors[key] = F16PxExtractor(
                         request_headers, proxies=proxy_list
@@ -624,7 +627,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
                 )
             return self.extractors[key]
         elif (
-            re.search(r'(/watch\.php\?.*id=\d+|/stream/stream-[\w-]+\.php)', urllib.parse.unquote(url)) is not None
+            re.search(r'(/watch\.php\?.*id=\d+|/(?:stream|cast|watch|plus|casting|player|hub)/stream-[\w-]+\.php)', urllib.parse.unquote(url)) is not None
         ):
             key = _cache_key("dlstreams", bypass_warp)
             proxy = get_proxy_for_url(
@@ -692,7 +695,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
             # Always refresh request_headers so per-call h_* overrides are honored.
             self.extractors[key].request_headers = request_headers
             return self.extractors[key]
-        elif "dropload" in url:
+        elif "dropload" in url or "dr0pstream" in url.lower():
             key = _cache_key("dropload", bypass_warp)
             proxy = get_proxy_for_url(
                 "dropload", bypass_warp=bypass_warp)
@@ -791,7 +794,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
                     request_headers, proxies=proxy_list, bypass_warp=bypass_warp
                 )
             return self.extractors[key]
-        elif "vidsonic.net/" in url.lower() and re.search(r"/e/[A-Za-z0-9]+", url, re.IGNORECASE):
+        elif any(d in url.lower() for d in ("vidsonic.net/", "vixeo.io/")) and re.search(r"/e/[A-Za-z0-9]+", url, re.IGNORECASE):
             key = _cache_key("vidsonic", bypass_warp)
             proxy = get_proxy_for_url("vidsonic", bypass_warp=bypass_warp)
             proxy_list = _build_proxy_list(proxy, "vidsonic")

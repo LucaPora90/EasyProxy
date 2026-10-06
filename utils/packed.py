@@ -145,10 +145,11 @@ def _parse_scripts(text):
     soup = BeautifulSoup(text, "lxml", parse_only=SoupStrainer("script"))
     return soup.find_all("script")
 
-async def eval_solver(session, url: str, headers: dict, patterns: list[str]) -> str:
+async def eval_solver(session, url: str, headers: dict, patterns: list[str], method: str = "GET", data=None, text: str = None) -> str:
     try:
-        async with session.get(url, headers=headers) as response:
-            text = await response.text()
+        if text is None:
+            async with session.request(method, url, headers=headers, data=data) as response:
+                text = await response.text()
         
         # Check for common error messages indicating video not found or unavailable
         error_indicators = [

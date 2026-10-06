@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import socket
 import aiohttp
 from aiohttp import ClientSession, ClientTimeout, TCPConnector, ClientConnectionError
 from config import (
@@ -41,7 +42,11 @@ class MockResponse:
 
 class BaseExtractor:
     """Base class for extractors with robust networking and proxy fallback."""
-    
+
+    # Pin direct connections to IPv4 for sites whose session tokens are bound
+    # to the solver's (IPv4) address.
+    force_ipv4 = False
+
     def __init__(self, request_headers: dict, proxies: list = None, extractor_name: str = "generic"):
         self.request_headers = request_headers
         self.base_headers = {
@@ -81,7 +86,8 @@ class BaseExtractor:
                         limit_per_host=0, 
                         keepalive_timeout=15, 
                         enable_cleanup_closed=True, 
-                        use_dns_cache=True
+                        use_dns_cache=True,
+                        family=socket.AF_INET if self.force_ipv4 else socket.AF_UNSPEC,
                     )
                 
                 self.session = ClientSession(

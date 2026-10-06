@@ -825,6 +825,7 @@
                         <li class="feature-item"><span class="feature-bullet">&bull;</span><span><strong>M3U Playlist:</strong> IPTV lists</span></li>
                         <li class="feature-item"><span class="feature-bullet">&bull;</span><span><strong>MPD (DASH):</strong> Adaptive streaming</span></li>
                         <li class="feature-item"><span class="feature-bullet">&bull;</span><span><strong>DLHD:</strong> Dynamic streams</span></li>
+                        <li class="feature-item"><span class="feature-bullet">&bull;</span><span><code>proxy=off|torproxy|nordvpn|cwg</code>: bypass all proxies or force a route (Tor, NordVPN, custom WireGuard)</span></li>
                     </ul>
                     <div class="example-block">/proxy/manifest.m3u8?url=https://example.com/stream.m3u8</div>
                 </div>
@@ -928,7 +929,7 @@
                         <strong>Advanced Extraction API</strong> &mdash; Extracts direct stream URLs and headers from dozens of streaming services. Returns JSON metadata or performs immediate 302 redirect.
                     </p>
                     <ul class="feature-list">
-                        <li class="feature-item"><span class="feature-bullet">&bull;</span><span>Parameters: <code>url</code> or <code>d</code> (required), <code>host</code> (optional, force extractor)</span></li>
+                        <li class="feature-item"><span class="feature-bullet">&bull;</span><span>Parameters: <code>url</code> or <code>d</code> (required), <code>host</code> (optional, force extractor), <code>proxy=off|torproxy|nordvpn|cwg</code> (force a proxy route)</span></li>
                         <li class="feature-item"><span class="feature-bullet">&bull;</span><span>Base64 encoded URLs supported</span></li>
                         <li class="feature-item"><span class="feature-bullet">&bull;</span><span><code>redirect_stream=true</code>: Immediate 302 redirect</span></li>
                         <li class="feature-item"><span class="feature-bullet">&bull;</span><span><code>redirect_stream=false</code>: Returns JSON with metadata and headers</span></li>
@@ -1005,7 +1006,7 @@
                         <code class="endpoint-path">/record?url=&lt;STREAM_URL&gt;&amp;name=&lt;TITLE&gt;&amp;duration=&lt;SECONDS&gt;&amp;extractor=&lt;HOST&gt;&amp;max_res=1</code>
                     </div>
                     <p class="endpoint-description">
-                        <strong>DVR Recording</strong> &mdash; Start recording a live stream while watching. Optional title, duration, forced extractor and max-res parameters. Full recording management via the web interface.
+                        <strong>DVR Recording</strong> &mdash; Start recording a live stream while watching. Optional title, duration, forced extractor, max-res and proxy-route (<code>proxy=off|torproxy|nordvpn|cwg</code>) parameters. Full recording management via the web interface.
                     </p>
                     <ul class="feature-list">
                         <li class="feature-item"><span class="feature-bullet">&bull;</span><span>Record while you watch (Smart Mode)</span></li>

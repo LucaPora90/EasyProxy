@@ -386,6 +386,17 @@ class HLSProxyPagesMixin:
 
         version = APP_VERSION
 
+        proxy_param = {
+            "name": "proxy",
+            "in": "query",
+            "schema": {"type": "string"},
+            "description": (
+                "Force the outbound route: torproxy (Tor), nordvpn (NordLynx), "
+                "cwg (custom WireGuard), a full proxy URL, or off to bypass all "
+                "configured proxies. Omit for automatic routing."
+            ),
+        }
+
         spec = {
             "openapi": "3.0.3",
             "info": {
@@ -413,7 +424,7 @@ class HLSProxyPagesMixin:
                             "headers": {"type": "object", "additionalProperties": {"type": "string"}},
                             "warp_off": {"type": "boolean", "default": False},
                             "proxy_off": {"type": "boolean", "default": False},
-                            "proxy": {"type": "string", "description": "Optional forced proxy URL or off."},
+                            "proxy": {"type": "string", "description": "Optional forced route: torproxy, nordvpn, cwg, a full proxy URL, or off."},
                         },
                     },
                     "DualSyncRequest": {
@@ -561,7 +572,13 @@ class HLSProxyPagesMixin:
                                         "properties": {
                                             "mediaflow_proxy_url": {"type": "string"},
                                             "api_password": {"type": "string"},
-                                            "urls": {"type": "array", "items": {"type": "object"}},
+                                            "urls": {
+                                                "type": "array",
+                                                "items": {
+                                                    "type": "object",
+                                                    "description": "Supported keys: destination_url, endpoint, request_headers, warp (off), proxy (off, torproxy, nordvpn, cwg or a proxy URL), disable_ssl.",
+                                                },
+                                            },
                                         },
                                     }
                                 }
@@ -587,6 +604,7 @@ class HLSProxyPagesMixin:
                         "description": "Proxy a manifest using the legacy url parameter.",
                         "parameters": [
                             {"name": "url", "in": "query", "schema": {"type": "string"}, "required": True},
+                            proxy_param,
                             {"name": "api_password", "in": "query", "schema": {"type": "string"}},
                         ],
                         "responses": {"200": {"description": "Proxied manifest or media response"}},
@@ -601,6 +619,7 @@ class HLSProxyPagesMixin:
                             {"name": "d", "in": "query", "schema": {"type": "string"}, "required": True, "description": "Destination manifest URL"},
                             {"name": "host", "in": "query", "schema": {"type": "string"}, "description": "Force a specific extractor instead of auto-detection"},
                             {"name": "max_res", "in": "query", "schema": {"type": "boolean"}, "description": "Serve only the highest video variant"},
+                            proxy_param,
                             {"name": "api_password", "in": "query", "schema": {"type": "string"}},
                         ],
                         "responses": {"200": {"description": "Proxied HLS manifest"}},
@@ -627,6 +646,7 @@ class HLSProxyPagesMixin:
                             {"name": "max_res", "in": "query", "schema": {"type": "boolean"}, "description": "Serve only the highest video variant"},
                             {"name": "key_id", "in": "query", "schema": {"type": "string"}},
                             {"name": "key", "in": "query", "schema": {"type": "string"}},
+                            proxy_param,
                             {"name": "api_password", "in": "query", "schema": {"type": "string"}},
                         ],
                         "responses": {"200": {"description": "Generated HLS manifest"}},
@@ -639,6 +659,7 @@ class HLSProxyPagesMixin:
                         "description": "Proxy the native MPD manifest for DASH streams.",
                         "parameters": [
                             {"name": "d", "in": "query", "schema": {"type": "string"}, "required": True, "description": "Destination MPD URL"},
+                            proxy_param,
                             {"name": "api_password", "in": "query", "schema": {"type": "string"}},
                         ],
                         "responses": {"200": {"description": "Proxied MPD manifest"}},
@@ -662,6 +683,7 @@ class HLSProxyPagesMixin:
                         "description": "Generic MediaFlow-style stream endpoint for direct proxying.",
                         "parameters": [
                             {"name": "d", "in": "query", "schema": {"type": "string"}, "required": True},
+                            proxy_param,
                             {"name": "api_password", "in": "query", "schema": {"type": "string"}},
                         ],
                         "responses": {"200": {"description": "Streamed response"}},
@@ -671,7 +693,7 @@ class HLSProxyPagesMixin:
                 "/playlist": {
                     "get": {
                         "summary": "Build a playlist",
-                        "description": "Combine multiple source URLs into a generated playlist.",
+                        "description": "Combine multiple source URLs into a generated playlist. Each ';'-separated definition supports |sort=true, |noproxy=true, |native_mpd=true, |warp=off and |proxy=off|torproxy|nordvpn|cwg.",
                         "parameters": [
                             {"name": "url", "in": "query", "schema": {"type": "string"}, "required": True},
                             {"name": "api_password", "in": "query", "schema": {"type": "string"}},
@@ -711,6 +733,7 @@ class HLSProxyPagesMixin:
                         "parameters": [
                             {"name": "host", "in": "query", "schema": {"type": "string"}},
                             {"name": "url", "in": "query", "schema": {"type": "string"}},
+                            proxy_param,
                             {"name": "api_password", "in": "query", "schema": {"type": "string"}},
                         ],
                         "responses": {"200": {"description": "Extractor response"}},
@@ -724,6 +747,7 @@ class HLSProxyPagesMixin:
                         "parameters": [
                             {"name": "host", "in": "query", "schema": {"type": "string"}},
                             {"name": "url", "in": "query", "schema": {"type": "string"}},
+                            proxy_param,
                             {"name": "api_password", "in": "query", "schema": {"type": "string"}},
                         ],
                         "responses": {"200": {"description": "Extractor response"}},
@@ -739,6 +763,7 @@ class HLSProxyPagesMixin:
                             {"name": "host", "in": "query", "schema": {"type": "string"}},
                             {"name": "url", "in": "query", "schema": {"type": "string"}},
                             {"name": "d", "in": "query", "schema": {"type": "string"}},
+                            proxy_param,
                             {"name": "api_password", "in": "query", "schema": {"type": "string"}},
                         ],
                         "responses": {"200": {"description": "Extractor response"}},
@@ -756,6 +781,7 @@ class HLSProxyPagesMixin:
                             {"name": "key_url", "in": "query", "schema": {"type": "string"}},
                             {"name": "key", "in": "query", "schema": {"type": "string"}},
                             {"name": "key_id", "in": "query", "schema": {"type": "string"}},
+                            proxy_param,
                             {"name": "api_password", "in": "query", "schema": {"type": "string"}},
                         ],
                         "responses": {"200": {"description": "Key response"}},
@@ -922,6 +948,7 @@ class HLSProxyPagesMixin:
                             {"name": "max_res", "in": "query", "schema": {"type": "boolean"}, "description": "Record only the highest video variant"},
                             {"name": "key_id", "in": "query", "schema": {"type": "string"}, "description": "ClearKey key ID for DRM-protected streams"},
                             {"name": "key", "in": "query", "schema": {"type": "string"}, "description": "ClearKey key for DRM-protected streams"},
+                            proxy_param,
                             {"name": "api_password", "in": "query", "schema": {"type": "string"}},
                         ],
                         "responses": {"200": {"description": "Recording started"}},
@@ -973,7 +1000,7 @@ class HLSProxyPagesMixin:
                                             "extractor": {"type": "string", "description": "Force a specific extractor instead of auto-detection"},
                                             "max_res": {"type": "boolean", "description": "Record only the highest video variant"},
                                             "warp": {"type": "string", "enum": ["off"], "description": "Bypass WARP for this recording"},
-                                            "proxy": {"type": "string", "enum": ["off"], "description": "Bypass configured proxies for this recording"},
+                                            "proxy": {"type": "string", "enum": ["off", "torproxy", "nordvpn", "cwg"], "description": "Bypass all proxies (off) or force a route (torproxy, nordvpn, cwg) for this recording"},
                                             "disable_ssl": {"type": "string", "enum": ["1"], "description": "Disable SSL verification for this recording"},
                                         },
                                     }
@@ -1107,7 +1134,8 @@ class HLSProxyPagesMixin:
                 endpoint = item.get("endpoint", "/proxy/stream")
                 req_headers = item.get("request_headers", {})
                 bypass_warp = item.get("warp") == "off"
-                bypass_proxies = item.get("proxy") == "off"
+                proxy_route = str(item.get("proxy") or "").strip()
+                bypass_proxies = proxy_route == "off"
 
                 # Costruisci query params
                 encoded_url = urllib.parse.quote(dest_url, safe="")
@@ -1130,6 +1158,10 @@ class HLSProxyPagesMixin:
                 # Aggiungi bypass proxy se richiesto
                 if bypass_proxies:
                     params.append("proxy=off")
+                elif proxy_route and proxy_route not in ("on", "true", "1"):
+                    params.append(
+                        f"proxy={urllib.parse.quote(proxy_route, safe='')}"
+                    )
 
                 # Costruisci URL finale
                 query_string = "&".join(params)
@@ -1415,6 +1447,62 @@ class HLSProxyPagesMixin:
         except Exception as e:
             logger.error(f"Speedtest failed: {e}")
             return web.json_response({"error": str(e)}, status=500)
+
+    async def handle_admin_api_test_extractors(self, request):
+        if not check_password(request):
+            return web.Response(status=401, text="Unauthorized")
+        from extractors.test_urls import REMOTE_TEST_URLS_URL
+
+        urls = {}
+        try:
+            async with ClientSession(timeout=ClientTimeout(total=10)) as session:
+                async with session.get(REMOTE_TEST_URLS_URL) as resp:
+                    if resp.status != 200:
+                        raise RuntimeError(f"gist HTTP {resp.status}")
+                    remote = await resp.json(content_type=None)
+                    if not isinstance(remote, dict):
+                        raise RuntimeError("gist JSON is not an object")
+                    urls = {
+                        k: v for k, v in remote.items()
+                        if isinstance(v, str)
+                    }
+        except Exception as e:
+            logger.warning("Test URL gist fetch failed: %s", e)
+            return web.json_response(
+                {"error": f"Could not load test URLs from gist: {e}",
+                 "results": [], "skipped": []},
+                status=502,
+            )
+
+        headers = dict(request.headers)
+        configured = {k: u for k, u in urls.items() if u}
+        skipped = sorted(k for k, u in urls.items() if not u)
+        results = []
+        sem = asyncio.Semaphore(5)
+
+        async def _test(name, url):
+            async with sem:
+                entry = {"extractor": name, "url": url, "ok": False}
+                try:
+                    extractor = await self.get_extractor(url, headers, host=name)
+                    timeout = getattr(extractor, "REQUEST_TIMEOUT_TOTAL", 30)
+                    result = await asyncio.wait_for(
+                        extractor.extract(url), timeout=timeout
+                    )
+                    destination = (result or {}).get("destination_url") or ""
+                    entry["ok"] = bool(destination)
+                    entry["destination_url"] = destination
+                    if not destination:
+                        entry["error"] = "no destination_url"
+                except asyncio.TimeoutError:
+                    entry["error"] = "timeout"
+                except Exception as e:
+                    entry["error"] = f"{type(e).__name__}: {e}"[:300]
+                results.append(entry)
+
+        await asyncio.gather(*(_test(k, u) for k, u in configured.items()))
+        results.sort(key=lambda r: (r["ok"], r["extractor"]))
+        return web.json_response({"results": results, "skipped": skipped})
 
     def _ensure_speedtest_exe(self):
         import subprocess

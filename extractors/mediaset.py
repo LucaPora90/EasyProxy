@@ -292,9 +292,10 @@ class MediasetExtractor(BaseExtractor):
         params = {
             "format": "SMIL",
             "auth": bearer,
-            "formats": "MPEG4,M3U,MPEG-DASH",
-            "assetTypes": (
-                "HD,browser,widevine,geoIT|geoNo:"
+            "formats": str(selector.get("formats") or "MPEG4,M3U,MPEG-DASH"),
+            "assetTypes": str(
+                selector.get("assetTypes")
+                or "HD,browser,widevine,geoIT|geoNo:"
                 "HR,browser,widevine,geoIT|geoNo:"
                 "SD,browser,widevine,geoIT|geoNo"
             ),
@@ -319,14 +320,20 @@ class MediasetExtractor(BaseExtractor):
         manifest_text = await self._get_text(
             manifest_url, self._media_headers()
         )
-        keys = await self._request_keys(
-            extract_widevine_pssh(manifest_text),
-            release_pid,
-            account_id,
-            bearer,
-        )
-        if not keys:
-            raise RuntimeError("Mediaset license did not contain content keys")
+        try:
+            pssh = extract_widevine_pssh(manifest_text)
+        except RuntimeError:
+            # Unencrypted manifest (no Widevine): play directly, no license.
+            keys = {}
+        else:
+            keys = await self._request_keys(
+                pssh,
+                release_pid,
+                account_id,
+                bearer,
+            )
+            if not keys:
+                raise RuntimeError("Mediaset license did not contain content keys")
         return {
             "manifest_url": manifest_url,
             "manifest_text": manifest_text,

@@ -27,6 +27,53 @@ import psutil
 logger = logging.getLogger(__name__)
 
 
+_FLARESOLVERR_TURNSTILE_IMPORT = (
+    "from selenium.common import TimeoutException",
+    "from selenium.common import StaleElementReferenceException, TimeoutException",
+)
+_FLARESOLVERR_TURNSTILE_READ = (
+    '        turnstile_token = token_input.get_attribute("value")\n'
+    "        if turnstile_token:",
+    "        try:\n"
+    '            turnstile_token = token_input.get_attribute("value")\n'
+    "        except StaleElementReferenceException:\n"
+    "            # The widget solved and the page callback already submitted\n"
+    "            # the form: the element is gone, the new page is the result.\n"
+    "            return None\n"
+    "        if turnstile_token:",
+)
+
+
+def patch_turnstile_navigation(script_path: str) -> None:
+    """Tolerate Turnstile callbacks that navigate away mid-solve.
+
+    FlareSolverr 3.5.x reads the Turnstile token after clicking the widget; on
+    pages whose callback immediately submits a form that read raises
+    StaleElementReferenceException and the whole solve fails even though the
+    challenge was solved.  Patch the vendored source in place, idempotently.
+    """
+    path = Path(script_path).with_name("flaresolverr_service.py")
+    try:
+        source = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    if "except StaleElementReferenceException" in source:
+        return
+    replacements = (_FLARESOLVERR_TURNSTILE_IMPORT, _FLARESOLVERR_TURNSTILE_READ)
+    if any(old not in source for old, _ in replacements):
+        logger.warning(
+            "FlareSolverr source layout changed: Turnstile navigation patch skipped"
+        )
+        return
+    for old, new in replacements:
+        source = source.replace(old, new)
+    try:
+        path.write_text(source, encoding="utf-8")
+        logger.info("Patched FlareSolverr Turnstile handler for callback navigation")
+    except OSError as exc:
+        logger.warning("Unable to patch FlareSolverr source %s: %s", path, exc)
+
+
 class FlareSolverrError(RuntimeError):
     """Raised when the local FlareSolverr process/API cannot solve a request."""
 
@@ -148,12 +195,19 @@ class FlareSolverrManager:
         if self._process is not None and self._process.returncode is None:
             return
 
+        # An explicitly configured API may already be managed outside this
+        # process (e.g. a container publishing the API port).  Use it as-is.
+        if await self._api_available():
+            return
+
         command = self._command()
         if not command:
             raise FlareSolverrError(
                 "FlareSolverr non installato: configura FLARESOLVERR_COMMAND "
                 "oppure ricostruisci l'immagine EasyProxy."
             )
+        if command[-1].endswith("flaresolverr.py"):
+            patch_turnstile_navigation(command[-1])
 
         parsed_api = urlparse(self.api_url)
         api_host = parsed_api.hostname or "127.0.0.1"
@@ -171,11 +225,8 @@ class FlareSolverrManager:
             }
         )
 
-        # An explicitly configured API may already be managed outside this
-        # process.  The default local API is spawned below when needed.
+        # The default local API is spawned below when needed.
         if api_host not in {"127.0.0.1", "localhost", "::1"}:
-            if await self._api_available():
-                return
             raise FlareSolverrError(f"FlareSolverr API non raggiungibile: {self.api_url}")
 
         try:
@@ -284,6 +335,7 @@ class FlareSolverrManager:
         proxy_url: str | None,
         cookie_header: str | None = None,
         allow_direct: bool = False,
+        tabs_till_verify: int | None = None,
     ) -> FlareSolverrSolution:
         """Solve one challenge and stop the owned process before returning."""
         if not proxy_url and not allow_direct:
@@ -309,6 +361,8 @@ class FlareSolverrManager:
                     "returnOnlyCookies": False,
                     "disableMedia": True,
                 }
+                if tabs_till_verify is not None:
+                    payload["tabs_till_verify"] = int(tabs_till_verify)
                 cookies = cookie_header_to_list(cookie_header)
                 if cookies:
                     payload["cookies"] = cookies
@@ -362,8 +416,11 @@ async def solve_cloudflare(
     proxy_url: str | None,
     cookie_header: str | None = None,
     allow_direct: bool = False,
+    tabs_till_verify: int | None = None,
 ) -> FlareSolverrSolution:
-    return await _MANAGER.solve(url, proxy_url, cookie_header, allow_direct)
+    return await _MANAGER.solve(
+        url, proxy_url, cookie_header, allow_direct, tabs_till_verify
+    )
 
 
 async def shutdown_flare_solver() -> None:

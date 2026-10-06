@@ -93,7 +93,8 @@ class MixdropExtractor:
             qs = f"?{parsed.query}" if parsed.query else ""
 
             mixdrop_domains = [
-                "mixdrop.co", "mixdrop.vip", "m1xdrop.bz", "m1xdrop.net",
+                "mxdrop.top", "m1xdrop.bz", "m1xdrop.net",
+                "mixdrop.co", "mixdrop.vip",
                 "mixdrop.ch", "mixdrop.ps", "mixdrop.ag",
             ]
             mirrors = [f"{parsed.scheme}://{d}{path}{qs}" for d in mixdrop_domains]

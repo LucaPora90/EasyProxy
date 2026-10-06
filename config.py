@@ -46,7 +46,7 @@ _SOCKET_CHECK_EXECUTOR = ThreadPoolExecutor(
 )
 
 
-APP_VERSION = "2.13.10"
+APP_VERSION = "2.13.26"
 
 _MEMORY_PROFILE_FRAMES = 15
 _memory_profile_baseline = None
@@ -222,6 +222,23 @@ class ProxyList(list):
     def __init__(self, values=(), strict: bool = False):
         super().__init__(values)
         self.strict = strict
+
+
+PROXY_ALIAS_NAMES = ("torproxy", "nordvpn", "cwg")
+
+
+def resolve_proxy_alias(value: str | None) -> str | None:
+    """Translate proxy=torproxy|nordvpn|cwg into the tunnel's local SOCKS URL."""
+    name = (value or "").strip().lower()
+    if name not in PROXY_ALIAS_NAMES:
+        return value
+    if name == "torproxy":
+        from services import tor_proxy
+        bind = tor_proxy.get_bind()
+    else:
+        from services import wg_tunnels
+        bind = wg_tunnels.get_bind("nordvpn" if name == "nordvpn" else "custom")
+    return f"socks5h://{bind}" if bind else value
 
 
 def get_preferred_proxy(proxies: list | None) -> str | None:
@@ -719,6 +736,14 @@ def mark_proxy_dead(proxy_url: str, dead_duration: int = 300):
     with _proxy_lock:
         DEAD_PROXIES[proxy_url] = now + dead_duration
     logging.warning(f"Proxy {proxy_url} marked as dead for {dead_duration} seconds.")
+
+
+def clear_proxy_dead(proxy_url: str) -> None:
+    """Drop a proxy from the dead cache after a successful recovery."""
+    if not proxy_url:
+        return
+    with _proxy_lock:
+        DEAD_PROXIES.pop(proxy_url, None)
 
 
 def clear_proxy_affinity():

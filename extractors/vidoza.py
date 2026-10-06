@@ -12,11 +12,14 @@ class VidozaExtractor(BaseExtractor):
     async def extract(self, url: str, **kwargs) -> dict:
         """Extract Vidoza URL."""
         parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+
+        # vidoza.in now serves the ShareVideo platform (SPA + JSON API)
+        if host.endswith("vidoza.in"):
+            return await self._extract_sharevideo(url, parsed)
 
         # Accept vidoza + videzz
-        if not parsed.hostname or not (
-            parsed.hostname.endswith("vidoza.net") or parsed.hostname.endswith("videzz.net")
-        ):
+        if not (host.endswith("vidoza.net") or host.endswith("videzz.net")):
             raise ExtractorError("VIDOZA: Invalid domain")
 
         headers = self.base_headers.copy()
@@ -59,6 +62,40 @@ class VidozaExtractor(BaseExtractor):
         return {
             "destination_url": mp4_url,
             "request_headers": headers,
+            "mediaflow_endpoint": self.mediaflow_endpoint,
+        }
+
+    async def _extract_sharevideo(self, url: str, parsed) -> dict:
+        """Resolve a vidoza.in /video/<id> page to its direct CDN MP4."""
+        video_id = parsed.path.rstrip("/").rsplit("/", 1)[-1]
+        if not re.fullmatch(r"[0-9a-fA-F]{24}", video_id):
+            raise ExtractorError(f"VIDOZA: unsupported vidoza.in URL: {url}")
+
+        headers = self.base_headers.copy()
+        headers.update({
+            "accept": "application/json",
+            "x-client-type": "web",
+            "secret-key": "5TIvw5cpc0",
+            "referer": url,
+        })
+        resp = await self._make_request(
+            "https://vidoza.in/client/video/detailsOfVideo",
+            headers=headers,
+            params={
+                "userId": "000000000000000000000000",
+                "videoId": video_id,
+                "videoType": 1,
+            },
+        )
+
+        video = (resp.json or {}).get("detailsOfVideo") or {}
+        mp4_url = video.get("videoUrl")
+        if not mp4_url:
+            raise ExtractorError("VIDOZA: vidoza.in API returned no video URL")
+
+        return {
+            "destination_url": mp4_url,
+            "request_headers": {},
             "mediaflow_endpoint": self.mediaflow_endpoint,
         }
 

@@ -514,6 +514,21 @@
             display: none;
         }
 
+        .url-item-option select {
+            background: transparent;
+            border: none;
+            color: inherit;
+            font: inherit;
+            cursor: pointer;
+            outline: none;
+            padding: 0;
+        }
+
+        .url-item-option select option {
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+        }
+
         @keyframes slideIn {
             from { opacity: 0; transform: translateX(-16px); }
             to { opacity: 1; transform: translateX(0); }
@@ -683,6 +698,7 @@
         @media (max-width: 768px) {
             .container { padding: 1rem; }
             .nav-bar { flex-direction: column; gap: 1rem; align-items: flex-start; }
+            .nav-bar .back-link { align-self: flex-end; }
             .input-row { flex-direction: column; }
             .result-actions { flex-direction: column; }
             .result-actions .btn { width: 100%; justify-content: center; }
@@ -928,7 +944,7 @@
                     this.showToast('URL already in list', 'warning');
                     return;
                 }
-                this.urls.push({ url, sort: false, noProxy: false, nativeMpd: false, warp: false, proxy: false });
+                this.urls.push({ url, sort: false, noProxy: false, nativeMpd: false, warp: false, proxy: 'auto' });
                 this.elements.urlInput.value = '';
                 this.elements.urlInput.focus();
                 this.renderList();
@@ -992,19 +1008,28 @@
                                 <input type="checkbox" data-opt="warp" data-index="${i}" ${item.warp ? 'checked' : ''}>
                                 Warp Off
                             </label>
-                            <label class="url-item-option ${item.proxy ? 'active' : ''}">
-                                <input type="checkbox" data-opt="proxy" data-index="${i}" ${item.proxy ? 'checked' : ''}>
-                                Proxy Off
+                            <label class="url-item-option ${item.proxy && item.proxy !== 'auto' ? 'active' : ''}">
+                                <select data-opt="proxy" data-index="${i}" title="Auto: transport route → extractor → global → WARP">
+                                    <option value="auto" ${!item.proxy || item.proxy === 'auto' ? 'selected' : ''}>Proxy: Auto</option>
+                                    <option value="off" ${item.proxy === 'off' ? 'selected' : ''}>Proxy: Off</option>
+                                    <option value="torproxy" ${item.proxy === 'torproxy' ? 'selected' : ''}>Proxy: Tor</option>
+                                    <option value="nordvpn" ${item.proxy === 'nordvpn' ? 'selected' : ''}>Proxy: NordVPN</option>
+                                    <option value="cwg" ${item.proxy === 'cwg' ? 'selected' : ''}>Proxy: WireGuard</option>
+                                </select>
                             </label>
                         </div>
                     `;
                     el.querySelector('.url-item-remove').addEventListener('click', () => this.removeUrl(i));
-                    el.querySelectorAll('.url-item-option input').forEach(cb => {
-                        cb.addEventListener('change', (e) => {
+                    el.querySelectorAll('.url-item-option input, .url-item-option select').forEach(control => {
+                        control.addEventListener('change', (e) => {
                             const opt = e.target.dataset.opt;
                             const idx = parseInt(e.target.dataset.index);
-                            this.urls[idx][opt] = e.target.checked;
-                            e.target.closest('.url-item-option').classList.toggle('active', e.target.checked);
+                            const isCheckbox = e.target.type === 'checkbox';
+                            this.urls[idx][opt] = isCheckbox ? e.target.checked : e.target.value;
+                            e.target.closest('.url-item-option').classList.toggle(
+                                'active',
+                                isCheckbox ? e.target.checked : e.target.value !== 'auto'
+                            );
                             this.generate();
                         });
                     });
@@ -1026,7 +1051,7 @@
                         let rawUrl = p.url;
                         let extraParams = '';
                         if (p.warp) extraParams += '&warp=off';
-                        if (p.proxy) extraParams += '&proxy=off';
+                        if (p.proxy && p.proxy !== 'auto') extraParams += '&proxy=' + encodeURIComponent(p.proxy);
                         const pw = this.elements.apiPassword.value.trim();
                         if (pw) extraParams += `&api_password=${encodeURIComponent(pw)}`;
                         const ck = rawUrl.match(/[?&]clearkey=([^&]+)/i);
@@ -1047,7 +1072,7 @@
                     if (p.noProxy) def += '|noproxy=true';
                     if (p.nativeMpd) def += '|native_mpd=true';
                     if (p.warp) def += '|warp=off';
-                    if (p.proxy) def += '|proxy=off';
+                    if (p.proxy && p.proxy !== 'auto') def += '|proxy=' + p.proxy;
                     return encodeURIComponent(def);
                 });
                 const urlString = encoded.join(';');

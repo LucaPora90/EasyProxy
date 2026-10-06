@@ -18,6 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tar \
     nodejs \
     node-undici \
+    npm \
     netcat-openbsd \
     procps \
     ffmpeg \
@@ -33,7 +34,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # FlareSolverr is part of this image, but EasyProxy starts it only on-demand
 # when VixSrc returns a Cloudflare challenge.
-ARG FLARESOLVERR_VERSION=3.5.0
+ARG FLARESOLVERR_VERSION=3.5.2
 RUN set -eux; \
     git clone --depth 1 --branch "v${FLARESOLVERR_VERSION}" \
         https://github.com/FlareSolverr/FlareSolverr.git /opt/flaresolverr; \
@@ -90,6 +91,11 @@ ENV FLARESOLVERR_LOG_LEVEL=error
 
 # Copia esplicita
 COPY . .
+
+# Node dependencies for the VidXgo TLS-fingerprint runner (tls-client ->
+# ffi-napi, which ships prebuilds for linux-x64/arm64; --ignore-scripts keeps
+# the image build toolchain-free).
+RUN npm install --omit=dev --ignore-scripts --no-audit --no-fund
 
 # Windows checkouts may carry CRLF into shell scripts; Linux must execute LF.
 RUN sed -i 's/\r$//' entrypoint.sh scripts/warp_userspace_ctl.sh scripts/wg_tunnel_ctl.sh

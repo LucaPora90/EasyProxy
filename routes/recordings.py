@@ -106,8 +106,8 @@ def setup_recording_routes(app, recording_manager):
         qsl = parse_qsl(parsed.query)
         if warp == 'off':
             qsl.append(('warp', 'off'))
-        if proxy == 'off':
-            qsl.append(('proxy', 'off'))
+        if proxy and proxy != 'on':
+            qsl.append(('proxy', str(proxy).strip()))
         if disable_ssl == '1':
             qsl.append(('disable_ssl', '1'))
         url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, urlencode(qsl), parsed.fragment))
@@ -361,6 +361,20 @@ def setup_recording_routes(app, recording_manager):
         duration = request.query.get('duration')
         extractor = (request.query.get('extractor') or '').strip() or None
         max_res = request.query.get('max_res', '').strip().lower() in ('1', 'true', 'yes', 'on')
+        warp = request.query.get('warp')
+        proxy = request.query.get('proxy')
+
+        # Promote routing flags onto the source URL so the recording manager
+        # forwards them to its internal proxy request.
+        if warp == 'off' or (proxy and proxy != 'on'):
+            from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
+            parsed = urlparse(url)
+            qsl = parse_qsl(parsed.query)
+            if warp == 'off':
+                qsl.append(('warp', 'off'))
+            if proxy and proxy != 'on':
+                qsl.append(('proxy', str(proxy).strip()))
+            url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, urlencode(qsl), parsed.fragment))
 
         # ClearKey parameters for DRM-protected streams
         key_id = request.query.get('key_id')
@@ -423,6 +437,10 @@ def setup_recording_routes(app, recording_manager):
             proxy_params['host'] = extractor
         if max_res:
             proxy_params['max_res'] = 'true'
+        if warp == 'off':
+            proxy_params['warp'] = 'off'
+        if proxy and proxy != 'on':
+            proxy_params['proxy'] = str(proxy).strip()
         if key_id:
             proxy_params['key_id'] = key_id
         if key:

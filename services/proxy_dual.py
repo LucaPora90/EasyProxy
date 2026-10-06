@@ -15,7 +15,7 @@ from urllib.parse import urljoin
 import aiohttp
 
 import config_store
-from config import check_password
+from config import check_password, resolve_proxy_alias
 from services.proxy_shared import (
     BYPASS_PROXIES_CONTEXT,
     BYPASS_WARP_CONTEXT,
@@ -226,7 +226,11 @@ class HLSProxyDualMixin:
     def _routing(spec: dict) -> tuple[bool, bool, str | None]:
         raw_proxy = str(spec.get("proxy") or spec.get("proxy_url") or "").strip()
         proxy_off = raw_proxy.lower() == "off" or bool(spec.get("proxy_off"))
-        forced_proxy = None if proxy_off or not raw_proxy else urllib.parse.unquote(raw_proxy)
+        forced_proxy = (
+            None
+            if proxy_off or not raw_proxy
+            else resolve_proxy_alias(urllib.parse.unquote(raw_proxy))
+        )
         warp_off = str(spec.get("warp") or "").lower() == "off" or bool(spec.get("warp_off"))
         return warp_off, proxy_off, forced_proxy
 
@@ -374,15 +378,16 @@ class HLSProxyDualMixin:
         variants, audios = _master_entries(text, base_url)
         if not variants:
             return base_url, requested or 1080, None, False
-        if requested >= 2160 and not any(
-            (item.get("height") or 0) >= requested - 16 for item in variants
-        ):
-            raise DualLinksError(409, "requested 4K video variant is unavailable")
-        target = requested or max(item["height"] for item in variants)
-        exact = [item for item in variants if item["height"] == target]
+        def is_4k(item: dict) -> bool:
+            return (item.get("width") or 0) >= 3800 or (item.get("height") or 0) >= 2144
+
+        exact = [item for item in variants if is_4k(item)] if requested >= 2160 else []
+        if not exact:
+            target = requested or max(item["height"] for item in variants)
+            exact = [item for item in variants if item["height"] == target]
         candidates = exact or sorted(
             variants,
-            key=lambda item: (abs((item["height"] or target) - target), -(item["height"] or 0)),
+            key=lambda item: (abs((item["height"] or 1080) - (requested or 1080)), -(item["height"] or 0)),
         )
         selected = candidates[0]
         group = selected["attributes"].get("AUDIO", "")
@@ -398,7 +403,7 @@ class HLSProxyDualMixin:
                 key=lambda item: (item["height"] or 10_000, item["width"] or 10_000),
             )["url"]
             muxed_reference = reference != selected["url"]
-        return selected["url"], selected["height"] or target or 1080, reference, muxed_reference
+        return selected["url"], 2160 if is_4k(selected) else (selected["height"] or target or 1080), reference, muxed_reference
 
     @staticmethod
     def _pick_audio(
@@ -695,7 +700,7 @@ class HLSProxyDualMixin:
 
         video_spec = body.get("video") or body.get("video_url")
         audio_spec = body.get("audio") or body.get("audio_url")
-        requested_resolution = int(body.get("resolution") or 0)
+        requested_resolution = int(body.get("resolution") or 2160)
         required_video_resolution = 2160 if requested_resolution >= 2160 else 0
         # These two sources are independent. Resolve both concurrently so a
         # slow extractor/proxy on one side does not delay starting the other.

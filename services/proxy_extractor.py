@@ -77,6 +77,7 @@ class HLSProxyExtractorHandlerMixin:
             selected_proxy = urllib.parse.unquote(raw_proxy)
             if "://" not in selected_proxy and "%3a" in selected_proxy.lower():
                 selected_proxy = urllib.parse.unquote(selected_proxy)
+            selected_proxy = _config.resolve_proxy_alias(selected_proxy)
         if selected_proxy and _config.is_warp_proxy_url(selected_proxy) and (
             bypass_warp or not _config._get_dynamic_warp_enabled()
         ):
@@ -139,6 +140,7 @@ class HLSProxyExtractorHandlerMixin:
                         "turbovidplay",
                         "livetv",
                         "f16px",
+                        "byse (alias of f16px)",
                         "guardabest",
                         "mediaset",
                         "wittytv",
@@ -190,6 +192,8 @@ class HLSProxyExtractorHandlerMixin:
             extractor_kwargs = dict(request.query)
             extractor_kwargs.pop('url', None) # Remove to avoid duplicate argument error
             extractor_kwargs.pop('d', None)   # Remove to avoid duplicate argument error
+            if selected_proxy:
+                extractor_kwargs['proxy'] = selected_proxy
             extractor_kwargs['request_headers'] = dict(request.headers)
 
             logger.debug(f"Extractor Debug: Initial bypass_warp from query: {bypass_warp}")

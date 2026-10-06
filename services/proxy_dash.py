@@ -2,7 +2,7 @@ import re
 import time
 import aiohttp
 from urllib.parse import urljoin, urlparse, unquote
-from config import STRICT_PROXY_CONTEXT
+from config import STRICT_PROXY_CONTEXT, resolve_proxy_alias
 import services.proxy_shared as _shared
 from services.proxy_shared import (
     logger,
@@ -355,7 +355,7 @@ class HLSProxyDashMixin:
             # ✅ Use pooled session for better performance
             proxy_used = None
             raw_proxy = request.query.get("proxy") or None
-            forced_proxy = raw_proxy
+            forced_proxy = resolve_proxy_alias(raw_proxy)
             if raw_proxy and raw_proxy.lower() == "off":
                 forced_proxy = None
                 _shared.BYPASS_PROXIES_CONTEXT.set(True)

@@ -11,6 +11,7 @@ import stat
 import time
 
 import aiohttp
+import psutil
 from aiohttp_socks import ProxyConnector
 
 import config_store
@@ -467,6 +468,68 @@ async def _pin_default_exit() -> None:
         await _pin_current_exit()
 
 
+def _stale_tor_pids() -> list[int]:
+    """Visible Tor processes holding our data directory or configured ports."""
+    try:
+        socks_port = _split_bind(get_bind())[1]
+    except TorError:
+        return []
+    ports = {socks_port, TOR_CONTROL_PORT}
+    candidates: set[int] = set()
+    try:
+        for conn in psutil.net_connections(kind="tcp"):
+            if (
+                conn.status == psutil.CONN_LISTEN
+                and conn.pid
+                and conn.laddr
+                and conn.laddr.port in ports
+            ):
+                candidates.add(conn.pid)
+    except (psutil.Error, OSError):
+        pass
+    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+        try:
+            if (proc.info["name"] or "").lower() != "tor":
+                continue
+            cmdline = " ".join(proc.info["cmdline"] or [])
+            if proc.info["pid"] in candidates or TORRC_PATH in cmdline:
+                candidates.add(proc.info["pid"])
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+    skip = {os.getpid(), _process.pid if _process else -1}
+    pids = []
+    for pid in candidates - skip:
+        try:
+            if (psutil.Process(pid).name() or "").lower() == "tor":
+                pids.append(pid)
+        except (psutil.Error, OSError):
+            continue
+    return pids
+
+
+async def _terminate_stale_tor() -> list[int]:
+    """Stop orphan Tor instances that block our data directory or ports."""
+    pids = await asyncio.to_thread(_stale_tor_pids)
+    victims = []
+    for pid in pids:
+        try:
+            psutil.Process(pid).terminate()
+            victims.append(pid)
+        except (psutil.Error, OSError):
+            continue
+    if not victims:
+        return []
+    await asyncio.sleep(3)
+    for pid in victims:
+        try:
+            proc = psutil.Process(pid)
+            if proc.is_running():
+                proc.kill()
+        except (psutil.Error, OSError):
+            continue
+    return victims
+
+
 async def _start() -> None:
     global _process, _bootstrap_level
     async with _lock:
@@ -508,10 +571,17 @@ async def _start() -> None:
                             )
                         )
                         if stale_instance and time.monotonic() + 5 < deadline:
-                            logger.warning(
-                                "Another Tor instance is still shutting down; retrying in 5s"
-                            )
-                            await asyncio.sleep(5)
+                            killed = await _terminate_stale_tor()
+                            if killed:
+                                logger.warning(
+                                    "Terminated stale Tor process(es) %s holding the proxy; retrying",
+                                    killed,
+                                )
+                            else:
+                                logger.warning(
+                                    "Another Tor instance is still shutting down; retrying in 5s"
+                                )
+                                await asyncio.sleep(5)
                             respawn = True
                             break
                         raise TorError(

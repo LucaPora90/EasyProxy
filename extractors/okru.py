@@ -21,7 +21,9 @@ class OkruExtractor(BaseExtractor):
             
             data_options = div.get("data-options")
             data = json.loads(data_options)
-            metadata = json.loads(data["flashvars"]["metadata"])
+            metadata = data["flashvars"]["metadata"]
+            if isinstance(metadata, str):
+                metadata = json.loads(metadata)
             final_url = (
                 metadata.get("hlsMasterPlaylistUrl") or metadata.get("hlsManifestUrl") or metadata.get("ondemandHls")
             )

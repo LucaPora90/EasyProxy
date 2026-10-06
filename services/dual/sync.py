@@ -179,7 +179,7 @@ class SyncEngine:
                     status_code = response.status
                     response_headers = dict(response.headers)
                     if status_code in (301, 302, 303, 307, 308):
-                        location = response_headers.get("location", "").strip()
+                        location = (response.headers.get("location") or "").strip()
                         if not location:
                             raise ValueError("media redirect has no location")
                         next_url = urljoin(current_url, location)
@@ -545,7 +545,10 @@ class SyncEngine:
             raise
         minimum_size = min(160000, int(sample_seconds * 8000 * 2 * .75))
         if process.returncode or not output.exists() or output.stat().st_size < minimum_size:
-            raise RuntimeError((error.decode(errors="replace") or "sample decode failed")[:300])
+            err = error.decode(errors="replace")
+            if "matches no streams" in err or "0:a:0" in err:
+                raise RuntimeError("reference stream contains no audio track")
+            raise RuntimeError((err or "sample decode failed")[:300])
 
     @staticmethod
     def _envelope(path: Path):

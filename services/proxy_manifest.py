@@ -225,6 +225,7 @@ class HLSProxyManifestHandlerMixin:
             selected_proxy = urllib.parse.unquote(raw_proxy)
             if "://" not in selected_proxy and "%3a" in selected_proxy.lower():
                 selected_proxy = urllib.parse.unquote(selected_proxy)
+            selected_proxy = _config.resolve_proxy_alias(selected_proxy)
         if selected_proxy and _config.is_warp_proxy_url(selected_proxy) and (
             bypass_warp or not _config._get_dynamic_warp_enabled()
         ):
@@ -386,7 +387,7 @@ class HLSProxyManifestHandlerMixin:
                     force_refresh=force_refresh,
                     request_headers=combined_headers,
                     bypass_warp=bypass_warp,
-                    proxy=request.query.get("proxy")
+                    proxy=selected_proxy
                 )
                 resolved_key = self._extractor_key_for_instance(extractor)
                 if not extractor_key or (resolved_key and not resolved_key.startswith("generic")):
@@ -429,6 +430,7 @@ class HLSProxyManifestHandlerMixin:
                     selected_proxy = urllib.parse.unquote(raw_proxy)
                     if "://" not in selected_proxy and "%3a" in selected_proxy.lower():
                         selected_proxy = urllib.parse.unquote(selected_proxy)
+                    selected_proxy = _config.resolve_proxy_alias(selected_proxy)
                     # ✅ FIX: Se bypass_warp è True e il proxy selezionato è WARP,
                     # ignoralo per evitare che un _session_proxy stantio su un estrattore
                     # cache-forzato (es. GenericHLSExtractor) prevalga su warp=off.
@@ -767,6 +769,8 @@ class HLSProxyManifestHandlerMixin:
                     params += "&warp=off"
                 if bypass_proxies:
                     params += "&proxy=off"
+                if selected_proxy and not bypass_proxies:
+                    params += f"&proxy={urllib.parse.quote(selected_proxy, safe='')}"
                 if self._request_forces_max_res(request, extractor_key, "mpd"):
                     params += "&max_res=true"
                 if extractor_key:

@@ -345,7 +345,12 @@ async def sync_audio_data(body: dict, request: web.Request) -> dict:
     except (ValueError, RuntimeError) as exc:
         message = str(exc) or "audio sync failed"
         lowered = message.lower()
-        code = "SYNC_BUSY" if "busy" in lowered else "SYNC_NETWORK"
+        if "no audio track" in lowered:
+            code = "SYNC_NO_REFERENCE_AUDIO"
+        elif "busy" in lowered:
+            code = "SYNC_BUSY"
+        else:
+            code = "SYNC_NETWORK"
         raise DualServiceError(422, {"code": code, "message": message}) from exc
     await offsets.report(body, result)
     return result

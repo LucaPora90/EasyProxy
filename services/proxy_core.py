@@ -14,6 +14,7 @@ import hashlib
 import socket
 import config as _config
 import config_store
+import services.wg_tunnels as wg_tunnels
 from services.session_lifetime import retire_session
 from services.socks_bridge import close_socks_bridges
 
@@ -507,6 +508,13 @@ class HLSProxyCoreMixin:
                 rc = await self._run_warp_control("restart")
                 if rc != 0:
                     return {"status": "error", "message": "wireproxy restart failed"}
+                # The control script returns as soon as wireproxy is spawned;
+                # probing now races the SOCKS listener bind.
+                if not await self._wait_for_warp_socket(timeout=10.0):
+                    return {
+                        "status": "error",
+                        "message": "wireproxy restarted but SOCKS port 1080 did not come up",
+                    }
                 healthy, reason = await self._probe_warp(timeout_sec=8)
                 self.warp_status = "Connected" if healthy else "Disconnected"
                 self._warp_status_reason = reason
@@ -868,6 +876,7 @@ class HLSProxyCoreMixin:
 
         if forced_proxy:
             forced_proxy = urllib.parse.unquote(forced_proxy)
+            forced_proxy = _config.resolve_proxy_alias(forced_proxy)
             if forced_proxy.lower() == "off":
                 forced_proxy = None
 
@@ -1033,6 +1042,20 @@ class HLSProxyCoreMixin:
 
         session = await self._get_session(prefer_default_family=prefer_default_family)
         return SharedSessionWrapper(session), None
+
+    async def _recover_tunnel_proxy(self, proxy_url: str | None) -> bool:
+        """Reconnect the local WireGuard tunnel behind proxy_url and refresh sessions.
+
+        Returns True only when the tunnel was actually restarted and its SOCKS
+        bind is ready, so callers can retry the failed request.
+        """
+        slot = wg_tunnels.slot_for_proxy_url(proxy_url)
+        if not slot or not await wg_tunnels.reconnect(slot):
+            return False
+        _config.clear_proxy_dead(proxy_url)
+        await self._invalidate_proxy_session(proxy_url, invalidate_streams=True)
+        logger.warning("[NET] Recovered WireGuard tunnel %s for %s", slot, proxy_url)
+        return True
 
     async def _invalidate_proxy_session(
         self,

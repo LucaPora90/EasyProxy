@@ -20,6 +20,7 @@ import os
 import re
 import shutil
 import time
+import urllib.parse
 
 import aiohttp
 
@@ -54,6 +55,10 @@ SERVER_CACHE_IDLE = 300
 # tunnel (endpoint changed, session dropped) recovers on its own.
 HEALTH_CHECK_EVERY = 10
 HEALTH_FAILURES_BEFORE_RESTART = 2
+# Request-triggered recovery: after a failed proxy request through a local
+# tunnel, restart it at most once per this window so a burst of failing
+# segment requests triggers a single restart.
+RECONNECT_COOLDOWN = 20.0
 API_TIMEOUT = 25
 
 SLOTS = ("nordvpn", "custom")
@@ -132,6 +137,37 @@ def set_bind(slot: str, value: str) -> str:
         raise TunnelError(f"Invalid bind address: {value!r} (expected host:port)")
     config_store.set(SLOT_KEYS[slot]["bind"], bind)
     return bind
+
+
+def _normalized_host(value: str) -> str:
+    host = (value or "").strip().strip("[]").lower()
+    if host in ("0.0.0.0", "::", "localhost"):
+        return "127.0.0.1"
+    return host
+
+
+def slot_for_proxy_url(proxy_url: str | None) -> str | None:
+    """Return the tunnel slot whose SOCKS bind matches this proxy URL."""
+    if not proxy_url:
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(proxy_url)
+    except ValueError:
+        return None
+    if not parsed.hostname or not parsed.port:
+        return None
+    host = _normalized_host(parsed.hostname)
+    for slot in SLOTS:
+        bind = get_bind(slot)
+        if not bind:
+            continue
+        bind_host, _, bind_port = bind.rpartition(":")
+        try:
+            if _normalized_host(bind_host) == host and int(bind_port) == parsed.port:
+                return slot
+        except ValueError:
+            continue
+    return None
 
 
 def _pid_file(slot: str) -> str:
@@ -737,6 +773,66 @@ async def health_check_slot(slot: str) -> None:
         logger.info("Tunnel %s restarted after repeated health check failures", slot)
     except TunnelError as exc:
         logger.warning("Tunnel %s restart failed: %s", slot, exc)
+
+
+_reconnect_locks: dict[str, asyncio.Lock] = {}
+_last_reconnect_at: dict[str, float] = {}
+
+
+async def _wait_for_bind(bind: str, timeout: float = 8.0) -> bool:
+    """Wait until the SOCKS listener accepts TCP connections again."""
+    host, _, port = bind.rpartition(":")
+    try:
+        port_num = int(port)
+    except ValueError:
+        return False
+    host = _normalized_host(host) or "127.0.0.1"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            _, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port_num), 1.0
+            )
+            writer.close()
+            return True
+        except (OSError, asyncio.TimeoutError):
+            await asyncio.sleep(0.4)
+    return False
+
+
+async def reconnect(slot: str) -> bool:
+    """Recover an enabled tunnel after a failed proxy request.
+
+    Restarts the tunnel only when its egress is actually broken; a healthy
+    tunnel means the failure came from upstream. Cooldown- and lock-guarded,
+    so a burst of failing segment requests triggers a single restart.
+    """
+    if not available() or not is_enabled(slot):
+        return False
+    lock = _reconnect_locks.setdefault(slot, asyncio.Lock())
+    if lock.locked():
+        return False
+    async with lock:
+        now = time.monotonic()
+        if now - _last_reconnect_at.get(slot, 0.0) < RECONNECT_COOLDOWN:
+            return False
+        _last_reconnect_at[slot] = now
+        try:
+            if process_running(slot):
+                if (await check(slot, attempts=1))["ok"]:
+                    return False
+                await restart(slot)
+            else:
+                await start(slot)
+            ready = await _wait_for_bind(get_bind(slot))
+        except TunnelError as exc:
+            logger.warning("Tunnel %s auto-reconnect failed: %s", slot, exc)
+            return False
+        if not ready:
+            logger.warning("Tunnel %s restarted but its SOCKS bind is not accepting yet", slot)
+            return False
+        logger.warning("Tunnel %s auto-reconnected after a failed proxy request", slot)
+        return True
 
 
 async def keepalive_loop(interval: float = 30.0) -> None:

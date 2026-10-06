@@ -211,6 +211,13 @@
             background: rgba(255,0,0,0.05);
             border-color: rgba(255,0,0,0.2);
         }
+        #extractors-test-result > div {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+            gap: 8px;
+            align-items: start;
+        }
+        #extractors-test-result .speedtest-card { flex: none; }
         .card h2 {
             font-size: 1rem; font-weight: 700; margin-bottom: 1.25rem;
             display: flex; align-items: center; gap: 8px;
@@ -463,6 +470,15 @@
             </div>
         </div>
 
+        <!-- Extractor Health Check -->
+        <div class="card card-wide">
+            <h2><span class="icon">🧪</span> Extractor Health Check</h2>
+            <p class="help-text">Runs every extractor against a real sample link from <code>extractors/extractor_test_urls.json</code>; empty ones are skipped.</p>
+            <p class="help-text">If an extractor fails, first try assigning a proxy to it under <strong>Per-Extractor Proxies</strong> (some hosts are geo/IP blocked). Only if it still fails after that, open an issue on <a href="https://github.com/realbestia1/EasyProxy/issues" target="_blank" rel="noopener">GitHub</a>.</p>
+            <button class="btn btn-primary btn-sm" onclick="runExtractorTests()" id="extractors-test-btn">🧪 Test Extractors</button>
+            <div id="extractors-test-result" class="speedtest-results" style="display:none;font-size:0.75rem;margin-top:12px"></div>
+        </div>
+
         <!-- WARP -->
         <div class="card">
             <h2><span class="icon">🌐</span> Cloudflare WARP <span id="warp-status" class="status" style="margin:0;font-size:0.75rem">Checking...</span> <span id="warp-ip" style="font-size:0.7rem;color:var(--text-muted);font-weight:400"></span></h2>
@@ -697,6 +713,46 @@ async function runAllSpeedtests() {
     } finally {
         btn.disabled = false;
         btn.innerHTML = '🚀 Run Speed Tests';
+    }
+}
+
+const EXTRACTOR_LABELS = { f16px: 'F16Px / Byse' };
+
+function extractorLabel(name) {
+    return EXTRACTOR_LABELS[name] || name;
+}
+
+async function runExtractorTests() {
+    const btn = document.getElementById('extractors-test-btn');
+    if (btn.disabled) return;
+    const result = document.getElementById('extractors-test-result');
+    btn.disabled = true;
+    btn.innerHTML = '⏳ Testing...';
+    result.style.display = 'block';
+    result.innerHTML = 'Running extractor tests...';
+    try {
+        const resp = await fetch('/api/admin/extractors/test', { method: 'POST' });
+        const data = await resp.json();
+        if (data.error) { result.innerHTML = '❌ ' + data.error; return; }
+        const rows = (data.results || []).map(function(r) {
+            const cls = r.ok ? 'speedtest-card' : 'speedtest-card error';
+            const icon = r.ok ? '✅' : '❌';
+            const detail = r.ok
+                ? ''
+                : '<div style="color:var(--accent-error);font-size:0.7rem;word-break:break-all">' + (r.error || 'failed').replace(/https?:\/\/\S+/g, '…') + '</div>';
+            return '<div class="' + cls + '">' +
+                '<div style="font-weight:600;font-size:0.8rem;margin-bottom:4px">' + icon + ' ' + extractorLabel(r.extractor) + '</div>' +
+                detail + '</div>';
+        }).join('');
+        const skipped = (data.skipped || []).length
+            ? '<div style="grid-column:1/-1;color:var(--text-muted);font-size:0.7rem">Skipped (no link): ' + data.skipped.map(extractorLabel).join(', ') + '</div>'
+            : '';
+        result.innerHTML = '<div>' + rows + skipped + '</div>';
+    } catch (e) {
+        result.innerHTML = '❌ Error: ' + e.message;
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '🧪 Test Extractors';
     }
 }
 

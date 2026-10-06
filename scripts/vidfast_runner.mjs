@@ -1,18 +1,20 @@
 #!/usr/bin/env node
-// Headless VidFast resolver. It runs the site's player decoder in a Node VM
-// and returns the unlocked media URL as JSON on stdout.
+// Headless VidFast resolver. It runs the site's player bundle inside a Node VM
+// (with a minimal React runtime) and prints the unlocked media URL as JSON.
 
+import fs from "node:fs";
 import vm from "node:vm";
 import { webcrypto } from "node:crypto";
 
 const inputUrl = process.argv[2];
 const debug = process.env.VIDFAST_DEBUG === "1";
+const writeOut = value => fs.writeSync(1, value + "\n");
 const log = (...args) => {
-  if (debug) console.error("[vidfast]", ...args);
+  if (debug) fs.writeSync(2, "[vidfast] " + args.map(item => typeof item === "string" ? item : String(item)).join(" ") + "\n");
 };
 
 if (!inputUrl) {
-  console.log(JSON.stringify({ error: "usage: vidfast_runner.mjs <url>" }));
+  writeOut(JSON.stringify({ error: "usage: vidfast_runner.mjs <url>" }));
   process.exit(2);
 }
 
@@ -20,9 +22,6 @@ const pageUrl = new URL(inputUrl).href;
 const pageOrigin = new URL(pageUrl).origin;
 const STREAM_PROBE_TIMEOUT_MS = 10000;
 const minimumStreamHeight = Number(process.env.VIDFAST_MIN_HEIGHT || 0);
-const minimumAcceptedHeight = minimumStreamHeight >= 2160
-  ? minimumStreamHeight - 16
-  : minimumStreamHeight;
 const userAgent =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
   "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36";
@@ -31,8 +30,7 @@ const nativeCrypto = globalThis.crypto ?? webcrypto;
 const cookies = new Map();
 let proxyDispatcher = null;
 
-// Node 18 provides Blob but not the browser-compatible File global.  VidFast's
-// player bundle only needs the File shape exposed by the browser VM.
+// Node 18 provides Blob but not the browser-compatible File global.
 const NativeFile = globalThis.File ?? class File extends Blob {
   constructor(bits, name, options = {}) {
     super(bits, options);
@@ -129,20 +127,39 @@ function scriptUrls(html) {
   return urls;
 }
 
-// Small DOM implementation. The VidFast player decoder only needs browser
-// globals while its React/UI side remains stubbed below.
+// Small DOM implementation.  The player bundle only touches a few browser
+// globals; everything UI-related is stubbed.
+const fauxParent = {
+  tagName: "DIV", style: {}, dataset: {}, children: [], parentNode: null, parentElement: null,
+  addEventListener() {}, removeEventListener() {}, appendChild(child) { return child; },
+  removeChild(child) { return child; }, querySelector: () => null, querySelectorAll: () => [],
+  classList: { add() {}, remove() {}, contains() { return false; } },
+};
+
 function element(tag = "div") {
   const node = {
     tagName: String(tag).toUpperCase(), style: {}, dataset: {}, children: [],
     parentNode: null, parentElement: null, _attrs: {}, _listeners: {},
-    _id: "", _text: "", _html: "", src: "", href: "", paused: true,
+    _id: "", _text: "", _html: "", href: "", paused: true,
     currentTime: 0, duration: 0, volume: 1, muted: false, playbackRate: 1,
     textTracks: [], clientWidth: 1920, clientHeight: 1080,
   };
+  let source = "";
+  Object.defineProperty(node, "src", {
+    get: () => source,
+    set: value => {
+      source = String(value ?? "");
+      if (node.tagName === "VIDEO" || node.tagName === "AUDIO") (context.__vidfastSources ||= []).push(source);
+    },
+  });
   Object.defineProperty(node, "id", { get: () => node._id, set: value => { node._id = String(value); } });
   Object.defineProperty(node, "textContent", { get: () => node._text, set: value => { node._text = String(value ?? ""); } });
   Object.defineProperty(node, "innerHTML", { get: () => node._html, set: value => { node._html = String(value ?? ""); } });
-  node.setAttribute = (key, value) => { node._attrs[key] = String(value); if (key === "id") node._id = String(value); };
+  node.setAttribute = (key, value) => {
+    node._attrs[key] = String(value);
+    if (key === "id") node._id = String(value);
+    if (key === "src" && (node.tagName === "VIDEO" || node.tagName === "AUDIO")) (context.__vidfastSources ||= []).push(String(value));
+  };
   node.getAttribute = key => node._attrs[key] ?? (key === "id" ? node._id : null);
   node.removeAttribute = key => { delete node._attrs[key]; };
   node.hasAttribute = key => key in node._attrs;
@@ -151,7 +168,7 @@ function element(tag = "div") {
   node.remove = () => { if (node.parentNode) node.parentNode.removeChild(node); };
   node.insertBefore = child => node.appendChild(child);
   node.replaceChild = (child, oldChild) => { const i = node.children.indexOf(oldChild); if (i >= 0) node.children[i] = child; return oldChild; };
-  node.insertAdjacentHTML = (_, html) => { node._html += String(html ?? ""); };
+  node.insertAdjacentHTML = (_, markup) => { node._html += String(markup ?? ""); };
   node.cloneNode = () => element(tag);
   node.querySelector = () => null;
   node.querySelectorAll = () => [];
@@ -173,12 +190,14 @@ function element(tag = "div") {
   node.pause = () => { node.paused = true; };
   node.load = () => {};
   node.append = (...items) => items.forEach(item => node.appendChild(item));
+  node.parentNode = fauxParent;
+  node.parentElement = fauxParent;
   return node;
 }
 
 const body = element("body");
 const head = element("head");
-const html = element("html");
+const htmlElement = element("html");
 const ids = new Map();
 const location = {
   href: pageUrl, origin: pageOrigin, protocol: new URL(pageUrl).protocol,
@@ -188,10 +207,10 @@ const location = {
   toString: () => pageUrl,
 };
 const document = {
-  body, head, documentElement: html, readyState: "complete", location,
+  body, head, documentElement: htmlElement, readyState: "complete", location,
   createElement: tag => element(tag), createTextNode: text => { const node = element("#text"); node.textContent = text; return node; },
   getElementById: id => { if (!ids.has(id)) { const node = element(); node.id = id; ids.set(id, node); } return ids.get(id); },
-  querySelector: selector => selector === "body" ? body : selector === "head" ? head : null,
+  querySelector: selector => selector === "body" ? body : selector === "head" ? head : (ids.get(selector) ?? (ids.set(selector, element()), ids.get(selector))),
   querySelectorAll: () => [], getElementsByTagName: () => [], getElementsByClassName: () => [],
   addEventListener() {}, removeEventListener() {}, cookie: "",
 };
@@ -199,12 +218,14 @@ const localValues = new Map();
 const localStorage = { getItem: key => localValues.get(key) ?? null, setItem: (key, value) => localValues.set(key, String(value)), removeItem: key => localValues.delete(key), clear: () => localValues.clear() };
 const sessionStorage = { ...localStorage };
 const navigator = {
-  userAgent, platform: "Win32", language: "en-US", languages: ["en-US", "en"],
+  userAgent, platform: "Linux x86_64", language: "en-US", languages: ["en-US", "en"],
   vendor: "Google Inc.", plugins: { length: 5, namedItem: () => ({}) }, mimeTypes: [],
   webdriver: false, maxTouchPoints: 0, hardwareConcurrency: 8,
   storage: { estimate: async () => ({ quota: 2147483648, usage: 0 }) },
 };
 
+// The bundle runs its own console.table-based anti-bot probe; keep console
+// callable but silent.
 function nativeLikeConsole() {
   const base = console;
   return new Proxy(base, { get(target, key) { return ["log", "table", "clear"].includes(key) ? () => {} : target[key]; } });
@@ -241,28 +262,26 @@ const context = {
   MutationObserver: function MutationObserver() { return { observe() {}, disconnect() {} }; },
   MediaSource: class {}, BroadcastChannel: class { postMessage() {} close() {} addEventListener() {} },
   WebSocket: class { send() {} close() {} addEventListener() {} },
-  XMLHttpRequest: class { open() {} send() {} setRequestHeader() {} addEventListener() {} },
+  XMLHttpRequest: class {
+    open(method, url) {
+      const target = absoluteUrl(url);
+      if (/^https?:/i.test(target) && !target.startsWith(pageOrigin)) (context.__vidfastSources ||= []).push(target);
+    }
+    send() {} setRequestHeader() {} abort() {} addEventListener() {} removeEventListener() {}
+    getResponseHeader() { return null; } getAllResponseHeaders() { return ""; }
+  },
+  __vidfastSources: [],
 };
 context.window = context; context.self = context; context.globalThis = context; context.global = context;
 context.top = context; context.parent = context;
 vm.createContext(context);
 
-let routePrefix = "";
-let probeBody = null;
 async function playerFetch(input, init = {}) {
   const url = absoluteUrl(input);
   const headers = mergedHeaders(init.headers, pageUrl);
-  if (routePrefix && url.includes(routePrefix)) {
-    headers.set("accept", "*/*");
-    headers.set("x-requested-with", "XMLHttpRequest");
-    headers.set("x-csrf-token", context.__playerCsrf || "");
-  }
   log("fetch", init.method || "GET", url);
   const response = await nativeFetch(url, fetchOptions({ ...init, headers }));
   storeCookies(response);
-  if ((init.method || "GET").toUpperCase() === "POST" && routePrefix && url.includes(routePrefix) && !probeBody && response.ok) {
-    probeBody = await response.clone().text();
-  }
   return response;
 }
 context.fetch = playerFetch;
@@ -309,27 +328,6 @@ function webpackRequire(id) {
   return mod.exports;
 }
 
-function patchPlayerChunk(source) {
-  let patched = source;
-  patched = patched.replace(
-    "cd._0x187b37=cI,globalThis._0x187b37=cd._0x187b37",
-    "cd._0x187b37=cI,globalThis.__playerInit=cI,globalThis._0x187b37=cd._0x187b37",
-  );
-  patched = patched.replace(
-    "cd._0x272adf=cK,globalThis._0x272adf=cd._0x272adf",
-    "cd._0x272adf=cK,globalThis.__playerDecrypt=cK,globalThis._0x272adf=cd._0x272adf",
-  );
-  patched = patched.replace(
-    'join("")}cr.from("xZ/aW~D6:U0_]EVA");',
-    'join("")}globalThis.__playerEncode=ci;cr.from("xZ/aW~D6:U0_]EVA");',
-  );
-  patched = patched.replace(
-    "function c6(e,t){return e-=123,c2()[e]}",
-    "function c6(e,t){return e-=123,c2()[e]}globalThis.__playerRoutePrefix=c6(185);globalThis.__playerRouteSegment=c6(449);globalThis.__playerCsrf=JSON.parse(c6(674))[\"X-Csrf-Token\"];",
-  );
-  return patched;
-}
-
 function loadChunk(code, filename) {
   const queue = [];
   context.webpackChunk_N_E = queue;
@@ -339,138 +337,244 @@ function loadChunk(code, filename) {
     throw new Error(`${filename}: ${error.message} (line ${error.lineNumber || "?"}, column ${error.columnNumber || "?"})`);
   }
   for (const chunk of queue) {
-    if (Array.isArray(chunk?.[1])) Object.assign(modules, chunk[1]);
-    else if (chunk?.[1]) Object.assign(modules, chunk[1]);
+    if (chunk?.[1]) Object.assign(modules, chunk[1]);
   }
 }
 
-const reactStub = new Proxy(function ReactStub() {}, {
-  get: (_, key) => {
-    if (key === "__esModule") return true;
-    if (key === "default") return reactStub;
-    if (key === "useState") return initial => [initial, () => {}];
-    if (key === "useEffect" || key === "useLayoutEffect") return () => {};
-    if (key === "useRef") return initial => ({ current: initial });
-    if (key === "useCallback") return fn => fn;
-    if (key === "useMemo") return fn => fn();
-    if (key === "Fragment") return "Fragment";
-    return () => ({});
-  },
-});
+// Minimal React runtime: enough of the hook contract to mount the player
+// component and let its own effects drive the decoder.
+function createRuntime(props) {
+  const cells = [];
+  let index = 0;
+  let toRun = [];
+  let scheduled = false;
+  let running = false;
+  let mountError = null;
+  let component = null;
+
+  const same = (a, b) => {
+    if (!a || !b || a.length !== b.length) return !a && !b;
+    return a.every((value, i) => Object.is(value, b[i]));
+  };
+
+  const jsx = (type, jsxProps, ...children) => {
+    const ref = jsxProps && jsxProps.ref;
+    if (ref && typeof ref === "object" && ref.current == null) ref.current = element(type === "video" ? "video" : "div");
+    else if (typeof ref === "function") { try { ref(element("div")); } catch {} }
+    return { type, props: jsxProps, children };
+  };
+
+  const hooks = {
+    useState(initial) {
+      const cell = cells[index++] || (cells[index - 1] = { kind: "state", value: typeof initial === "function" ? initial() : initial });
+      const setter = next => {
+        const value = typeof next === "function" ? next(cell.value) : next;
+        if (Object.is(value, cell.value)) return value;
+        cell.value = value;
+        schedule();
+        return value;
+      };
+      return [cell.value, setter];
+    },
+    useReducer(reducer, initial) {
+      const cell = cells[index++] || (cells[index - 1] = { kind: "state", value: initial });
+      const dispatch = action => { cell.value = reducer(cell.value, action); schedule(); };
+      return [cell.value, dispatch];
+    },
+    useRef(initial) {
+      const cell = cells[index++] || (cells[index - 1] = { kind: "ref", value: { current: initial } });
+      return cell.value;
+    },
+    useMemo(fn, deps) {
+      const cell = cells[index++] || (cells[index - 1] = { kind: "memo" });
+      if (!same(cell.deps, deps)) { cell.value = fn(); cell.deps = deps; }
+      return cell.value;
+    },
+    useCallback(fn, deps) {
+      const cell = cells[index++] || (cells[index - 1] = { kind: "cb" });
+      if (!same(cell.deps, deps)) { cell.value = fn; cell.deps = deps; }
+      return cell.value;
+    },
+    useEffect(fn, deps) { queueEffect(fn, deps); },
+    useLayoutEffect(fn, deps) { queueEffect(fn, deps); },
+    useInsertionEffect(fn, deps) { queueEffect(fn, deps); },
+    useContext() { return null; },
+    useId() { return "vidfast"; },
+    useDebugValue() {},
+    useImperativeHandle() {},
+    useTransition() { return [false, fn => fn()]; },
+    useDeferredValue(value) { return value; },
+    useSyncExternalStore(subscribe, getSnapshot) { return getSnapshot(); },
+  };
+
+  function queueEffect(fn, deps) {
+    index++;
+    const cell = cells[index - 1] || (cells[index - 1] = { kind: "effect" });
+    if (!same(cell.deps, deps)) { cell.deps = deps; cell.fn = fn; toRun.push(cell); return; }
+    cell.fn = fn;
+  }
+
+  function schedule() {
+    scheduled = true;
+    if (running) return;
+    running = true;
+    try {
+      let guard = 0;
+      while (scheduled && guard++ < 400) {
+        scheduled = false;
+        index = 0;
+        toRun = [];
+        const children = component({ ...props, React: reactModule, jsx, jsxs: jsx, jsxDEV: jsx });
+        void children;
+        for (const cell of toRun) {
+          if (cell.cleanup) { try { cell.cleanup(); } catch {} }
+          try {
+            const cleanup = cell.fn();
+            cell.cleanup = typeof cleanup === "function" ? cleanup : undefined;
+          } catch (error) {
+            log("effect error:", error?.message || String(error));
+            if (debug && error?.stack) log(error.stack.split("\n").slice(0, 4).join(" | "));
+          }
+        }
+      }
+    } catch (error) {
+      mountError = mountError || error;
+      log("render error:", error?.message || String(error));
+    } finally {
+      running = false;
+    }
+  }
+
+  const reactModule = new Proxy(function ReactStub() {}, {
+    get: (_, key) => {
+      if (key === "__esModule") return true;
+      if (key === "default") return reactModule;
+      if (key === "Fragment") return "Fragment";
+      if (key === "jsx" || key === "jsxs" || key === "jsxDEV" || key === "createElement" || key === "cloneElement") return jsx;
+      if (key === "forwardRef" || key === "memo") return fn => fn;
+      if (key === "createContext") return () => ({ Provider: "Provider", Consumer: "Consumer" });
+      if (Object.prototype.hasOwnProperty.call(hooks, key)) return hooks[key];
+      return () => ({});
+    },
+  });
+
+  return {
+    cells,
+    reactModule,
+    mount(value) { component = value; },
+    schedule,
+    get error() { return mountError; },
+  };
+}
+
+let runtime = null;
+
 const moduleStubs = {
-  5155: reactStub, 63: reactStub, 2115: reactStub,
   8288: { useRouter: () => ({ push() {}, replace() {}, prefetch() {} }), usePathname: () => location.pathname },
   8613: {}, 6497: {}, 4352: {}, 3396: {}, 6368: {}, 5216: {},
   153: { hb: () => ({ pause() {}, start() {}, reset() {} }) },
   2421: { f: async () => ({ cues: [] }) },
 };
 
-function installStubs() {
+function installStubs(reactModule) {
   modules[5376] = mod => { mod.exports = { Buffer }; };
   modules[7358] = mod => { mod.exports = { env: {}, versions: { chrome: "152.0.0.0" }, browser: true }; };
+  modules[5155] = (mod, exports, req) => {
+    mod.exports = reactModule;
+    if (req?.d) req.d(exports, { default: () => reactModule, __esModule: () => true });
+  };
+  modules[63] = modules[5155];
+  modules[2115] = modules[5155];
   for (const [id, value] of Object.entries(moduleStubs)) modules[id] = (mod, exports, req) => {
     mod.exports = value;
     if (req?.d) req.d(exports, { default: () => value, __esModule: () => true });
   };
 }
 
-async function loadPlayer(html) {
+async function loadPlayer(html, reactModule) {
   const urls = scriptUrls(html);
-  if (!urls.some(url => /\/365-[^/]+\.js$/.test(url))) throw new Error("VidFast player bundle not found");
   log("loading", urls.length, "chunks");
   for (const url of urls) {
     const response = await nativeFetch(url, fetchOptions({ headers: mergedHeaders({}, pageUrl) }));
     if (!response.ok) continue;
-    let code = await response.text();
-    if (/\/365-[^/]+\.js$/.test(url)) code = patchPlayerChunk(code);
+    const code = await response.text();
     loadChunk(code, url);
   }
-  installStubs();
-  webpackRequire(9987);
-  if (typeof context.__playerInit !== "function" || typeof context.__playerDecrypt !== "function" || typeof context.__playerEncode !== "function") {
-    throw new Error("VidFast player exports not found; bundle layout changed");
-  }
-  routePrefix = String(context.__playerRoutePrefix || "");
-  if (!routePrefix || !context.__playerRouteSegment) throw new Error("VidFast player routes not found");
-  log("route", routePrefix, context.__playerRouteSegment);
-  return webpackRequire(3018);
-}
-
-function playerContext(props, cryptoModule, servers) {
-  return {
-    crypto: cryptoModule, encode: context.__playerEncode, en: props.en,
-    server: props.server ?? null, setServers: value => {
-      const previous = servers.at(-1) || [];
-      const rows = typeof value === "function" ? value(previous) : value;
-      if (Array.isArray(rows)) servers.push(structuredClone(rows));
-    }, setState() {}, setFavServer() {},
-    window: context, document, navigator, localStorage, console: nativeLikeConsole(), JSON,
-    Math, Date, RegExp, Map, Set, WeakMap, WeakSet, Array, Object, Number, String,
-    Boolean, Symbol, Function, screen: context.screen, Error, TypeError, RangeError,
-    SyntaxError, parseInt, parseFloat, isNaN, isFinite, encodeURIComponent, decodeURIComponent,
-    NaN, Infinity, undefined, Promise, Proxy, Reflect, Uint8Array, Int8Array, Uint16Array,
-    Int16Array, Uint32Array, Int32Array, Float32Array, Float64Array, BigInt,
-    fetch: playerFetch, TextEncoder, TextDecoder, URL, URLSearchParams, AbortSignal,
-    AbortController, Buffer, atob: context.atob, btoa: context.btoa, Worker: context.Worker,
-    MessageChannel: context.MessageChannel, ...props, id: props.id || new URL(pageUrl).pathname.split("/").pop(),
-    host: props.host || new URL(pageUrl).host,
-  };
+  installStubs(reactModule);
+  const playerId = Object.keys(modules).find(id => String(modules[id]).includes("xZ/aW~D6:U0_]EVA"));
+  if (!playerId) throw new Error("VidFast player bundle not found");
+  log("player module", playerId);
+  return webpackRequire(Number(playerId));
 }
 
 async function resolve() {
   const html = await fetchPage();
   const props = parseProps(html);
-  const cryptoModule = await loadPlayer(html);
-  const servers = [];
-  const ctx = playerContext(props, cryptoModule, servers);
-  for (const key of ["crypto", "encode", "en", "server", "setServers", "setState", "setFavServer", "fetch"]) context[key] = ctx[key];
-  await context.__playerInit(ctx);
+  runtime = createRuntime(props);
+  const playerModule = await loadPlayer(html, runtime.reactModule);
+  if (typeof playerModule.default !== "function") throw new Error("VidFast player component not found");
+  runtime.mount(playerModule.default);
+  runtime.schedule();
 
-  const deadline = Date.now() + 45000;
-  while (!servers.length && Date.now() < deadline) await new Promise(resolvePromise => setTimeout(resolvePromise, 250));
-  if (!probeBody) throw new Error("VidFast did not return the server probe");
-  const decrypted = [];
-  await context.__playerDecrypt({ ...ctx, dr: decrypted, rs: probeBody });
-  const active = Array.isArray(decrypted[0]) ? decrypted[0] : [];
-  if (!active.length) throw new Error("VidFast returned no servers");
-
-  const errors = [];
-  for (const server of active.filter(item => item?.data)) {
-    try {
-      const endpoint = `${routePrefix}/${context.__playerRouteSegment}/${server.data}`.replace(/\/+/g, "/");
-      const response = await playerFetch(endpoint, { method: "POST", body: "" });
-      if (!response.ok) throw new Error(`server HTTP ${response.status}`);
-      const decryptedStream = [];
-      await context.__playerDecrypt({ ...ctx, dr: decryptedStream, rs: (await response.text()).trim(), server });
-      const stream = decryptedStream[0];
-      if (stream?.url?.startsWith("http")) {
-        const manifest = await probeStreamManifest(stream.url);
-        if (minimumStreamHeight > 0) {
-          const heights = [...manifest.matchAll(/RESOLUTION=\d+x(\d+)/gi)]
-            .map(match => Number(match[1]))
-            .filter(Number.isFinite);
-          if (!heights.some(height => height >= minimumAcceptedHeight)) {
-            throw new Error(`no HLS variant near ${minimumStreamHeight}p`);
-          }
-        }
-        return { url: stream.url, headers: { "User-Agent": userAgent, Referer: pageUrl, Origin: pageOrigin }, server: server.name || "VidFast" };
-      }
-      throw new Error("decrypted response has no URL");
-    } catch (error) {
-      errors.push(`${server.name || "server"}: ${error.message}`);
-    }
+  const deadline = Date.now() + 90000;
+  while (Date.now() < deadline) {
+    const found = currentStreamUrl();
+    if (found) return finish(found);
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 250));
   }
-  throw new Error(errors.join("; ") || "VidFast has no usable server");
+  throw new Error(runtime.error ? `VidFast player failed: ${runtime.error.message}` : "VidFast did not resolve a stream URL");
 }
 
+function currentStreamUrl() {
+  for (const source of context.__vidfastSources || []) {
+    if (!/^https?:\/\//i.test(source)) continue;
+    if (source.startsWith(pageOrigin)) continue;
+    return source;
+  }
+  for (const cell of runtime?.cells || []) {
+    // The player stores the resolved source object ({url,...}) in a ref.
+    const current = cell.value?.current;
+    const url = typeof current === "string" ? current : current && typeof current.url === "string" ? current.url : "";
+    if (!/^https?:\/\//i.test(url) || url.startsWith(pageOrigin)) continue;
+    if (/\.(png|jpg|jpeg|gif|svg|webp|woff2?|css|js)(\?|$)/i.test(url)) continue;
+    return url;
+  }
+  return "";
+}
+
+async function finish(streamUrl) {
+  const manifest = await probeStreamManifest(streamUrl);
+  const resolutions = [...manifest.matchAll(/RESOLUTION=(\d+)x(\d+)/gi)]
+    .map(match => ({ w: Number(match[1]), h: Number(match[2]) }))
+    .filter(item => Number.isFinite(item.w) && Number.isFinite(item.h));
+  const maxResolution = resolutions.length
+    ? Math.max(...resolutions.map(item => item.w >= 3800 ? 2160 : item.h))
+    : 0;
+  if (minimumStreamHeight > 0) {
+    const is4k = minimumStreamHeight >= 2160;
+    const hasTarget = resolutions.some(item => is4k ? (item.w >= 3800 || item.h >= 2140) : (item.h >= minimumStreamHeight - 16));
+    if (!hasTarget) throw new Error(`no HLS variant near ${minimumStreamHeight}p (highest is ${maxResolution}p)`);
+  }
+  return {
+    url: streamUrl,
+    headers: { "User-Agent": userAgent, Referer: pageUrl, Origin: pageOrigin },
+    server: "VidFast",
+  };
+}
+
+let exitCode = 0;
 try {
-  console.log(JSON.stringify(await resolve()));
+  writeOut(JSON.stringify(await resolve()));
 } catch (error) {
-  if (debug && error?.stack) console.error(error.stack);
-  console.log(JSON.stringify({ error: error?.message || String(error) }));
-  process.exitCode = 1;
+  if (debug && error?.stack) log(error.stack);
+  writeOut(JSON.stringify({ error: error?.message || String(error) }));
+  exitCode = 1;
 } finally {
   if (proxyDispatcher) {
     try { await proxyDispatcher.close(); } catch {}
   }
 }
+
+// The player bundle keeps timers/handlers alive; exit explicitly. All output
+// above is written synchronously so nothing is lost.
+process.exit(exitCode);

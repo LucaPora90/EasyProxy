@@ -46,6 +46,11 @@ class ManifestRewriter:
         parsed_url = urllib.parse.urlparse(absolute_url)
         if parsed_url.query:
             return absolute_url
+        # okcdn (ok.ru) firma il token nel path (/expires/.../video/): aggiungere la
+        # query del manifest padre fa rispondere il master (o uno stub di errore).
+        hostname = (parsed_url.hostname or "").lower()
+        if hostname == "okcdn.ru" or hostname.endswith(".okcdn.ru"):
+            return absolute_url
         return urllib.parse.urlunparse(parsed_url._replace(query=base_query))
 
     @staticmethod

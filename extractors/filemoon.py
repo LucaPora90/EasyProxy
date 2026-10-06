@@ -1,62 +1,77 @@
-import logging
-import random
 import re
-from urllib.parse import urlparse, urljoin
-from aiohttp import ClientSession, ClientTimeout, TCPConnector
-from aiohttp_socks import ProxyConnector
-from config import get_proxy_for_url, get_connector_for_proxy
-from utils.packed import eval_solver
+from urllib.parse import urljoin, urlparse
 
-from extractors.base import BaseExtractor, ExtractorError
+from extractors.base import ExtractorError
+from extractors.f16px import F16PxExtractor
 
-class FileMoonExtractor(BaseExtractor):
-    """FileMoon URL extractor."""
+_ID_RE = re.compile(r"^[0-9A-Za-z]{8,16}$")
+_MEDIA_RE = re.compile(r'https?://[^"\'\s<>]+\.(?:m3u8|mp4|mkv)[^"\'\s<>]*', re.IGNORECASE)
+
+
+class FileMoonExtractor(F16PxExtractor):
+    """FileMoon embed extractor.
+
+    Legacy domains (filemoon.sx, bysejikuar.com, ...) run the Byse platform
+    and use the inherited attest/PoW/playback flow.  filemoon.org is a
+    different host: ``/{id}/stream`` redirects to a signed media file, which
+    is also the player's own source.
+    """
+
+    ERROR_PREFIX = "FileMoon"
 
     def __init__(self, request_headers: dict, proxies: list = None):
-        super().__init__(request_headers, proxies, extractor_name="filemoon")
+        super().__init__(request_headers, proxies)
+        self.extractor_name = "filemoon"
 
-    async def extract(self, url: str, **kwargs) -> dict:
-        """Extract FileMoon URL."""
-        resp = await self._make_request(url)
-        text = resp.text
-        response_url = resp.url
+    @staticmethod
+    def _filemoon_org_id(url: str) -> str | None:
+        for segment in (urlparse(url).path or "").split("/"):
+            if _ID_RE.match(segment):
+                return segment
+        return None
 
-        pattern = r'iframe.*?src=["\']([^"\']*)["\']'
-        match = re.search(pattern, text, re.DOTALL)
-        if not match:
-            raise ExtractorError("Failed to extract iframe URL")
+    async def _extract_filemoon_org(self, url: str) -> dict:
+        code = self._filemoon_org_id(url)
+        if not code:
+            raise ExtractorError(f"{self.ERROR_PREFIX}: missing file id in {url}")
 
-        iframe_url = match.group(1)
-
-        parsed = urlparse(response_url)
-        base_url = f"{parsed.scheme}://{parsed.netloc}"
-
-        if iframe_url.startswith("//"):
-            iframe_url = f"{parsed.scheme}:{iframe_url}"
-        elif not urlparse(iframe_url).scheme:
-            iframe_url = urljoin(base_url, iframe_url)
-
-        headers = {"Referer": url}
-        patterns = [r'file:"(.*?)"']
-        
-        session = await self._get_session(iframe_url)
-        final_url = await eval_solver(session, iframe_url, headers, patterns)
-
-        # Test if stream exists
-        try:
-            await self._make_request(final_url, headers=headers)
-        except ExtractorError as e:
-            if "404" in str(e):
-                 raise ExtractorError("Stream not found (404)")
-            raise
-
-        self.base_headers["referer"] = url
-
-        return {
-            "destination_url": final_url,
-            "request_headers": self.base_headers,
-            "mediaflow_endpoint": self.mediaflow_endpoint,
+        parsed = urlparse(url)
+        stream_url = f"{parsed.scheme}://{parsed.netloc}/{code}/stream"
+        headers = {
+            "Accept": "*/*",
+            "Referer": url,
+            "User-Agent": self.base_headers["User-Agent"],
         }
 
-    async def close(self):
-        await super().close()
+        session = await self._get_session(stream_url)
+        async with session.get(stream_url, headers=headers, allow_redirects=False) as resp:
+            location = resp.headers.get("Location") if resp.status in (301, 302, 303, 307, 308) else None
+            body = "" if location else await resp.text()
+
+        destination = urljoin(stream_url, location) if location else None
+        if not destination:
+            match = _MEDIA_RE.search(body)
+            destination = match.group(0) if match else None
+        if not destination:
+            raise ExtractorError(
+                f"{self.ERROR_PREFIX}: no media URL from {stream_url}"
+            )
+
+        self.base_headers["referer"] = url
+        mediaflow_endpoint = (
+            "hls_proxy" if ".m3u8" in destination.lower() else "proxy_stream_endpoint"
+        )
+        return {
+            "destination_url": destination,
+            "request_headers": self.base_headers,
+            "mediaflow_endpoint": mediaflow_endpoint,
+        }
+
+    async def extract(self, url: str, **kwargs) -> dict:
+        host = (urlparse(url).hostname or "").lower()
+        if host == "filemoon.org" or host.endswith(".filemoon.org"):
+            return await self._extract_filemoon_org(url)
+        return await super().extract(url, **kwargs)
+
+
+__all__ = ["FileMoonExtractor"]

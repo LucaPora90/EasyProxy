@@ -15,6 +15,7 @@ dlstreams_activity.txt
 !/scripts/wg_tunnel_ctl.sh
 !/scripts/cinejoy_runner.mjs
 !/scripts/pow_solver.js
+!/scripts/vidxgo_runner.mjs
 config.json
 /downloaded_files
 /cache
@@ -25,3 +26,5 @@ config.json
 /.pytest_cache/
 /tests
 /output
+/node_modules
+package-lock.json

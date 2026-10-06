@@ -342,6 +342,11 @@
             box-shadow: 0 0 20px rgba(99, 102, 241, 0.15);
         }
 
+        select.form-input option {
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+        }
+
         .form-input::placeholder {
             color: var(--text-muted);
         }
@@ -730,6 +735,7 @@
             .recording-item { flex-direction: column; align-items: flex-start; }
             .recording-actions { width: 100%; justify-content: flex-end; }
             .page-header { flex-direction: column; }
+            .page-nav { align-self: flex-end; }
         }
 
         @media (max-width: 480px) {
@@ -856,7 +862,7 @@
                         <option value="vidoza"></option>
                         <option value="turbovidplay"></option>
                         <option value="livetv"></option>
-                        <option value="f16px"></option>
+                        <option value="f16px">F16Px / Byse</option>
                         <option value="guardabest"></option>
                         <option value="sports99"></option>
                         <option value="dlstreams"></option>
@@ -881,19 +887,23 @@
                         <input type="number" id="duration" class="form-input" placeholder="3600 (1 hour)">
                     </div>
                 </div>
+                <div class="form-group">
+                    <label class="form-label" for="recordingProxyMode">Proxy route</label>
+                    <select id="recordingProxyMode" class="form-input">
+                        <option value="">Auto — transport route / extractor / global / WARP</option>
+                        <option value="off">Direct — proxy=off</option>
+                        <option value="torproxy">Force Tor — proxy=torproxy</option>
+                        <option value="nordvpn">Force NordVPN — proxy=nordvpn</option>
+                        <option value="cwg">Force Custom WireGuard — proxy=cwg</option>
+                    </select>
+                    <div class="checkbox-desc">Force routes the whole recording through that tunnel; if the tunnel is down the recording fails instead of falling back.</div>
+                </div>
                 <div class="checkbox-grid">
                     <label class="checkbox-label">
                         <input id="recordingBypassWarp" type="checkbox">
                         <div>
                             <span>Add <code>warp=off</code></span>
                             <div class="checkbox-desc">Bypasses the Cloudflare WARP VPN for this specific stream recording, using the server's real IP.</div>
-                        </div>
-                    </label>
-                    <label class="checkbox-label">
-                        <input id="recordingBypassProxy" type="checkbox">
-                        <div>
-                            <span>Add <code>proxy=off</code></span>
-                            <div class="checkbox-desc">Bypasses all configured custom proxies (global/per-extractor) for this stream recording.</div>
                         </div>
                     </label>
                     <label class="checkbox-label">
@@ -1115,7 +1125,7 @@
             const duration = document.getElementById('duration').value;
             const extractor = document.getElementById('extractor').value.trim();
             const bypassWarp = document.getElementById('recordingBypassWarp').checked;
-            const bypassProxy = document.getElementById('recordingBypassProxy').checked;
+            const proxyMode = document.getElementById('recordingProxyMode').value;
             const disableSSL = document.getElementById('recordingDisableSSL').checked;
             const maxRes = document.getElementById('recordingMaxRes').checked;
 
@@ -1127,7 +1137,7 @@
                 const body = { url, name: name || undefined, duration: duration ? parseInt(duration) : undefined };
                 if (extractor) body.extractor = extractor;
                 if (bypassWarp) body.warp = 'off';
-                if (bypassProxy) body.proxy = 'off';
+                if (proxyMode) body.proxy = proxyMode;
                 if (disableSSL) body.disable_ssl = '1';
                 if (maxRes) body.max_res = 'true';
                 const response = await fetch(`/api/recordings/start${getAuthParams()}`, {
