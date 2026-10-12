@@ -45,6 +45,7 @@ class TurboVidPlayExtractor(BaseExtractor):
 
     async def extract(self, url: str, **kwargs) -> dict:
         """Extract TurboVidPlay URL."""
+        self._apply_routing_kwargs(url, kwargs)
         # 1. Load embed
         resp = await self._make_request(url)
         html = resp.text
@@ -86,6 +87,9 @@ class TurboVidPlayExtractor(BaseExtractor):
             "destination_url": real_m3u8,
             "request_headers": self.base_headers,
             "mediaflow_endpoint": self.mediaflow_endpoint,
+            "selected_proxy": self.last_used_proxy,
+            "force_direct": self._force_direct,
+            "bypass_warp": self.bypass_warp_active,
         }
 
     async def close(self):

@@ -9,6 +9,7 @@ class SupervideoExtractor(BaseExtractor):
 
     async def extract(self, url: str, **kwargs) -> dict:
         """Extract Supervideo URL."""
+        self._apply_routing_kwargs(url, kwargs)
         headers = {
             "Accept": "*/*",
             "Connection": "keep-alive",
@@ -24,4 +25,7 @@ class SupervideoExtractor(BaseExtractor):
             "destination_url": final_url,
             "request_headers": self.base_headers,
             "mediaflow_endpoint": self.mediaflow_endpoint,
+            "selected_proxy": self.last_used_proxy,
+            "force_direct": self._force_direct,
+            "bypass_warp": self.bypass_warp_active,
         }

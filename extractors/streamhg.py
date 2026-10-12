@@ -63,6 +63,7 @@ class StreamHGExtractor(BaseExtractor):
         return urljoin(page_url, stream_url)
 
     async def extract(self, url: str, **kwargs) -> dict:
+        self._apply_routing_kwargs(url, kwargs)
         referer = "https://dhcplay.com/"
         for candidate in self._candidate_urls(url):
             try:
@@ -76,6 +77,9 @@ class StreamHGExtractor(BaseExtractor):
                     "destination_url": stream_url,
                     "request_headers": {},
                     "mediaflow_endpoint": self.mediaflow_endpoint,
+                    "selected_proxy": self.last_used_proxy,
+                    "force_direct": self._force_direct,
+                    "bypass_warp": self.bypass_warp_active,
                 }
             except Exception as e:
                 logger.debug(f"StreamHG candidate failed {candidate}: {e}")

@@ -108,6 +108,7 @@ class CinejoyExtractor(BaseExtractor):
             or (bypass_proxies and bypass_warp)
         )
         forced_proxy = None if bypass_proxies else (raw_proxy or None)
+        forced_proxy = _cfg.effective_forced_proxy(url, forced_proxy)
 
         if direct_requested and (bypass_proxies or not forced_proxy):
             proxy = None

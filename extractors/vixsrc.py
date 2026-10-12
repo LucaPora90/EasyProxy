@@ -154,6 +154,8 @@ class VixSrcExtractor:
         return bool(forced_proxy or self._dedicated_proxies())
 
     async def _proxy_candidates(self, url: str, forced_proxy: str | None = None) -> list[str]:
+        # ponytail: proxy_exclude_domains drops even explicit ?proxy= (WARP exempt)
+        forced_proxy = _cfg.effective_forced_proxy(url, forced_proxy)
         if forced_proxy:
             proxy = self._normalize_proxy_url(forced_proxy)
             if self.bypass_warp_active and proxy == self._normalize_proxy_url(WARP_PROXY_URL):
@@ -613,6 +615,8 @@ class VixSrcExtractor:
     async def _get_session(self, url: str = None, forced_proxy: str | None = None):
         """Ottiene una sessione HTTP persistente."""
         proxy = None
+        # ponytail: proxy_exclude_domains drops even explicit ?proxy= (WARP exempt)
+        forced_proxy = _cfg.effective_forced_proxy(url, forced_proxy)
         if forced_proxy:
             proxy = self._normalize_proxy_url(forced_proxy)
         elif url:
@@ -1038,6 +1042,8 @@ class VixSrcExtractor:
             forced_proxy = kwargs.get("proxy")
             if forced_proxy:
                 forced_proxy = self._normalize_proxy_url(forced_proxy)
+            # ponytail: proxy_exclude_domains drops even explicit ?proxy= (WARP exempt)
+            forced_proxy = _cfg.effective_forced_proxy(url, forced_proxy)
             parsed_url = urlparse(url)
             response = None
             resolved_streamingcommunity = False

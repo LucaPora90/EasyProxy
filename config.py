@@ -46,7 +46,7 @@ _SOCKET_CHECK_EXECUTOR = ThreadPoolExecutor(
 )
 
 
-APP_VERSION = "2.13.26"
+APP_VERSION = "2.13.36"
 
 _MEMORY_PROFILE_FRAMES = 15
 _memory_profile_baseline = None
@@ -436,6 +436,12 @@ def _get_dynamic_proxy_exclude_domains() -> list:
 
 def _is_proxy_excluded(url: str) -> bool:
     return _matches_excluded_host(url, PROXY_EXCLUDE_DOMAINS)
+
+def effective_forced_proxy(url: str | None, forced_proxy: str | None) -> str | None:
+    # ponytail: proxy_exclude_domains drops even explicit ?proxy=; WARP exempt (falls back to WARP like auto routing)
+    if forced_proxy and not is_warp_proxy_url(forced_proxy) and _is_proxy_excluded(url or ""):
+        return None
+    return forced_proxy
 
 def _get_dynamic_global_proxies() -> list:
     return _cfg_get("global_proxies", [])

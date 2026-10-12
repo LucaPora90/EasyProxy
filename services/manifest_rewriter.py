@@ -430,6 +430,7 @@ class ManifestRewriter:
         extractor_key: str = None,
         stream_key: str = None,
         max_res: bool = False,
+        dual_video_track: int = 0,
     ) -> str:
         """Riscrive gli URL nei manifest HLS per passare attraverso il proxy."""
         lines = manifest_content.split("\n")
@@ -481,6 +482,8 @@ class ManifestRewriter:
                 ]
             )
 
+            if dual_video_track:
+                header_params += f"&dual_video_track={int(dual_video_track)}"
             if api_password:
                 header_params += f"&api_password={api_password}"
             
@@ -644,6 +647,8 @@ class ManifestRewriter:
             header_params += f"&extractor_key={urllib.parse.quote(extractor_key, safe='')}"
         if stream_key:
             header_params += f"&stream_key={urllib.parse.quote(stream_key, safe='')}"
+        if dual_video_track:
+            header_params += f"&dual_video_track={int(dual_video_track)}"
         if max_res:
             header_params += "&max_res=true"
 
@@ -837,12 +842,19 @@ class ManifestRewriter:
                     base_query,
                 )
 
-                encoded_url = urllib.parse.quote(absolute_url, safe="")
-
                 # Variant URIs after #EXT-X-STREAM-INF are playlists even when
                 # providers like VixSrc expose them as extensionless /playlist URLs.
                 is_manifest_uri = next_uri_is_manifest or ".m3u8" in absolute_url
                 next_uri_is_manifest = False
+
+                if not is_manifest_uri and (extractor_key == "fctv33" or ("_ctump=" in absolute_url and "_ctuph=" in absolute_url)):
+                    try:
+                        from extractors.fctv33 import resolve_fctv33_segment_url
+                        absolute_url = resolve_fctv33_segment_url(absolute_url)
+                    except Exception as _fctv_err:
+                        logger.debug("Failed to resolve FCTV33 segment in manifest: %s", _fctv_err)
+
+                encoded_url = urllib.parse.quote(absolute_url, safe="")
 
                 # Se e manifest usa /proxy/hls/manifest.m3u8, altrimenti determina estensione
                 if is_manifest_uri:

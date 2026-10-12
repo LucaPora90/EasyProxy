@@ -71,6 +71,7 @@ class UqloadExtractor(BaseExtractor):
 
     async def extract(self, url: str, **kwargs) -> dict:
         """Extract Uqload video URL."""
+        self._apply_routing_kwargs(url, kwargs)
         logger.debug(f"[Uqload] Fetching embed page: {url}")
 
         resp = await self._make_request(url, headers=self.BROWSER_HEADERS)
@@ -158,6 +159,9 @@ class UqloadExtractor(BaseExtractor):
                 "origin": origin,
             },
             "mediaflow_endpoint": mediaflow_endpoint,
+            "selected_proxy": self.last_used_proxy,
+            "force_direct": self._force_direct,
+            "bypass_warp": self.bypass_warp_active,
         }
 
     async def close(self):

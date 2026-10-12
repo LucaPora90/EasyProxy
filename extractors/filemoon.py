@@ -30,13 +30,14 @@ class FileMoonExtractor(F16PxExtractor):
                 return segment
         return None
 
-    async def _extract_filemoon_org(self, url: str) -> dict:
+    async def _extract_filemoon_org(self, url: str, **kwargs) -> dict:
         code = self._filemoon_org_id(url)
         if not code:
             raise ExtractorError(f"{self.ERROR_PREFIX}: missing file id in {url}")
 
         parsed = urlparse(url)
         stream_url = f"{parsed.scheme}://{parsed.netloc}/{code}/stream"
+        self._apply_routing_kwargs(stream_url, kwargs)
         headers = {
             "Accept": "*/*",
             "Referer": url,
@@ -65,12 +66,15 @@ class FileMoonExtractor(F16PxExtractor):
             "destination_url": destination,
             "request_headers": self.base_headers,
             "mediaflow_endpoint": mediaflow_endpoint,
+            "selected_proxy": self.last_used_proxy,
+            "force_direct": self._force_direct,
+            "bypass_warp": self.bypass_warp_active,
         }
 
     async def extract(self, url: str, **kwargs) -> dict:
         host = (urlparse(url).hostname or "").lower()
         if host == "filemoon.org" or host.endswith(".filemoon.org"):
-            return await self._extract_filemoon_org(url)
+            return await self._extract_filemoon_org(url, **kwargs)
         return await super().extract(url, **kwargs)
 
 

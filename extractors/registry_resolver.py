@@ -371,6 +371,17 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
                         request_headers, proxies=proxy_list
                     )
                 return self.extractors[key]
+            elif host in {"fctv33", "fctv", "fctv33hd"}:
+                key = _cache_key("fctv33", bypass_warp)
+                if Fctv33Extractor is None:
+                    raise RuntimeError("Fctv33Extractor module not available")
+                proxy = get_proxy_for_url(url, bypass_warp=bypass_warp, extractor_name="fctv33")
+                proxy_list = _build_proxy_list(proxy, "fctv33")
+                if key not in self.extractors:
+                    self.extractors[key] = Fctv33Extractor(
+                        request_headers, proxies=proxy_list, bypass_warp=bypass_warp
+                    )
+                return self.extractors[key]
 
         # 2. Auto-detection basata sull'URL
         parsed_url = urllib.parse.urlparse(url)
@@ -392,6 +403,21 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
             if key not in self.extractors:
                 self.extractors[key] = ADSExtractor(
                     request_headers, proxies=proxy_list
+                )
+            return self.extractors[key]
+
+        # FCTV33: link diretto firmato con marker #fctv33&matchId=..&streamId=.. (generato da
+        # fctv33_omg_universal). Va riconosciuto PRIMA dello shortcut "link diretto" sotto,
+        # altrimenti finirebbe nel generic con un token legato all'IP/scaduto.
+        if re.search(r"(?:#|%23)fctv33(?![a-z0-9])", url, re.IGNORECASE):
+            key = _cache_key("fctv33", bypass_warp)
+            if Fctv33Extractor is None:
+                raise RuntimeError("Fctv33Extractor module not available")
+            proxy = get_proxy_for_url(url, bypass_warp=bypass_warp, extractor_name="fctv33")
+            proxy_list = _build_proxy_list(proxy, "fctv33")
+            if key not in self.extractors:
+                self.extractors[key] = Fctv33Extractor(
+                    request_headers, proxies=proxy_list, bypass_warp=bypass_warp
                 )
             return self.extractors[key]
 
@@ -833,6 +859,17 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
                 raise RuntimeError("CinejoyExtractor module not available")
             if key not in self.extractors:
                 self.extractors[key] = CinejoyExtractor(
+                    request_headers, proxies=proxy_list, bypass_warp=bypass_warp
+                )
+            return self.extractors[key]
+        elif "fctv33" in url.lower() or url.lower().startswith("fctv33://") or "tcdru136ovur.ru" in url.lower() or "tcpwe138stya.ru" in url.lower():
+            key = _cache_key("fctv33", bypass_warp)
+            if Fctv33Extractor is None:
+                raise RuntimeError("Fctv33Extractor module not available")
+            proxy = get_proxy_for_url(url, bypass_warp=bypass_warp, extractor_name="fctv33")
+            proxy_list = _build_proxy_list(proxy, "fctv33")
+            if key not in self.extractors:
+                self.extractors[key] = Fctv33Extractor(
                     request_headers, proxies=proxy_list, bypass_warp=bypass_warp
                 )
             return self.extractors[key]

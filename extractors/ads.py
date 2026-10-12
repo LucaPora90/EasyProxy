@@ -66,6 +66,7 @@ class ADSExtractor(BaseExtractor):
         return _ads_cookie or ADS_COOKIE, _ads_origin
 
     async def extract(self, url: str, **kwargs) -> dict:
+        self._apply_routing_kwargs(url, kwargs)
         parsed = urlparse(url)
         host = (parsed.hostname or "").lower()
         if parsed.scheme not in {"http", "https"}:
@@ -140,5 +141,7 @@ class ADSExtractor(BaseExtractor):
                 "Accept": "*/*",
             },
             "mediaflow_endpoint": self.mediaflow_endpoint,
-            "selected_proxy": self._session_proxy,
+            "selected_proxy": self.last_used_proxy,
+            "force_direct": self._force_direct,
+            "bypass_warp": self.bypass_warp_active,
         }

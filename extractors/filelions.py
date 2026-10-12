@@ -9,6 +9,7 @@ class FileLionsExtractor(BaseExtractor):
 
     async def extract(self, url: str, **kwargs) -> dict:
         """Extract FileLions URL."""
+        self._apply_routing_kwargs(url, kwargs)
         session = await self._get_session(url)
         
         headers = {}
@@ -26,6 +27,9 @@ class FileLionsExtractor(BaseExtractor):
             "destination_url": final_url,
             "request_headers": self.base_headers,
             "mediaflow_endpoint": self.mediaflow_endpoint,
+            "selected_proxy": self.last_used_proxy,
+            "force_direct": self._force_direct,
+            "bypass_warp": self.bypass_warp_active,
         }
 
     async def close(self):

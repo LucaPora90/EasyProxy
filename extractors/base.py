@@ -7,6 +7,8 @@ from config import (
     get_connector_for_proxy,
     SELECTED_PROXY_CONTEXT,
     STRICT_PROXY_CONTEXT,
+    BYPASS_PROXIES_CONTEXT,
+    BYPASS_WARP_CONTEXT,
     mark_proxy_dead,
     get_preferred_proxy_for_url,
     ALL_PROXY_ERRORS,
@@ -59,18 +61,66 @@ class BaseExtractor:
         self.extractor_name = extractor_name
         self._session_proxy = None
         self._route_sessions = {}
-        
+        # New-contract routing state (None = defer to contexts). Set by
+        # _apply_routing_kwargs at the top of extract(); see AGENTS.md.
+        self.bypass_warp_active = None
+        self._forced_proxy = None
+        self._force_direct = False
+        self.last_used_proxy = None
+
+    def _apply_routing_kwargs(self, url: str, kwargs: dict | None = None) -> None:
+        """Canonical per-request routing merge (proxy_streaming passes proxy/
+        warp/direct as kwargs, not via context). proxy_exclude_domains drops
+        even an explicit ?proxy= (WARP exempt); see config.effective_forced_proxy."""
+        kwargs = kwargs or {}
+        raw_proxy = kwargs.get("proxy")
+        bypass_proxies = str(raw_proxy or "").lower() in {"off", "none", "no"} or BYPASS_PROXIES_CONTEXT.get()
+        bypass_warp = bool(kwargs.get("bypass_warp") or str(kwargs.get("warp", "")).lower() == "off" or BYPASS_WARP_CONTEXT.get() or self.bypass_warp_active)
+        self.bypass_warp_active = bypass_warp
+        direct_requested = str(kwargs.get("direct", "")).lower() in {"1", "true", "yes", "on"} or (bypass_proxies and bypass_warp)
+        if direct_requested or (bypass_proxies and bypass_warp):
+            self._forced_proxy, self._force_direct = None, True
+        elif bypass_proxies:
+            self._forced_proxy, self._force_direct = (_cfg.WARP_PROXY_URL if _cfg._get_dynamic_warp_enabled() else None), False
+            if not self._forced_proxy:
+                self._force_direct = True
+        elif raw_proxy and str(raw_proxy).lower() not in {"on", "auto", "true", ""}:
+            self._forced_proxy, self._force_direct = str(raw_proxy), False
+        else:
+            self._forced_proxy, self._force_direct = None, False
+        self._forced_proxy = _cfg.effective_forced_proxy(url, self._forced_proxy)
+
+    async def _resolve_proxy(self, url: str | None = None) -> str | None:
+        """Resolve the outbound proxy honoring _apply_routing_kwargs state."""
+        if self._force_direct:
+            proxy = None
+        elif self._forced_proxy:
+            proxy = str(self._forced_proxy)
+        else:
+            proxy = await get_preferred_proxy_for_url(url, self.extractor_name, self.proxies or _cfg.GLOBAL_PROXIES, self.bypass_warp_active)
+        if proxy and self.bypass_warp_active and _cfg.is_warp_proxy_url(proxy):
+            proxy = None
+        if proxy is None and not self._force_direct and not _cfg.is_direct_connection_allowed(self.bypass_warp_active):
+            raise ClientConnectionError(
+                "No proxy route available; direct fallback disabled"
+            )
+        self.last_used_proxy = proxy
+        return proxy
+
+    def _routing_result_fields(self) -> dict:
+        """MANDATORY result fields: downstream uses them for segments."""
+        return {
+            "selected_proxy": self.last_used_proxy,
+            "force_direct": self._force_direct,
+            "bypass_warp": self.bypass_warp_active,
+        }
 
     async def _get_session(self, url: str = None):
-        proxy = await get_preferred_proxy_for_url(url, self.extractor_name, self.proxies or _cfg.GLOBAL_PROXIES)
+        proxy = await self._resolve_proxy(url)
 
         async with self._session_lock:
             self.session = self._route_sessions.get(proxy)
             self._session_proxy = proxy
-            if proxy is None and not _cfg.is_direct_connection_allowed():
-                raise ClientConnectionError(
-                    "No proxy route available; direct fallback disabled"
-                )
             if (
                 self.session is None
                 or self.session.closed

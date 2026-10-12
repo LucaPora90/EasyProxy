@@ -145,6 +145,7 @@ class MediasetExtractor(BaseExtractor):
         self.mediaflow_endpoint = "mpd_manifest_proxy"
 
     async def extract(self, url: str, **kwargs) -> dict:
+        self._apply_routing_kwargs(url, kwargs)
         parsed = urlparse(url)
         if (
             parsed.scheme not in {"http", "https"}
@@ -203,6 +204,9 @@ class MediasetExtractor(BaseExtractor):
             "mediaflow_endpoint": self.mediaflow_endpoint,
             "captured_manifest": resolved["manifest_text"],
             "query_params": {"clearkey": clearkey},
+            "selected_proxy": self.last_used_proxy,
+            "force_direct": self._force_direct,
+            "bypass_warp": self.bypass_warp_active,
         }
 
     async def _resolve_playback(self, page_url: str) -> dict:

@@ -19,6 +19,7 @@ class GenericHLSExtractor(BaseExtractor):
 
     async def extract(self, url, **kwargs):
         # ✅ AGGIORNATO: Rimossa validazione estensioni su richiesta utente.
+        self._apply_routing_kwargs(url, kwargs)
         session = await self._get_session(url)
         parsed_url = urlparse(url)
         origin = f"{parsed_url.scheme}://{parsed_url.netloc}"
@@ -102,7 +103,10 @@ class GenericHLSExtractor(BaseExtractor):
         return {
             "destination_url": str(yarl.URL(url, encoded=True)), 
             "request_headers": headers, 
-            "mediaflow_endpoint": "hls_proxy"
+            "mediaflow_endpoint": "hls_proxy",
+            "selected_proxy": self.last_used_proxy,
+            "force_direct": self._force_direct,
+            "bypass_warp": self.bypass_warp_active,
         }
 
     async def close(self):

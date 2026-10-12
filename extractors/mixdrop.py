@@ -7,8 +7,8 @@ from urllib.parse import urlparse, urljoin
 from curl_cffi.requests import AsyncSession
 from bs4 import BeautifulSoup
 
-from config import get_preferred_proxy_for_url
 import config as _cfg
+from extractors.base import BaseExtractor
 from utils.cookie_cache import CookieCache
 
 logger = logging.getLogger(__name__)
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 class ExtractorError(Exception):
     pass
 
-class MixdropExtractor:
+class MixdropExtractor(BaseExtractor):
     _result_cache = {}
     _cache_ttl = 600
     _cache_max_entries = 30
@@ -32,6 +32,7 @@ class MixdropExtractor:
             cls._result_cache.pop(oldest, None)
 
     def __init__(self, request_headers: dict = None, proxies: list = None, bypass_warp: bool = False):
+        super().__init__(request_headers or {}, proxies, extractor_name="mixdrop")
         self.request_headers = request_headers or {}
         self.base_headers = self.request_headers.copy()
         if "User-Agent" not in self.base_headers and "user-agent" not in self.base_headers:
@@ -70,7 +71,8 @@ class MixdropExtractor:
 
     async def extract(self, url: str, **kwargs) -> dict:
         normalized_url = url.strip().replace(" ", "%20")
-        cache_key = (normalized_url, self.bypass_warp_active)
+        self._apply_routing_kwargs(normalized_url, kwargs)
+        cache_key = (normalized_url, self._forced_proxy, self._force_direct, self.bypass_warp_active)
         MixdropExtractor._prune_result_cache()
         if cache_key in MixdropExtractor._result_cache:
             result, timestamp = MixdropExtractor._result_cache[cache_key]
@@ -79,11 +81,7 @@ class MixdropExtractor:
                 return result
 
         logger.info(f"🔍 [Cache Miss] Extracting new link for: {normalized_url}")
-        proxy = await get_preferred_proxy_for_url(normalized_url, "mixdrop", self.proxies, self.bypass_warp_active)
-        if proxy is None and not _cfg.is_direct_connection_allowed(self.bypass_warp_active):
-            raise ExtractorError(
-                "Mixdrop: direct fallback disabled; no proxy route available"
-            )
+        await self._resolve_proxy(normalized_url)
         try:
             ua, cookies = self.base_headers.get("User-Agent"), {}
             parsed = urlparse(url)
@@ -108,11 +106,7 @@ class MixdropExtractor:
                 if depth > 3: return None
                 try:
                     m_headers = self._step_headers(ua, current_url)
-                    pref_p = await get_preferred_proxy_for_url(current_url, "mixdrop", self.proxies, self.bypass_warp_active)
-                    if pref_p is None and not _cfg.is_direct_connection_allowed(self.bypass_warp_active):
-                        raise ExtractorError(
-                            "Mixdrop: direct fallback disabled; no proxy route available"
-                        )
+                    pref_p = await self._resolve_proxy(current_url)
                     cs_proxies = _build_cs_proxies(pref_p)
                     
                     async def fetch_page():
@@ -199,7 +193,7 @@ class MixdropExtractor:
         headers = {"Referer": referer, "User-Agent": ua, "Origin": f"https://{urlparse(referer).netloc}"}
         if cookies:
             headers["Cookie"] = "; ".join([f"{k}={v}" for k, v in cookies.items()])
-        return {"destination_url": video_url, "request_headers": headers, "mediaflow_endpoint": self.mediaflow_endpoint, "bypass_warp": self.bypass_warp_active}
+        return {"destination_url": video_url, "request_headers": headers, "mediaflow_endpoint": self.mediaflow_endpoint, "bypass_warp": self.bypass_warp_active, "selected_proxy": self.last_used_proxy, "force_direct": self._force_direct}
 
     async def close(self):
         pass

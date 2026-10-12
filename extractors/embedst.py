@@ -5,7 +5,6 @@ import os
 import shutil
 from typing import Any
 
-from config import get_preferred_proxy_for_url
 import config as _cfg
 from extractors.base import BaseExtractor, ExtractorError
 from services.socks_bridge import get_http_bridge_for_proxy
@@ -48,6 +47,9 @@ class EmbedStExtractor(BaseExtractor):
             raise ExtractorError("EmbedSt: node binary not found on PATH (required for headless WASM extraction)")
 
         # If this is a streamed.pk/watch/ page, resolve the embed.st iframe URL first.
+        # ponytail: reset per-request routing state so the pre-merge fetch below
+        # behaves exactly like auto routing (no stale forced proxy).
+        self._forced_proxy, self._force_direct = None, False
         url = await self._resolve_embed_url(url)
 
         if "embed.st/embed/" not in url.lower() and "embedsports.top/embed/" not in url.lower():
@@ -56,15 +58,8 @@ class EmbedStExtractor(BaseExtractor):
         if not os.path.exists(_RUNNER):
             raise ExtractorError(f"EmbedSt: runner script not found at {_RUNNER}")
 
-        bypass_warp = bool(kwargs.get("bypass_warp") or self.bypass_warp_active)
-        self.bypass_warp_active = bypass_warp
-        proxy = await get_preferred_proxy_for_url(
-            url, "embedst", self.proxies, bypass_warp
-        )
-        if proxy is None and not _cfg.is_direct_connection_allowed(bypass_warp):
-            raise ExtractorError(
-                "EmbedSt: direct fallback disabled; no proxy route available"
-            )
+        self._apply_routing_kwargs(url, kwargs)
+        proxy = await self._resolve_proxy(url)
         runner_proxy = await get_http_bridge_for_proxy(proxy)
         if proxy and not runner_proxy:
             raise ExtractorError(
@@ -148,6 +143,8 @@ class EmbedStExtractor(BaseExtractor):
             "captured_manifest": captured_manifest,
             "captured_manifests": {m3u8: captured_manifest} if captured_manifest else {},
             "bypass_warp": self.bypass_warp_active,
+            "selected_proxy": self.last_used_proxy,
+            "force_direct": self._force_direct,
         }
 
     async def _resolve_embed_url(self, url: str) -> str:
@@ -188,13 +185,7 @@ class EmbedStExtractor(BaseExtractor):
         return self._curl_session
 
     async def _fetch_manifest(self, url: str, headers: dict) -> str | None:
-        proxy = await get_preferred_proxy_for_url(
-            url, "embedst", self.proxies, self.bypass_warp_active
-        )
-        if proxy is None and not _cfg.is_direct_connection_allowed(self.bypass_warp_active):
-            raise ExtractorError(
-                "EmbedSt: direct fallback disabled; no proxy route available"
-            )
+        proxy = await self._resolve_proxy(url)
         request_kwargs = {}
         if proxy:
             request_kwargs["proxies"] = {"http": proxy, "https": proxy}

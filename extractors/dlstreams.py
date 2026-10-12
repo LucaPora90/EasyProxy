@@ -24,6 +24,7 @@ from config import (
     get_ordered_proxies_for_url,
 )
 import config as _cfg
+from extractors.base import BaseExtractor
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +65,7 @@ def _decode_barecrop_econfig(enc: str) -> str | None:
 class ExtractorError(Exception):
     pass
 
-class DLStreamsExtractor:
+class DLStreamsExtractor(BaseExtractor):
     """Extractor for daddy live / dlstreams streams."""
 
     # Return before the request layer kills the task at 30s: an unresponsive
@@ -75,14 +76,16 @@ class DLStreamsExtractor:
     # Players poll the extractor every few seconds. Re-scraping the player
     # pages on every poll gets the iframe host to answer 429, so reuse a
     # validated stream URL for a short window instead. When a re-scrape fails,
-    # keep serving the last known URL (its token lives for hours) with a small
-    # backoff so the failing host is not hammered.
+    # serve the last known URL only if it still probes alive (never hang the
+    # player 40-50s on a dead playlist) with a small backoff so the failing
+    # host is not hammered. Stale window tracks the signed-token lifetime (~3-4 min).
     STREAM_CACHE_SECONDS = 30.0
-    STREAM_CACHE_STALE_SECONDS = 900.0
+    STREAM_CACHE_STALE_SECONDS = 300.0
     STREAM_CACHE_FAIL_BACKOFF_SECONDS = 15.0
     MAX_HOST_BACKOFF_SECONDS = 3600.0
 
     def __init__(self, request_headers: dict = None, proxies: list = None, bypass_warp: bool = False):
+        super().__init__(request_headers or {}, proxies, extractor_name="dlstreams")
         self.request_headers = request_headers or {}
         self.entry_origin = ""
         self.stream_origin = ""
@@ -94,8 +97,8 @@ class DLStreamsExtractor:
         self.mediaflow_endpoint = "hls_manifest_proxy"
         self.proxies = proxies or []
         self.bypass_warp_active = bypass_warp
-        self._inflight_extract_tasks: dict[str, asyncio.Task] = {}
-        self._stream_cache: dict[str, tuple[float, float, dict]] = {}
+        self._inflight_extract_tasks: dict = {}
+        self._stream_cache: dict = {}
         # host -> monotonic deadline: honour upstream Retry-After instead of
         # scraping a host that already said "too many requests".
         self._host_backoff: dict[str, float] = {}
@@ -153,8 +156,8 @@ class DLStreamsExtractor:
             return 0.0
         return max(self._host_backoff.values()) - now
 
-    def _prioritize_player_urls(self, channel_id: str) -> list[str]:
-        return self._build_player_urls(channel_id)
+    def _prioritize_player_urls(self, channel_id: str, requested_url: str = "") -> list[str]:
+        return self._build_player_urls(channel_id, requested_url=requested_url)
 
     @staticmethod
     def _origin_of(url: str) -> str:
@@ -215,11 +218,34 @@ class DLStreamsExtractor:
             channel_id = channel_id.replace("premium", "")
         return channel_id
 
-    def _build_player_urls(self, channel_id: str) -> list[str]:
+    def _build_player_urls(self, channel_id: str, requested_url: str = "") -> list[str]:
         origin = self.entry_origin.rstrip("/")
+        req_lower = (requested_url or "").lower()
+        if "/stream/stream-" in req_lower:
+            # User explicitly requested Player 1 (/stream/)
+            return [
+                f"{origin}/stream/stream-{channel_id}.php",
+                f"{origin}/cast/stream-{channel_id}.php",
+                f"{origin}/watch/stream-{channel_id}.php",
+                f"{origin}/plus/stream-{channel_id}.php",
+                f"{origin}/casting/stream-{channel_id}.php",
+                f"{origin}/player/stream-{channel_id}.php",
+                f"{origin}/hub/stream-{channel_id}.php",
+            ]
+        # Default: prioritize Player 2 (/cast/) because it provides clean native MPEG-TS (.ts)
+        # without the heavy (7MB+) PNG-wrapped TikTok CDN overhead and frequent 403s of Player 1.
+        # Exception: 861 always tries Player 1 first, even when its Player 2 looks
+        # online in a browser. That backend serves a technically valid stream (HTTP 200,
+        # valid MPEG-TS container, advancing timestamps, decodable-looking frames) whose
+        # video track is unplayable, so every cheap liveness probe promotes it while
+        # playback shows green/black with working audio. The failure only surfaces at
+        # decode time, which no proxy-side check can afford to replicate -- every
+        # simpler approach was tried and discarded, this pin is the fix.
+        first = "stream" if channel_id == "861" else "cast"
+        second = "cast" if channel_id == "861" else "stream"
         return [
-            f"{origin}/stream/stream-{channel_id}.php",
-            f"{origin}/cast/stream-{channel_id}.php",
+            f"{origin}/{first}/stream-{channel_id}.php",
+            f"{origin}/{second}/stream-{channel_id}.php",
             f"{origin}/watch/stream-{channel_id}.php",
             f"{origin}/plus/stream-{channel_id}.php",
             f"{origin}/casting/stream-{channel_id}.php",
@@ -254,13 +280,81 @@ class DLStreamsExtractor:
                 return cls._inherit_query_if_missing(urljoin(base_url, line), base_url)
         return None
 
-    async def _is_stream_alive(self, session, stream_url: str, headers: dict, budget: float | None = None) -> bool:
+    @staticmethod
+    def _segment_looks_like_image(segment_url: str, content_type: str, head: bytes) -> bool:
+        """True when a segment is (or may be) an image container instead of raw TS."""
+        if head[:1] == b"\x47":
+            return False  # already clean MPEG-TS
+        if head.startswith(b"\x89PNG\r\n\x1a\n") or (head[:4] == b"RIFF" and head[8:12] == b"WEBP"):
+            return True
+        low = (segment_url or "").lower()
+        return (
+            (content_type or "").startswith("image/")
+            or ".image" in low
+            or "tiktokcdn" in low
+            or "~tplv-" in low
+        )
+
+    async def _image_segment_carries_ts(
+        self, session, segment_url: str, headers: dict, budget: float | None = None
+    ) -> bool:
+        """Download an image-wrapped segment and check that a real MPEG-TS can be unwrapped.
+
+        Mirrors the proxy: only segments that unwrap to TS are served, anything else
+        (static banner / placeholder) is dropped with HTTP 204. Returns False only when
+        that is definitively the case; network errors/timeouts/oversize are inconclusive
+        and return True so a slow link does not discard a working player.
+        """
+        try:
+            from services.proxy_core import HLSProxyCoreMixin
+        except Exception as e:
+            logger.debug("DLStreams: cannot import unwrapper, skipping deep check: %s", e)
+            return True
+
+        max_bytes = 16 * 1024 * 1024
+        total = 12.0 if budget is None else max(2.0, min(12.0, budget))
+        body = bytearray()
+        try:
+            async with session.get(
+                segment_url, headers=headers, timeout=ClientTimeout(total=total)
+            ) as resp:
+                if resp.status != 200:
+                    return False
+                async for chunk in resp.content.iter_chunked(65536):
+                    body.extend(chunk)
+                    if len(body) > max_bytes:
+                        logger.debug("DLStreams: image segment above %d bytes, deep check inconclusive", max_bytes)
+                        return True
+        except Exception as e:
+            logger.debug("DLStreams: deep segment check inconclusive for %s: %s", segment_url, e)
+            return True
+
+        data = bytes(body)
+        if not data:
+            return False
+        try:
+            unwrapped = await asyncio.to_thread(
+                HLSProxyCoreMixin._strip_fake_png_header_from_ts, data
+            )
+        except Exception as e:
+            logger.debug("DLStreams: unwrap failed for %s: %s", segment_url, e)
+            return False
+        return bool(unwrapped) and len(unwrapped) > 188 and unwrapped[0] == 0x47
+
+    async def _is_stream_alive(self, session, stream_url: str, headers: dict, budget: float | None = None, deep: bool = True) -> bool:
         """Validate the full chain: master -> variant -> first segment (+ AES key).
 
         Some CDNs serve the manifest (200) while segments 403 (IP-bound
         tokens, datacenter blocks). A manifest-only check would accept a
         dead player and hide the working ones, so follow the chain with
         cheap probes (first bytes of the first segment only).
+
+        With ``deep=True`` an image-wrapped segment (PNG/WebP, e.g. Player 1) is
+        downloaded once and unwrapped exactly like the proxy does when serving it:
+        if no MPEG-TS can be recovered (static banner/placeholder image, which the
+        proxy would answer with HTTP 204) the player is reported dead so the caller
+        moves on to the next player. ``deep=False`` keeps the cheap check only
+        (used for the quick stale-cache probe).
         """
         def _timeout(default: float) -> float:
             if budget is None:
@@ -297,14 +391,26 @@ class DLStreamsExtractor:
                 logger.debug("DLStreams: validation of %s -> no segments listed", stream_url)
                 return False
             probe_headers = {**headers, "Range": "bytes=0-1023"}
+            seg_ctype = ""
+            seg_head = b""
             async with session.get(segment, headers=probe_headers, timeout=_timeout(8)) as resp:
                 if resp.status not in (200, 206):
                     logger.debug("DLStreams: segment probe of %s -> HTTP %s", segment, resp.status)
                     return False
+                seg_ctype = (resp.headers.get("Content-Type") or "").lower()
                 try:
-                    await resp.content.read(4096)
+                    seg_head = await resp.content.read(4096)
                 except Exception:
                     pass
+            if deep and self._segment_looks_like_image(segment, seg_ctype, seg_head):
+                if not await self._image_segment_carries_ts(
+                    session, segment, headers, budget=budget
+                ):
+                    logger.info(
+                        "DLStreams: segment %s is an image with no MPEG-TS payload, treating player as dead",
+                        segment,
+                    )
+                    return False
             # AES key, if the variant uses one
             key_match = re.search(r'#EXT-X-KEY:[^\n]*URI="([^"]+)"', current_body)
             if key_match:
@@ -319,6 +425,7 @@ class DLStreamsExtractor:
                 except Exception as e:
                     logger.debug("DLStreams: key probe of %s failed: %s", key_url, e)
                     return False
+            self._last_validated_manifest = current_body or master
             return True
         except Exception as e:
             logger.debug("DLStreams: validation of %s failed: %s", stream_url, e)
@@ -333,18 +440,22 @@ class DLStreamsExtractor:
         cookie_header = self._get_cookie_header_for_url(stream_url)
         if cookie_header:
             playback_headers = {**playback_headers, "Cookie": cookie_header}
+        manifest_text = getattr(self, "_last_validated_manifest", None) or ""
         return {
             "destination_url": stream_url,
             "request_headers": playback_headers,
             "mediaflow_endpoint": self.mediaflow_endpoint,
             "captured_manifest": None,
-            "captured_manifests": {stream_url: ""},
+            "captured_manifests": {stream_url: manifest_text},
+            "selected_proxy": self.last_used_proxy,
+            "force_direct": self._force_direct,
+            "bypass_warp": self.bypass_warp_active,
         }
 
     async def _extract_directly(self, url: str, channel_id: str) -> Dict[str, Any] | None:
         """Fast path direct HTTP M3U8 extraction."""
         session = await self._get_session(url)
-        player_urls = self._prioritize_player_urls(channel_id)
+        player_urls = self._prioritize_player_urls(channel_id, requested_url=url)
         first_fallback = None  # (stream_url, playback_headers): first URL found, even if dead
         seen_iframes: set[str] = set()
         
@@ -546,12 +657,17 @@ class DLStreamsExtractor:
     async def _get_session(self, url: str | None = None):
         # Determine the correct proxy for the current state
         target_url = url or self.stream_origin or self.entry_origin
-        proxy_url = await get_preferred_proxy_for_url(target_url, "dlstreams", self.proxies, self.bypass_warp_active)
+        forced = None if self._force_direct else _cfg.effective_forced_proxy(target_url, self._forced_proxy)
+        if forced:
+            proxy_url = forced
+        else:
+            proxy_url = await get_preferred_proxy_for_url(target_url, "dlstreams", self.proxies, self.bypass_warp_active)
         if proxy_url is None and not _cfg.is_direct_connection_allowed(self.bypass_warp_active):
             raise ExtractorError(
                 "DLStreams: no usable proxy route; direct fallback disabled "
                 f"[{self._route_diagnostic(target_url)}]"
             )
+        self.last_used_proxy = proxy_url
         
         session = self._route_sessions.get(proxy_url)
         if session is not None and not session.closed:
@@ -583,8 +699,10 @@ class DLStreamsExtractor:
     async def extract(self, url: str, **kwargs) -> Dict[str, Any]:
         """Extracts the M3U8 URL and headers bypassing the public watch page."""
         self._sync_entry_origin_from_url(url)
+        self._apply_routing_kwargs(url, kwargs)
         channel_id = self._extract_channel_id(url)
-        channel_key = f"premium{channel_id}"
+        req_mode = "stream" if "/stream/stream-" in url.lower() else "default"
+        channel_key = (f"premium{channel_id}", req_mode, self._forced_proxy, self._force_direct, self.bypass_warp_active)
 
         cached = self._stream_cache.get(channel_key)
         if cached and cached[0] > time.monotonic():
@@ -607,12 +725,17 @@ class DLStreamsExtractor:
                         self._inflight_extract_tasks.pop(channel_key, None)
         except Exception:
             if cached and cached[1] > time.monotonic():
+                if await self._is_cached_still_alive(cached[2]):
+                    logger.warning(
+                        "DLStreams: extraction failed for %s, serving last known stream URL",
+                        channel_key,
+                    )
+                    self._backoff_cache_entry(channel_key, cached)
+                    return dict(cached[2])
                 logger.warning(
-                    "DLStreams: extraction failed for %s, serving last known stream URL",
+                    "DLStreams: cached stream for %s is dead, not serving stale",
                     channel_key,
                 )
-                self._backoff_cache_entry(channel_key, cached)
-                return dict(cached[2])
             raise
 
         if result and result.pop("_validated", False):
@@ -623,17 +746,22 @@ class DLStreamsExtractor:
                 dict(result),
             )
         elif result and cached and cached[1] > time.monotonic():
+            if await self._is_cached_still_alive(cached[2]):
+                logger.warning(
+                    "DLStreams: no player validated for %s, serving last known stream URL",
+                    channel_key,
+                )
+                self._backoff_cache_entry(channel_key, cached)
+                return dict(cached[2])
             logger.warning(
-                "DLStreams: no player validated for %s, serving last known stream URL",
+                "DLStreams: cached stream for %s is dead, not serving stale",
                 channel_key,
             )
-            self._backoff_cache_entry(channel_key, cached)
-            return dict(cached[2])
         elif result:
             result.pop("_validated", None)
         return result
 
-    def _backoff_cache_entry(self, channel_key: str, cached: tuple[float, float, dict]) -> None:
+    def _backoff_cache_entry(self, channel_key, cached: tuple[float, float, dict]) -> None:
         """Delay the next scrape, honouring any Retry-After from the hosts."""
         wait = max(self.STREAM_CACHE_FAIL_BACKOFF_SECONDS, self._rate_limit_wait())
         self._stream_cache[channel_key] = (
@@ -641,6 +769,18 @@ class DLStreamsExtractor:
             cached[1],
             cached[2],
         )
+
+    async def _is_cached_still_alive(self, cached_result: dict) -> bool:
+        """Quick probe before serving a stale URL: fail fast instead of hanging playback."""
+        try:
+            stream_url = (cached_result or {}).get("destination_url", "")
+            if not stream_url:
+                return False
+            headers = (cached_result or {}).get("request_headers", {}) or {}
+            session = await self._get_session(stream_url)
+            return await self._is_stream_alive(session, stream_url, headers, budget=4.0, deep=False)
+        except Exception:
+            return False
 
     async def _extract_impl(self, url: str, channel_id: str, **kwargs) -> Dict[str, Any]:
         try:

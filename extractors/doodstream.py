@@ -9,6 +9,7 @@ from urllib.parse import urljoin, urlparse
 from curl_cffi.requests import AsyncSession
 from config import get_preferred_proxy_for_url
 import config as _cfg
+from extractors.base import BaseExtractor
 from utils.cookie_cache import CookieCache
 
 logger = logging.getLogger(__name__)
@@ -23,12 +24,13 @@ _DOOD_UA = (
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 
-class DoodStreamExtractor:
+class DoodStreamExtractor(BaseExtractor):
     """
     DoodStream / PlayMogo extractor.
     """
 
     def __init__(self, request_headers: dict = None, proxies: list = None):
+        super().__init__(request_headers or {}, proxies, extractor_name="doodstream")
         self.request_headers = request_headers or {}
         self.base_headers = self.request_headers.copy()
         self.base_headers["User-Agent"] = _DOOD_UA
@@ -189,16 +191,20 @@ class DoodStreamExtractor:
 
         embed_url = url if "/e/" in url else f"https://{parsed.netloc}/e/{video_id}"
 
-        bypass_warp = kwargs.get("bypass_warp")
+        self._apply_routing_kwargs(embed_url, kwargs)
 
         try:
             logger.info(f"DoodStream: Trying curl_cffi extraction for {embed_url}")
 
-            # Use default proxy (WARP if enabled) or user-specified bypass_warp.
+            # Forced proxy (or WARP-only/direct routing state) wins; else auto chain.
+            if self._force_direct:
+                preselected = None
+            else:
+                preselected = self._forced_proxy or await self._get_proxy(embed_url, bypass_warp=self.bypass_warp_active)
             result = await self._do_extract_with_proxy(
                 embed_url,
-                await self._get_proxy(embed_url, bypass_warp=bypass_warp),
-                bypass_warp=bypass_warp,
+                preselected,
+                bypass_warp=self.bypass_warp_active,
             )
             if result:
                 return result
@@ -227,6 +233,8 @@ class DoodStreamExtractor:
             "request_headers": {"User-Agent": ua, "Referer": f"{base_url}/", "Accept": "*/*"},
             "mediaflow_endpoint": self.mediaflow_endpoint,
             "selected_proxy": self.last_used_proxy,
+            "force_direct": self._force_direct,
+            "bypass_warp": self.bypass_warp_active,
         }
 
     async def close(self):

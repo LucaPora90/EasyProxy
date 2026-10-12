@@ -11,7 +11,7 @@ from nacl.secret import SecretBox
 
 from config import get_preferred_proxy_for_url
 import config as _cfg
-from extractors.base import ExtractorError
+from extractors.base import BaseExtractor, ExtractorError
 
 logger = logging.getLogger(__name__)
 
@@ -27,15 +27,12 @@ _UA = (
 )
 
 
-class VidLinkExtractor:
+class VidLinkExtractor(BaseExtractor):
     """Resolve VidLink movie/TV embeds to their highest-quality stream."""
 
     def __init__(self, request_headers: dict, proxies: list = None):
+        super().__init__(request_headers, proxies, extractor_name="vidlink")
         self.request_headers = request_headers or {}
-        self.proxies = proxies or []
-        self.extractor_name = "vidlink"
-        self.mediaflow_endpoint = "hls_proxy"
-        self.last_used_proxy = None
 
     @staticmethod
     def _encrypt_token(media_id: str) -> str:
@@ -146,11 +143,14 @@ class VidLinkExtractor:
             "Referer": "https://vidlink.pro/",
             "X-Playback-Environment": "dash-hevc",
         }
-        bypass_warp = bool(kwargs.get("bypass_warp"))
-        proxy = await get_preferred_proxy_for_url(
-            api_url, self.extractor_name, self.proxies, bypass_warp
-        )
-        if proxy is None and not _cfg.is_direct_connection_allowed(bypass_warp):
+        self._apply_routing_kwargs(api_url, kwargs)
+        if self._force_direct:
+            proxy = None
+        else:
+            proxy = _cfg.effective_forced_proxy(api_url, self._forced_proxy) or await get_preferred_proxy_for_url(
+                api_url, self.extractor_name, self.proxies, self.bypass_warp_active
+            )
+        if proxy is None and not _cfg.is_direct_connection_allowed(self.bypass_warp_active):
             raise ExtractorError(
                 "VidLink: direct fallback disabled; no proxy route available"
             )
@@ -199,13 +199,14 @@ class VidLinkExtractor:
         else:
             endpoint = self.mediaflow_endpoint
         logger.info("VidLink: extracted %s", stream_url[:90])
-        force_direct = str(kwargs.get("direct", "")).lower() in {"1", "true", "yes", "on"}
+        force_direct = self._force_direct
         return {
             "destination_url": stream_url,
             "request_headers": playback_headers,
             "mediaflow_endpoint": endpoint,
             "selected_proxy": proxy,
             "force_direct": force_direct,
+            "bypass_warp": self.bypass_warp_active,
         }
 
     async def close(self):

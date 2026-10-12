@@ -52,6 +52,7 @@ WittyTVExtractor = None
 RaiPlayExtractor = None
 ADSExtractor = None
 CinejoyExtractor = None
+Fctv33Extractor = None
 
 
 # Importazione condizionale degli estrattori
@@ -296,6 +297,13 @@ except Exception as e:
     logger.warning("⚠️ CinejoyExtractor failed to load: %s", e)
     CinejoyExtractor = None
 
+try:
+    from extractors.fctv33 import Fctv33Extractor
+    logger.info("✅ Fctv33Extractor module loaded.")
+except Exception as e:
+    logger.warning("⚠️ Fctv33Extractor failed to load: %s", e)
+    Fctv33Extractor = None
+
 
 __all__ = [
     "VavooExtractor",
@@ -339,4 +347,5 @@ __all__ = [
     "ADS_SERIES_PATTERN",
     "ads_configured_host",
     "CinejoyExtractor",
+    "Fctv33Extractor",
 ]

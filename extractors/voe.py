@@ -25,6 +25,7 @@ class VoeExtractor(BaseExtractor):
         return results
 
     async def extract(self, url: str, redirect_count: int = 0, **kwargs) -> dict:
+        self._apply_routing_kwargs(url, kwargs)
         resp = await self._make_request(url)
         text = resp.text
 
@@ -45,7 +46,7 @@ class VoeExtractor(BaseExtractor):
                     raise ExtractorError("VOE: too many redirects")
                 redirect_url = urljoin(url, redirect_match.group(1))
                 logger.info(f"VOE: redirecting to {redirect_url}")
-                return await self.extract(redirect_url, redirect_count=redirect_count + 1)
+                return await self.extract(redirect_url, redirect_count=redirect_count + 1, **kwargs)
 
         all_texts = [text]
         all_texts.extend(await self._fetch_external_scripts(url, text))
@@ -68,6 +69,9 @@ class VoeExtractor(BaseExtractor):
                             "destination_url": final_url,
                             "request_headers": self.base_headers,
                             "mediaflow_endpoint": "hls_proxy",
+                            "selected_proxy": self.last_used_proxy,
+                            "force_direct": self._force_direct,
+                            "bypass_warp": self.bypass_warp_active,
                         }
 
             # 3. Try Method 7 (MKGMa)
@@ -83,6 +87,9 @@ class VoeExtractor(BaseExtractor):
                             "destination_url": final_url,
                             "request_headers": self.base_headers,
                             "mediaflow_endpoint": "hls_proxy",
+                            "selected_proxy": self.last_used_proxy,
+                            "force_direct": self._force_direct,
+                            "bypass_warp": self.bypass_warp_active,
                         }
 
             # 4. Try Method 6 (a168c)
@@ -98,6 +105,9 @@ class VoeExtractor(BaseExtractor):
                             "destination_url": final_url,
                             "request_headers": self.base_headers,
                             "mediaflow_endpoint": "hls_proxy",
+                            "selected_proxy": self.last_used_proxy,
+                            "force_direct": self._force_direct,
+                            "bypass_warp": self.bypass_warp_active,
                         }
 
             # 5. Legacy Obfuscated (using external script for LUTs)
@@ -120,6 +130,9 @@ class VoeExtractor(BaseExtractor):
                     "destination_url": final_url,
                     "request_headers": self.base_headers,
                     "mediaflow_endpoint": "hls_proxy",
+                    "selected_proxy": self.last_used_proxy,
+                    "force_direct": self._force_direct,
+                    "bypass_warp": self.bypass_warp_active,
                 }
             # Check for hls source
             m = re.search(r"""hls['"]:\s*['"]([^'"]+)""", combined_text)
@@ -130,6 +143,9 @@ class VoeExtractor(BaseExtractor):
                     "destination_url": final_url,
                     "request_headers": self.base_headers,
                     "mediaflow_endpoint": "hls_proxy",
+                    "selected_proxy": self.last_used_proxy,
+                    "force_direct": self._force_direct,
+                    "bypass_warp": self.bypass_warp_active,
                 }
 
         logger.warning(f"VOE: no pattern matched for {url}")
@@ -156,6 +172,9 @@ class VoeExtractor(BaseExtractor):
             "destination_url": final_url,
             "request_headers": self.base_headers,
             "mediaflow_endpoint": "hls_proxy",
+            "selected_proxy": self.last_used_proxy,
+            "force_direct": self._force_direct,
+            "bypass_warp": self.bypass_warp_active,
         }
 
     @staticmethod

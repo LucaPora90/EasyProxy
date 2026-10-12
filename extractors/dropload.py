@@ -95,6 +95,7 @@ class DroploadExtractor(BaseExtractor):
 
     async def extract(self, url: str, **kwargs) -> dict:
         """Extract Dropload URL."""
+        self._apply_routing_kwargs(url, kwargs)
 
         parsed = urlparse(url)
         referer = f"{parsed.scheme}://{parsed.netloc}/"
@@ -161,6 +162,9 @@ class DroploadExtractor(BaseExtractor):
             "destination_url": urljoin(url, final_url),
             "request_headers": self.base_headers,
             "mediaflow_endpoint": mediaflow_endpoint,
+            "selected_proxy": self.last_used_proxy,
+            "force_direct": self._force_direct,
+            "bypass_warp": self.bypass_warp_active,
         }
 
     async def close(self):

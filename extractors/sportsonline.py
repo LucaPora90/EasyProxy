@@ -15,6 +15,7 @@ from aiohttp import ClientSession, ClientTimeout, TCPConnector
 from aiohttp.client_exceptions import ClientOSError
 from config import get_connector_for_proxy, get_preferred_proxy_for_url
 import config as _cfg
+from extractors.base import BaseExtractor
 
 
 logger = logging.getLogger(__name__)
@@ -64,7 +65,7 @@ def _int2base(x, base):
     return "".join(digits)
 
 
-class SportsonlineExtractor:
+class SportsonlineExtractor(BaseExtractor):
     """Sportsonline/Sportzonline URL extractor for M3U8 streams."""
 
     EXTRACT_BUDGET_SECONDS = 20.0
@@ -75,6 +76,7 @@ class SportsonlineExtractor:
     MAX_HOST_BACKOFF_SECONDS = 3600.0
 
     def __init__(self, request_headers: dict, proxies: list = None):
+        super().__init__(request_headers or {}, proxies, extractor_name="sportsonline")
         self.request_headers = request_headers or {}
         self.base_headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
@@ -84,8 +86,8 @@ class SportsonlineExtractor:
         self.mediaflow_endpoint = "hls_manifest_proxy"
         self.proxies = proxies or _cfg.GLOBAL_PROXIES
         self._session_proxy = None
-        self._inflight_extract_tasks: dict[str, asyncio.Task] = {}
-        self._stream_cache: dict[str, tuple[float, float, dict]] = {}
+        self._inflight_extract_tasks: dict = {}
+        self._stream_cache: dict = {}
         self._host_backoff: dict[str, float] = {}
 
     @staticmethod
@@ -210,6 +212,7 @@ class SportsonlineExtractor:
         )
 
     async def _get_session(self, url: str = None, force_direct: bool = False):
+        force_direct = force_direct or self._force_direct
         if force_direct:
             if not _cfg.is_direct_connection_allowed():
                 raise aiohttp.ClientConnectionError(
@@ -217,7 +220,13 @@ class SportsonlineExtractor:
                 )
             proxy = None
         else:
-            proxy = await get_preferred_proxy_for_url(url, "sportsonline", self.proxies)
+            forced = _cfg.effective_forced_proxy(url, self._forced_proxy)
+            if forced:
+                proxy = forced
+                self.last_used_proxy = proxy
+            else:
+                proxy = await get_preferred_proxy_for_url(url, "sportsonline", self.proxies, self.bypass_warp_active)
+                self.last_used_proxy = proxy
 
         if proxy is None and not _cfg.is_direct_connection_allowed():
             raise aiohttp.ClientConnectionError(
@@ -432,6 +441,7 @@ class SportsonlineExtractor:
     async def _extract_impl(self, url: str, **kwargs) -> Dict[str, Any]:
         """Main extraction flow: fetch page, extract iframe, unpack and find m3u8."""
         try:
+            self._apply_routing_kwargs(url, kwargs)
             deadline = time.monotonic() + self.EXTRACT_BUDGET_SECONDS
             self.update_request_headers(kwargs.get("request_headers"))
             
@@ -545,6 +555,9 @@ class SportsonlineExtractor:
                         "destination_url": m3u8_url,
                         "request_headers": playback_headers,
                         "mediaflow_endpoint": self.mediaflow_endpoint,
+                        "selected_proxy": self.last_used_proxy,
+                        "force_direct": self._force_direct,
+                        "bypass_warp": self.bypass_warp_active,
                     }
                 else:
                     raise ExtractorError(
@@ -604,6 +617,9 @@ class SportsonlineExtractor:
                 "destination_url": m3u8_url,
                 "request_headers": playback_headers,
                 "mediaflow_endpoint": self.mediaflow_endpoint,
+                "selected_proxy": self.last_used_proxy,
+                "force_direct": self._force_direct,
+                "bypass_warp": self.bypass_warp_active,
             }
 
         except ExtractorError:
@@ -614,7 +630,8 @@ class SportsonlineExtractor:
 
     async def extract(self, url: str, **kwargs) -> Dict[str, Any]:
         """Extract with short-lived cache and single-flight deduplication."""
-        cache_key = url.strip()
+        self._apply_routing_kwargs(url, kwargs)
+        cache_key = (url.strip(), self._forced_proxy, self._force_direct, self.bypass_warp_active)
         now = time.monotonic()
         cached = self._stream_cache.get(cache_key)
         if cached and cached[0] > now:

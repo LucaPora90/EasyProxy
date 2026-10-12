@@ -19,6 +19,7 @@ class StreamWishExtractor(BaseExtractor):
 
     async def extract(self, url: str, **kwargs) -> dict:
         """Extract StreamWish URL."""
+        self._apply_routing_kwargs(url, kwargs)
         referer = self.base_headers.get("Referer")
         if not referer:
             parsed = urlparse(url)
@@ -69,6 +70,9 @@ class StreamWishExtractor(BaseExtractor):
             "destination_url": final_url,
             "request_headers": self.base_headers,
             "mediaflow_endpoint": self.mediaflow_endpoint,
+            "selected_proxy": self.last_used_proxy,
+            "force_direct": self._force_direct,
+            "bypass_warp": self.bypass_warp_active,
         }
 
     async def close(self):

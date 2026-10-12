@@ -6,13 +6,14 @@ import aiohttp
 from aiohttp import ClientSession, ClientTimeout, TCPConnector
 from config import get_connector_for_proxy, get_preferred_proxy_for_url
 import config as _cfg
+from extractors.base import BaseExtractor
 
 logger = logging.getLogger(__name__)
 
 class ExtractorError(Exception):
     pass
 
-class FreeshotExtractor:
+class FreeshotExtractor(BaseExtractor):
     """
     Extractor per Freeshot (wideiptv.top).
     Risolve l'URL iframe e restituisce l'm3u8 finale.
@@ -21,6 +22,7 @@ class FreeshotExtractor:
     RETRY_DELAYS = [1, 2, 4]  # Exponential backoff in seconds
     
     def __init__(self, request_headers=None, proxies=None):
+        super().__init__(request_headers or {}, proxies, extractor_name="freeshot")
         self.request_headers = request_headers or {}
         self.base_headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
@@ -34,11 +36,16 @@ class FreeshotExtractor:
 
 
     async def _get_session(self, url: str = None):
-        proxy = await get_preferred_proxy_for_url(url, "freeshot", self.proxies)
-        if proxy is None and not _cfg.is_direct_connection_allowed():
+        if self._force_direct:
+            proxy = None
+        else:
+            forced = _cfg.effective_forced_proxy(url, self._forced_proxy)
+            proxy = forced or await get_preferred_proxy_for_url(url, "freeshot", self.proxies, self.bypass_warp_active)
+        if proxy is None and not _cfg.is_direct_connection_allowed(self.bypass_warp_active):
             raise aiohttp.ClientConnectionError(
                 "Freeshot: direct fallback disabled; no proxy route available"
             )
+        self.last_used_proxy = proxy
         if (
             self.session is None
             or self.session.closed
@@ -70,6 +77,7 @@ class FreeshotExtractor:
         5. CODICE (se passato come parametro d=CODICE e host=freeshot)
         """
         
+        self._apply_routing_kwargs(url, kwargs)
         # Determina il codice canale
         channel_code = url
         
@@ -184,7 +192,10 @@ class FreeshotExtractor:
                 "Referer": "https://wideiptv.top/",
                 "Origin": "https://wideiptv.top"
             },
-            "mediaflow_endpoint": "hls_proxy"
+            "mediaflow_endpoint": "hls_proxy",
+            "selected_proxy": self.last_used_proxy,
+            "force_direct": self._force_direct,
+            "bypass_warp": self.bypass_warp_active,
         }
 
     async def close(self):

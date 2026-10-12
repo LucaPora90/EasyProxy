@@ -11,6 +11,7 @@ class VidozaExtractor(BaseExtractor):
 
     async def extract(self, url: str, **kwargs) -> dict:
         """Extract Vidoza URL."""
+        self._apply_routing_kwargs(url, kwargs)
         parsed = urlparse(url)
         host = (parsed.hostname or "").lower()
 
@@ -63,6 +64,9 @@ class VidozaExtractor(BaseExtractor):
             "destination_url": mp4_url,
             "request_headers": headers,
             "mediaflow_endpoint": self.mediaflow_endpoint,
+            "selected_proxy": self.last_used_proxy,
+            "force_direct": self._force_direct,
+            "bypass_warp": self.bypass_warp_active,
         }
 
     async def _extract_sharevideo(self, url: str, parsed) -> dict:
@@ -97,6 +101,9 @@ class VidozaExtractor(BaseExtractor):
             "destination_url": mp4_url,
             "request_headers": {},
             "mediaflow_endpoint": self.mediaflow_endpoint,
+            "selected_proxy": self.last_used_proxy,
+            "force_direct": self._force_direct,
+            "bypass_warp": self.bypass_warp_active,
         }
 
     async def close(self):

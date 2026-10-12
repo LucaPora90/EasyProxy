@@ -22,6 +22,7 @@ class StreamtapeExtractor(BaseExtractor):
 
     async def extract(self, url: str, **kwargs) -> dict:
         """Extract Streamtape URL."""
+        self._apply_routing_kwargs(url, kwargs)
         final_url = None
         # Streamtape intermittently serves a bot-check page without the link.
         for attempt in range(3):
@@ -39,6 +40,9 @@ class StreamtapeExtractor(BaseExtractor):
             "destination_url": final_url,
             "request_headers": self.base_headers,
             "mediaflow_endpoint": self.mediaflow_endpoint,
+            "selected_proxy": self.last_used_proxy,
+            "force_direct": self._force_direct,
+            "bypass_warp": self.bypass_warp_active,
         }
 
     async def close(self):

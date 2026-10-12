@@ -12,6 +12,7 @@ from typing import Optional, Dict, Any
 from urllib.parse import urlparse, parse_qs
 from config import BYPASS_WARP_CONTEXT, get_connector_for_proxy, get_preferred_proxy_for_url
 import config as _cfg
+from extractors.base import BaseExtractor
 
 logger = logging.getLogger(__name__)
 
@@ -33,10 +34,11 @@ class ExtractorError(Exception):
     pass
 
 
-class VavooExtractor:
+class VavooExtractor(BaseExtractor):
     """Vavoo URL extractor — resolves vavoo.to play URLs to clean HLS via lokke.app auth."""
 
     def __init__(self, request_headers: dict, proxies: list = None):
+        super().__init__(request_headers, proxies, extractor_name="vavoo")
         self.request_headers = request_headers
         self.base_headers = {
             "user-agent": "okhttp/4.11.0"
@@ -60,7 +62,7 @@ class VavooExtractor:
 
     async def _get_session(self):
         async with self._session_lock:
-            bypass_warp = BYPASS_WARP_CONTEXT.get()
+            bypass_warp = bool(self.bypass_warp_active) or bool(BYPASS_WARP_CONTEXT.get())
             warp_enabled = bool(_cfg._get_dynamic_warp_enabled())
             warp_excluded = bool(_cfg._is_warp_excluded(self._resolve_url))
             # Re-evaluate on every call: the admin WARP toggle can change while
@@ -71,6 +73,15 @@ class VavooExtractor:
                 self.proxies,
                 bypass_warp,
             )
+            # New-contract per-request routing (explicit ?proxy= / proxy=off /
+            # direct) wins over the auto chain; proxy_exclude_domains drops
+            # even the forced proxy (WARP exempt).
+            if self._force_direct:
+                selected_proxy = None
+            else:
+                forced = _cfg.effective_forced_proxy(self._resolve_url, self._forced_proxy)
+                if forced:
+                    selected_proxy = forced
 
             # Guard against a stale/empty route result: with WARP enabled, Vavoo
             # must never silently fall back to a direct socket.
@@ -104,6 +115,7 @@ class VavooExtractor:
                 await self.session.close()
             self.session = None
             self._proxy = selected_proxy
+            self.last_used_proxy = selected_proxy
 
             if self._proxy is None and not direct_allowed:
                 raise ClientConnectionError(
@@ -320,6 +332,7 @@ class VavooExtractor:
         if "vavoo.to" not in url:
             raise ExtractorError("Not a valid Vavoo URL")
 
+        self._apply_routing_kwargs(url, kwargs)
         resolved_url = await self._resolve_via_mediahubmx(url)
         if not resolved_url:
             raise ExtractorError("Vavoo resolve failed")
@@ -336,6 +349,9 @@ class VavooExtractor:
             },
             "mediaflow_endpoint": self.mediaflow_endpoint,
             "disable_ssl": True,
+            "selected_proxy": self._proxy,
+            "force_direct": self._force_direct,
+            "bypass_warp": self.bypass_warp_active,
         }
 
     async def close(self):

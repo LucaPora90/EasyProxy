@@ -23,6 +23,7 @@ class RaiPlayExtractor(BaseExtractor):
         )
 
     async def extract(self, url: str, **kwargs) -> dict:
+        self._apply_routing_kwargs(url, kwargs)
         parsed = urlparse(url)
         content_id = parse_qs(parsed.query).get("cont", [""])[0]
         is_relinker = (
@@ -48,6 +49,9 @@ class RaiPlayExtractor(BaseExtractor):
                         in urlparse(resolved["manifest_url"]).path.lower()
                         else "hls_proxy"
                     ),
+                    "selected_proxy": self.last_used_proxy,
+                    "force_direct": self._force_direct,
+                    "bypass_warp": self.bypass_warp_active,
                 }
             keys = await self._request_keys(
                 extract_widevine_pssh(resolved["manifest_text"]),
@@ -69,6 +73,9 @@ class RaiPlayExtractor(BaseExtractor):
             "mediaflow_endpoint": "mpd_manifest_proxy",
             "captured_manifest": resolved["manifest_text"],
             "query_params": {"clearkey": clearkey},
+            "selected_proxy": self.last_used_proxy,
+            "force_direct": self._force_direct,
+            "bypass_warp": self.bypass_warp_active,
         }
 
     async def _content_id_from_page(self, url: str) -> str:

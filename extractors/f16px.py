@@ -275,6 +275,7 @@ class F16PxExtractor(BaseExtractor):
         }
 
     async def extract(self, url: str, **kwargs) -> dict:
+        self._apply_routing_kwargs(url, kwargs)
         parsed = urlparse(url)
         embed_host = parsed.netloc
         embed_origin = f"{parsed.scheme}://{parsed.netloc}"
@@ -420,6 +421,9 @@ class F16PxExtractor(BaseExtractor):
                 "destination_url": self._pick_best(data["sources"]),
                 "request_headers": out_headers,
                 "mediaflow_endpoint": self.mediaflow_endpoint,
+                "selected_proxy": self.last_used_proxy,
+                "force_direct": self._force_direct,
+                "bypass_warp": self.bypass_warp_active,
             }
 
         # Case 2: encrypted playback
@@ -437,6 +441,9 @@ class F16PxExtractor(BaseExtractor):
             "destination_url": self._pick_best(sources),
             "request_headers": out_headers,
             "mediaflow_endpoint": self.mediaflow_endpoint,
+            "selected_proxy": self.last_used_proxy,
+            "force_direct": self._force_direct,
+            "bypass_warp": self.bypass_warp_active,
         }
 
     async def close(self):

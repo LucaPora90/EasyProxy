@@ -22,7 +22,7 @@ from urllib.parse import urlparse
 
 import config as _cfg
 from config import get_preferred_proxy_for_url
-from extractors.base import ExtractorError
+from extractors.base import BaseExtractor, ExtractorError
 
 logger = logging.getLogger(__name__)
 
@@ -33,16 +33,13 @@ _RUNNER = os.path.join(
 )
 
 
-class VidXgoExtractor:
+class VidXgoExtractor(BaseExtractor):
     """VidXgo embed -> HLS extractor (Node tls-client runner)."""
 
     def __init__(self, request_headers: dict = None, proxies: list = None, extractor_name: str = "vidxgo"):
+        super().__init__(request_headers, proxies, extractor_name=extractor_name)
         self.request_headers = request_headers or {}
-        self.extractor_name = extractor_name
-        self.proxies = proxies or []
         self.selected_proxy = None
-        self.last_used_proxy = None
-        self.mediaflow_endpoint = "hls_proxy"
 
     @staticmethod
     def _node_bin() -> str | None:
@@ -69,11 +66,14 @@ class VidXgoExtractor:
         if not os.path.exists(_RUNNER):
             raise ExtractorError(f"VidXgo: runner script not found at {_RUNNER}")
 
-        bypass_warp = bool(kwargs.get("bypass_warp") or _cfg.BYPASS_WARP_CONTEXT.get())
-        proxy = await get_preferred_proxy_for_url(
-            url, self.extractor_name, self.proxies, bypass_warp
-        )
-        if proxy is None and not _cfg.is_direct_connection_allowed(bypass_warp):
+        self._apply_routing_kwargs(url, kwargs)
+        if self._force_direct:
+            proxy = None
+        else:
+            proxy = _cfg.effective_forced_proxy(url, self._forced_proxy) or await get_preferred_proxy_for_url(
+                url, self.extractor_name, self.proxies, self.bypass_warp_active
+            )
+        if proxy is None and not _cfg.is_direct_connection_allowed(self.bypass_warp_active):
             raise ExtractorError("VidXgo: direct fallback disabled; no proxy route available")
         self.selected_proxy = proxy
         self.last_used_proxy = proxy
@@ -141,6 +141,8 @@ class VidXgoExtractor:
             "captured_manifests": captured_manifests,
             "mediaflow_endpoint": self.mediaflow_endpoint,
             "selected_proxy": self.selected_proxy,
+            "force_direct": self._force_direct,
+            "bypass_warp": self.bypass_warp_active,
             "disable_ssl": True,
         }
 

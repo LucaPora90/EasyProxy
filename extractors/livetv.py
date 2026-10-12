@@ -21,6 +21,7 @@ class LiveTVExtractor(BaseExtractor):
 
     async def extract(self, url: str, stream_title: str = None, **kwargs) -> dict:
         """Extract LiveTV URL and required headers."""
+        self._apply_routing_kwargs(url, kwargs)
         try:
             resp = await self._make_request(url)
             response_text = resp.text
@@ -57,6 +58,9 @@ class LiveTVExtractor(BaseExtractor):
                         "destination_url": stream_url,
                         "request_headers": self.base_headers,
                         "mediaflow_endpoint": self.mediaflow_endpoint,
+                        "selected_proxy": self.last_used_proxy,
+                        "force_direct": self._force_direct,
+                        "bypass_warp": self.bypass_warp_active,
                     }
 
                     # Set endpoint based on stream type

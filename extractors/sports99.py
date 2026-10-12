@@ -21,6 +21,7 @@ class Sports99Extractor(BaseExtractor):
         if "user=streamsports99" in url or "plan=vip" in url:
             url = url.replace("user=streamsports99", "user=cdnlivetv").replace("plan=vip", "plan=free")
             logger.info(f"[Sports99] Rewrote URL to: {url}")
+        self._apply_routing_kwargs(url, kwargs)
 
         entry = "https://streamsports99.su"
         player_headers = {
@@ -79,6 +80,9 @@ class Sports99Extractor(BaseExtractor):
                                 "destination_url": stream_url,
                                 "request_headers": stream_headers,
                                 "mediaflow_endpoint": self.mediaflow_endpoint,
+                                "selected_proxy": self.last_used_proxy,
+                                "force_direct": self._force_direct,
+                                "bypass_warp": self.bypass_warp_active,
                             }
 
                 # Fallback 2: check if already unpacked in HTML
@@ -90,6 +94,9 @@ class Sports99Extractor(BaseExtractor):
                             "destination_url": m3u8_match.group(1),
                             "request_headers": stream_headers,
                             "mediaflow_endpoint": self.mediaflow_endpoint,
+                            "selected_proxy": self.last_used_proxy,
+                            "force_direct": self._force_direct,
+                            "bypass_warp": self.bypass_warp_active,
                         }
                 raise ExtractorError("SPORTS99: Packed script not found")
 
@@ -115,6 +122,9 @@ class Sports99Extractor(BaseExtractor):
                 "destination_url": stream_url,
                 "request_headers": stream_headers,
                 "mediaflow_endpoint": self.mediaflow_endpoint,
+                "selected_proxy": self.last_used_proxy,
+                "force_direct": self._force_direct,
+                "bypass_warp": self.bypass_warp_active,
             }
 
         except Exception as err:
