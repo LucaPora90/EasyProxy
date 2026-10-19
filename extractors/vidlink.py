@@ -11,7 +11,7 @@ from nacl.secret import SecretBox
 
 from config import get_preferred_proxy_for_url
 import config as _cfg
-from extractors.base import BaseExtractor, ExtractorError
+from extractors.base import BaseExtractor, ExtractorError, normalize_socks_proxy_url
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +30,8 @@ _UA = (
 class VidLinkExtractor(BaseExtractor):
     """Resolve VidLink movie/TV embeds to their highest-quality stream."""
 
-    def __init__(self, request_headers: dict, proxies: list = None):
-        super().__init__(request_headers, proxies, extractor_name="vidlink")
+    def __init__(self, request_headers: dict, proxies: list = None, bypass_warp: bool = False):
+        super().__init__(request_headers, proxies, extractor_name="vidlink", bypass_warp=bypass_warp)
         self.request_headers = request_headers or {}
 
     @staticmethod
@@ -116,15 +116,6 @@ class VidLinkExtractor(BaseExtractor):
 
         return f"{_RELAY_ORIGIN}/{relay_path}{parsed.path}?{urlencode(query)}"
 
-    @staticmethod
-    def _normalize_proxy_url(proxy_url: str) -> str:
-        # Preserve the proxy scheme selected by the routing policy.
-        if proxy_url.startswith("socks5://"):
-            return proxy_url
-        if "://" not in proxy_url:
-            return f"socks5h://{proxy_url}"
-        return proxy_url
-
     async def extract(self, url: str, **kwargs) -> dict:
         path = urlparse(url).path
         movie_match = _MOVIE_PATH_RE.fullmatch(path)
@@ -150,13 +141,13 @@ class VidLinkExtractor(BaseExtractor):
             proxy = _cfg.effective_forced_proxy(api_url, self._forced_proxy) or await get_preferred_proxy_for_url(
                 api_url, self.extractor_name, self.proxies, self.bypass_warp_active
             )
-        if proxy is None and not _cfg.is_direct_connection_allowed(self.bypass_warp_active):
+        if proxy is None and not self._force_direct and not _cfg.is_direct_connection_allowed(self.bypass_warp_active):
             raise ExtractorError(
                 "VidLink: direct fallback disabled; no proxy route available"
             )
         request_kwargs = {}
         if proxy:
-            proxy = self._normalize_proxy_url(proxy)
+            proxy = normalize_socks_proxy_url(proxy)
             request_kwargs["proxies"] = {"http": proxy, "https": proxy}
 
         try:
@@ -209,5 +200,3 @@ class VidLinkExtractor(BaseExtractor):
             "bypass_warp": self.bypass_warp_active,
         }
 
-    async def close(self):
-        pass

@@ -16,6 +16,17 @@ logger = logging.getLogger(__name__)
 _SOCKS_SCHEMES = ("socks5://", "socks5h://", "socks4://", "socks4a://")
 
 
+def _normalize_socks_url(url: str) -> str:
+    """python_socks rejects the socks5h/socks4a scheme spellings (it already
+    forwards hostnames to the proxy), so map them to the plain scheme."""
+    lower = url.lower()
+    if lower.startswith("socks5h://"):
+        return "socks5://" + url[len("socks5h://"):]
+    if lower.startswith("socks4a://"):
+        return "socks4://" + url[len("socks4a://"):]
+    return url
+
+
 async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     try:
         while True:
@@ -27,15 +38,21 @@ async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     except Exception:
         pass
     finally:
+        # Half-close, do not close: closing a socket while the peer still has
+        # unread data makes the stack send RST, which discards what we already
+        # forwarded. handle_client closes both writers once both pipes are done.
         try:
-            writer.close()
-            await writer.wait_closed()
+            if writer.can_write_eof():
+                writer.write_eof()
         except Exception:
             pass
 
 
 def _create_client_handler(upstream_socks_url: str):
     async def handle_client(client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter):
+        # Bound before the try: the finally block closes it even when the
+        # client disconnects before the upstream socket is created.
+        up_writer = None
         try:
             req_line = await client_reader.readline()
             if not req_line:
@@ -59,10 +76,11 @@ def _create_client_handler(upstream_socks_url: str):
 
             if method == "CONNECT":
                 if ":" in target:
-                    host, port_str = target.split(":", 1)
+                    host, _, port_str = target.rpartition(":")
+                    host = host.strip("[]")
                     port = int(port_str)
                 else:
-                    host, port = target, 443
+                    host, port = target.strip("[]"), 443
 
                 proxy = Proxy.from_url(upstream_socks_url)
                 upstream_sock = await proxy.connect(dest_host=host, dest_port=port)
@@ -107,10 +125,14 @@ def _create_client_handler(upstream_socks_url: str):
             except Exception:
                 pass
         finally:
-            try:
-                client_writer.close()
-            except Exception:
-                pass
+            # Both directions are drained by now (or the bridge is aborting), so
+            # a full close no longer truncates peer data.
+            for stream in filter(None, (up_writer, client_writer)):
+                try:
+                    stream.close()
+                    await stream.wait_closed()
+                except Exception:
+                    pass
 
     return handle_client
 
@@ -135,6 +157,8 @@ class SocksHttpBridgeManager:
 
         if not lower_url.startswith(_SOCKS_SCHEMES):
             return clean_url
+
+        clean_url = _normalize_socks_url(clean_url)
 
         async with self._lock:
             if clean_url in self._ports:

@@ -19,8 +19,8 @@ class FileMoonExtractor(F16PxExtractor):
 
     ERROR_PREFIX = "FileMoon"
 
-    def __init__(self, request_headers: dict, proxies: list = None):
-        super().__init__(request_headers, proxies)
+    def __init__(self, request_headers: dict, proxies: list = None, bypass_warp: bool = False):
+        super().__init__(request_headers, proxies, bypass_warp=bypass_warp)
         self.extractor_name = "filemoon"
 
     @staticmethod
@@ -62,14 +62,7 @@ class FileMoonExtractor(F16PxExtractor):
         mediaflow_endpoint = (
             "hls_proxy" if ".m3u8" in destination.lower() else "proxy_stream_endpoint"
         )
-        return {
-            "destination_url": destination,
-            "request_headers": self.base_headers,
-            "mediaflow_endpoint": mediaflow_endpoint,
-            "selected_proxy": self.last_used_proxy,
-            "force_direct": self._force_direct,
-            "bypass_warp": self.bypass_warp_active,
-        }
+        return self._result(destination, self.base_headers, mediaflow_endpoint=mediaflow_endpoint)
 
     async def extract(self, url: str, **kwargs) -> dict:
         host = (urlparse(url).hostname or "").lower()

@@ -57,8 +57,6 @@ EasyProxy plus solvers is fully supported on Android via Termux + Ubuntu proot.
 
 The setup supports proot-distro 5 and earlier releases, and installs Python dependencies in an isolated virtual environment at `/root/EasyProxy/.venv`.
 
-Android users can also install the APK build if they prefer a simpler app-style setup. The APK is convenient, but it is not as complete as the Python/Termux version, so Termux remains the recommended option for full functionality.
-
 For Termux, full functionality requires a 64-bit Android device. On 32-bit devices, some components and solvers may not work.
 
 The setup also installs `wireproxy` (arm64/armv7) and the pinned WARP registration
@@ -149,10 +147,9 @@ the egress IP stays fixed until **Request new IP**, which picks another relay
 in the same country. Tor is TCP-only and should normally be used on selected
 routes rather than as the default for all streaming traffic.
 
-In the Admin Panel speed test, **Direct** uses Ookla. Every proxy route uses a
-real SOCKS5/HTTP proxied TCP throughput test, shows the egress IP, and does not
-fall back to the direct connection. Proxy routes run one 10-second download and
-one 10-second upload sample.
+In the Admin Panel speed test every route - including **Direct** - is measured with
+curl as a real TCP throughput test, shows the egress IP, and never falls back to
+another route. Each route runs one 10-second download and one 10-second upload sample.
 
 Reference the endpoint from **Global Proxies**, a **Transport Route** or an extractor
 proxy to route EasyProxy traffic through it. TCP only: the SOCKS5 endpoint cannot

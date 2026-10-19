@@ -47,8 +47,10 @@ _DECODE_FN_RE = re.compile(
 class VidSonicExtractor(BaseExtractor):
     """VidSonic embed -> HLS extractor."""
 
-    def __init__(self, request_headers: dict, proxies: list = None):
-        super().__init__(request_headers, proxies, extractor_name="vidsonic")
+    REQUEST_TIMEOUT_TOTAL = 10
+
+    def __init__(self, request_headers: dict, proxies: list = None, bypass_warp: bool = False):
+        super().__init__(request_headers, proxies, extractor_name="vidsonic", bypass_warp=bypass_warp)
         self.mediaflow_endpoint = "hls_proxy"
 
     @staticmethod
@@ -111,14 +113,5 @@ class VidSonicExtractor(BaseExtractor):
             raise ExtractorError(f"VidSonic: decoded value is not a media URL: {stream_url[:80]}")
 
         logger.info(f"VidSonic: extracted -> {stream_url[:80]}...")
-        return {
-            "destination_url": stream_url,
-            "request_headers": {},
-            "mediaflow_endpoint": self.mediaflow_endpoint,
-            "selected_proxy": self.last_used_proxy,
-            "force_direct": self._force_direct,
-            "bypass_warp": self.bypass_warp_active,
-        }
+        return self._result(stream_url, {})
 
-    async def close(self):
-        await super().close()

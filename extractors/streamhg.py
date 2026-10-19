@@ -9,8 +9,8 @@ logger = logging.getLogger(__name__)
 class StreamHGExtractor(BaseExtractor):
     """Extractor for StreamHG-style players (dhcplay/vibuxer mirrors)."""
 
-    def __init__(self, request_headers: dict, proxies: list = None):
-        super().__init__(request_headers, proxies, extractor_name="streamhg")
+    def __init__(self, request_headers: dict, proxies: list = None, bypass_warp: bool = False):
+        super().__init__(request_headers, proxies, extractor_name="streamhg", bypass_warp=bypass_warp)
         self.mediaflow_endpoint = "hls_proxy"
 
     @staticmethod
@@ -73,19 +73,10 @@ class StreamHGExtractor(BaseExtractor):
                     continue
 
                 logger.info(f"Successfully extracted StreamHG URL: {stream_url[:80]}...")
-                return {
-                    "destination_url": stream_url,
-                    "request_headers": {},
-                    "mediaflow_endpoint": self.mediaflow_endpoint,
-                    "selected_proxy": self.last_used_proxy,
-                    "force_direct": self._force_direct,
-                    "bypass_warp": self.bypass_warp_active,
-                }
+                return self._result(stream_url, {})
             except Exception as e:
                 logger.debug(f"StreamHG candidate failed {candidate}: {e}")
                 continue
 
         raise ExtractorError(f"STREAMHG extraction failed for {url}")
 
-    async def close(self):
-        await super().close()

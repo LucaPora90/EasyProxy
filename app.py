@@ -2,7 +2,6 @@ import logging
 import sys
 import os
 import asyncio
-import aiohttp
 from aiohttp import web
 
 # Configura logging PRIMA di qualsiasi import che possa emettere log
@@ -25,11 +24,6 @@ from routes.wg_tunnels import setup_wg_tunnel_routes
 from routes.tor_proxy import setup_tor_proxy_routes
 
 logger = logging.getLogger(__name__)
-
-def _read_file(path):
-    """Helper for async file reading via run_in_executor."""
-    with open(path, 'r', encoding='utf-8') as f:
-        return f.read()
 
 # --- Logica di Avvio ---
 def create_app():
@@ -70,8 +64,6 @@ def create_app():
     app.router.add_get('/url-generator', proxy.handle_url_generator)
     app.router.add_get('/info', proxy.handle_info_page)
     app.router.add_get('/api/info', proxy.handle_api_info)
-    app.router.add_get('/api/memory/profile', proxy.handle_memory_profile)
-    app.router.add_post('/api/memory/profile/reset', proxy.handle_memory_profile_reset)
     app.router.add_get('/key', proxy.handle_key_request)
     app.router.add_get('/proxy/manifest.m3u8', proxy.handle_proxy_request)
     app.router.add_get('/proxy/hls/manifest.m3u8', proxy.handle_proxy_request)
@@ -101,6 +93,11 @@ def create_app():
     app.router.add_get('/proxy/hls/segment.m4s', proxy.handle_proxy_request)
     app.router.add_get('/proxy/hls/segment.mp4', proxy.handle_proxy_request)
     app.router.add_get('/proxy/hls/segment.vtt', proxy.handle_proxy_request)
+    app.router.add_get('/proxy/hls/segment.aac', proxy.handle_proxy_request)
+    app.router.add_get('/proxy/hls/segment.mp3', proxy.handle_proxy_request)
+    app.router.add_get('/proxy/hls/segment.m4a', proxy.handle_proxy_request)
+    app.router.add_get('/proxy/hls/segment.ac3', proxy.handle_proxy_request)
+    app.router.add_get('/proxy/hls/segment.ec3', proxy.handle_proxy_request)
     
     app.router.add_get('/playlist', proxy.handle_playlist_request)
     app.router.add_get('/segment/{tail:.*}', proxy.handle_ts_segment)
@@ -119,8 +116,6 @@ def create_app():
     # ✅ Health check endpoint
     app.router.add_get('/health', lambda r: web.json_response({"status": "ok", "version": APP_VERSION}))
     app.router.add_get('/api/dual/memory', dual_service.handle_memory)
-    # Backward-compatible alias for existing monitoring clients.
-    app.router.add_get('/api/sidecar/memory', dual_service.handle_memory)
 
     app.router.add_post('/dual/sync/links', proxy.handle_dual_sync_links)
     app.router.add_get('/dual/manifest.m3u8', proxy.handle_dual_server_m3u8)
@@ -138,7 +133,9 @@ def create_app():
     app.router.add_post('/api/admin/warp/reconnect', proxy.handle_admin_api_warp_reconnect)
     app.router.add_post('/api/admin/extractor/proxy', proxy.handle_admin_api_extractor_proxy)
     app.router.add_post('/api/admin/speedtest', proxy.handle_admin_api_speedtest)
+    app.router.add_get('/api/admin/speedtest', proxy.handle_admin_api_speedtest_status)
     app.router.add_post('/api/admin/extractors/test', proxy.handle_admin_api_test_extractors)
+    app.router.add_get('/api/admin/extractors/test', proxy.handle_admin_api_test_extractors_status)
     # Setup recording/DVR routes
     setup_recording_routes(app, recording_manager)
     # NordVPN / custom WireGuard SOCKS5 tunnels + their admin panels
@@ -154,15 +151,24 @@ def create_app():
     app.on_cleanup.append(cleanup_handler)
     
     async def on_startup(app):
-        asyncio.create_task(proxy.start_tasks())
-        asyncio.create_task(recording_manager.cleanup_loop())
-        asyncio.create_task(wg_tunnels.keepalive_loop())
-        asyncio.create_task(tor_proxy.keepalive_loop())
+        app['_startup_tasks'] = [
+            asyncio.create_task(proxy.start_tasks()),
+            asyncio.create_task(wg_tunnels.keepalive_loop()),
+            asyncio.create_task(tor_proxy.keepalive_loop()),
+        ]
+        recording_manager.start_cleanup_loop()
     app.on_startup.append(on_startup)
 
     async def on_shutdown(app):
+        from services.flaresolverr import shutdown_flare_solver
+        tasks = app.pop('_startup_tasks', ())
+        for t in tasks:
+            t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         await tor_proxy.stop()
         await recording_manager.shutdown()
+        await shutdown_flare_solver()
     app.on_shutdown.append(on_shutdown)
     
     return app

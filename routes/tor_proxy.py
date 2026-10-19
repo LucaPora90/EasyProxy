@@ -1,46 +1,27 @@
 """Admin panel and API for the local Tor SOCKS5 proxy."""
 
 import functools
-import os
 
 from aiohttp import web
 
-from config import APP_VERSION, check_password
+from config import check_password
+from services.proxy_shared import admin_guard as admin, json_response
 from services import tor_proxy
-
-_TEMPLATES_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "templates"
-)
-
-
-def _json(payload, status=200):
-    return web.json_response(payload, status=status)
-
-
-def _unauthorized():
-    return _json({"error": "Unauthorized: Invalid API Password"}, status=401)
+from services.proxy_shared import read_template
 
 
 def setup_tor_proxy_routes(app: web.Application) -> None:
     async def page(request):
         if not check_password(request):
             raise web.HTTPFound("/admin/login")
-        with open(os.path.join(_TEMPLATES_DIR, "torproxy.html"), "r", encoding="utf-8") as handle:
-            return web.Response(text=handle.read().replace("{{APP_VERSION}}", APP_VERSION), content_type="text/html")
+        return web.Response(text=read_template("torproxy.html"), content_type="text/html")
 
-    async def guard(request):
-        if not check_password(request):
-            return False
-        return True
-
+    @admin
     async def status(request):
-        if not await guard(request):
-            return _unauthorized()
-        return _json(await tor_proxy.status(with_probe=request.query.get("probe") in ("1", "true", "yes")))
+        return json_response(await tor_proxy.status(with_probe=request.query.get("probe") in ("1", "true", "yes")))
 
+    @admin
     async def action(request, name):
-        if not await guard(request):
-            return _unauthorized()
         try:
             if name == "start":
                 tor_proxy.set_enabled(True)
@@ -51,54 +32,59 @@ def setup_tor_proxy_routes(app: web.Application) -> None:
             else:
                 tor_proxy.set_enabled(True)
                 await tor_proxy.restart()
-            return _json({"status": name, "tor": await tor_proxy.status(with_probe=True)})
+            return json_response({"status": name, "tor": await tor_proxy.status(with_probe=True)})
         except tor_proxy.TorError as exc:
-            return _json({"error": str(exc)}, status=400)
+            return json_response({"error": str(exc)}, status=400)
 
+    @admin
     async def bind(request):
-        if not await guard(request):
-            return _unauthorized()
         try:
             payload = await request.json()
+        except Exception:
+            return json_response({"error": "Invalid JSON"}, status=400)
+        if not isinstance(payload, dict):
+            return json_response({"error": "Invalid JSON payload"}, status=400)
+        try:
             tor_proxy.set_bind(str(payload.get("bind", "")))
             if tor_proxy.is_enabled():
                 await tor_proxy.restart()
-            return _json({"status": "ok", "tor": await tor_proxy.status()})
+            return json_response({"status": "ok", "tor": await tor_proxy.status()})
         except tor_proxy.TorError as exc:
-            return _json({"error": str(exc)}, status=400)
+            return json_response({"error": str(exc)}, status=400)
 
+    @admin
     async def exit_nodes(request):
-        if not await guard(request):
-            return _unauthorized()
         try:
             payload = await request.json()
+        except Exception:
+            return json_response({"error": "Invalid JSON"}, status=400)
+        if not isinstance(payload, dict):
+            return json_response({"error": "Invalid JSON payload"}, status=400)
+        try:
             value = str(payload.get("exit_nodes", ""))
             if tor_proxy.is_enabled():
                 await tor_proxy.apply_exit_nodes(value)
             else:
                 tor_proxy.set_exit_nodes(value)
-            return _json({"status": "ok", "tor": await tor_proxy.status()})
+            return json_response({"status": "ok", "tor": await tor_proxy.status()})
         except tor_proxy.TorError as exc:
-            return _json({"error": str(exc)}, status=400)
+            return json_response({"error": str(exc)}, status=400)
 
+    @admin
     async def check(request):
-        if not await guard(request):
-            return _unauthorized()
-        return _json(await tor_proxy.check())
+        return json_response(await tor_proxy.check())
 
+    @admin
     async def new_identity(request):
-        if not await guard(request):
-            return _unauthorized()
         try:
             await tor_proxy.new_identity()
-            return _json({"status": "new_identity", "tor": await tor_proxy.status(with_probe=True)})
+            return json_response({"status": "new_identity", "tor": await tor_proxy.status(with_probe=True)})
         except tor_proxy.TorError as exc:
-            return _json({"error": str(exc)}, status=400)
+            return json_response({"error": str(exc)}, status=400)
 
+    @admin
     async def logs(request):
-        if not await guard(request):
-            return _unauthorized()
-        return _json({"logs": await tor_proxy.logs()})
+        return json_response({"logs": await tor_proxy.logs()})
 
     app.router.add_get("/admin/torproxy", page)
     app.router.add_get("/api/admin/tor/status", status)

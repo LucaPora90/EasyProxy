@@ -3,12 +3,12 @@ import logging
 import os
 from aiohttp import web
 import functools
-import shutil
 
 import config
 from config import check_password, APP_VERSION
 import config_store
-from services.proxy_shared import get_public_base_url
+from services.proxy_shared import admin_guard as admin
+from services.proxy_shared import get_public_base_url, read_template
 
 logger = logging.getLogger(__name__)
 
@@ -28,19 +28,13 @@ def setup_recording_routes(app, recording_manager):
         """Serve the recordings UI page."""
         if not check_password(request):
             raise web.HTTPFound('/admin/login')
-        template_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            'templates', 'recordings.html'
-        )
         try:
-            with open(template_path, 'r', encoding='utf-8') as f:
-                html_content = f.read()
+            html_content = read_template('recordings.html')
             proxy = app.get('proxy')
             latest_version = getattr(proxy, 'latest_version', 'Unknown') if proxy else 'Unknown'
             warp_status = getattr(proxy, 'warp_status', 'Unknown') if proxy else 'Unknown'
             is_outdated = latest_version not in ["Checking...", "Unknown", "Error", APP_VERSION]
             version_status_class = "outdated" if is_outdated else ""
-            html_content = html_content.replace("{{APP_VERSION}}", APP_VERSION)
             html_content = html_content.replace("{{LATEST_VERSION}}", latest_version)
             html_content = html_content.replace("{{VERSION_STATUS_CLASS}}", version_status_class)
             html_content = html_content.replace("{{WARP_STATUS}}", warp_status)
@@ -49,10 +43,9 @@ def setup_recording_routes(app, recording_manager):
             return web.Response(text="Recordings template not found",
                                status=404)
 
+    @admin
     async def handle_list_recordings(request):
         """GET /api/recordings - List all recordings."""
-        if not check_password(request):
-            return web.json_response({"error": "Unauthorized"}, status=401)
 
         status = request.query.get('status')
         recordings = recording_manager.get_all_recordings(status=status)
@@ -64,10 +57,9 @@ def setup_recording_routes(app, recording_manager):
             "system_stats": system_stats
         })
 
+    @admin
     async def handle_get_recording(request):
         """GET /api/recordings/{id} - Get a specific recording."""
-        if not check_password(request):
-            return web.json_response({"error": "Unauthorized"}, status=401)
 
         recording_id = request.match_info['id']
         recording = recording_manager.get_recording(recording_id)
@@ -78,10 +70,9 @@ def setup_recording_routes(app, recording_manager):
 
         return web.json_response(recording)
 
+    @admin
     async def handle_start_recording(request):
         """POST /api/recordings/start - Start a new recording."""
-        if not check_password(request):
-            return web.json_response({"error": "Unauthorized"}, status=401)
 
         try:
             data = await request.json()
@@ -112,12 +103,17 @@ def setup_recording_routes(app, recording_manager):
             qsl.append(('disable_ssl', '1'))
         url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, urlencode(qsl), parsed.fragment))
 
-        if duration:
+        if duration is not None and duration != "":
             try:
                 duration = int(duration)
-            except ValueError:
+            except (TypeError, ValueError):
                 return web.json_response(
                     {"error": "Duration must be a number"}, status=400)
+            if duration <= 0:
+                return web.json_response(
+                    {"error": "Duration must be positive"}, status=400)
+        else:
+            duration = None
 
         recording = await recording_manager.start_recording(
             url=url,
@@ -133,10 +129,9 @@ def setup_recording_routes(app, recording_manager):
             return web.json_response(
                 {"error": "Failed to start recording"}, status=500)
 
+    @admin
     async def handle_stop_recording(request):
         """POST /api/recordings/{id}/stop - Stop an active recording."""
-        if not check_password(request):
-            return web.json_response({"error": "Unauthorized"}, status=401)
 
         recording_id = request.match_info['id']
         success = await recording_manager.stop_recording(recording_id)
@@ -149,10 +144,9 @@ def setup_recording_routes(app, recording_manager):
                 {"error": "Recording not found or already stopped"},
                 status=404)
 
+    @admin
     async def handle_delete_recording(request):
         """DELETE /api/recordings/{id} - Delete a recording."""
-        if not check_password(request):
-            return web.json_response({"error": "Unauthorized"}, status=401)
 
         recording_id = request.match_info['id']
         success = await recording_manager.delete_recording(recording_id)
@@ -163,13 +157,12 @@ def setup_recording_routes(app, recording_manager):
             return web.json_response({"error": "Recording not found"},
                                     status=404)
 
+    @admin
     async def handle_delete_recording_get(request):
         """GET /api/recordings/{id}/delete - Delete a recording via GET (for Stremio).
 
         Returns a simple video placeholder or redirect after deletion.
         """
-        if not check_password(request):
-            return web.json_response({"error": "Unauthorized"}, status=401)
 
         recording_id = request.match_info['id']
         success = await recording_manager.delete_recording(recording_id)
@@ -185,10 +178,9 @@ def setup_recording_routes(app, recording_manager):
         else:
             return web.json_response({"error": "Recording not found"}, status=404)
 
+    @admin
     async def handle_delete_all_recordings(request):
         """DELETE /api/recordings - Delete all recordings."""
-        if not check_password(request):
-            return web.json_response({"error": "Unauthorized"}, status=401)
 
         recordings = recording_manager.get_all_recordings()
         deleted = 0
@@ -201,10 +193,9 @@ def setup_recording_routes(app, recording_manager):
 
         return web.json_response({"success": True, "deleted": deleted})
 
+    @admin
     async def handle_download_recording(request):
         """GET /api/recordings/{id}/download - Download a recording file."""
-        if not check_password(request):
-            return web.json_response({"error": "Unauthorized"}, status=401)
 
         recording_id = request.match_info['id']
         recording = recording_manager.get_recording(recording_id)
@@ -221,7 +212,11 @@ def setup_recording_routes(app, recording_manager):
         # Security check
         recordings_dir = os.path.abspath(recording_manager.recordings_dir)
         file_abs = os.path.abspath(file_path)
-        if not file_abs.startswith(recordings_dir):
+        try:
+            in_recordings_dir = os.path.commonpath([recordings_dir, file_abs]) == recordings_dir
+        except ValueError:
+            in_recordings_dir = False
+        if not in_recordings_dir:
             return web.json_response({"error": "Access denied"}, status=403)
 
         filename = os.path.basename(file_path)
@@ -241,6 +236,7 @@ def setup_recording_routes(app, recording_manager):
             }
         )
 
+    @admin
     async def handle_stream_recording(request):
         """GET /api/recordings/{id}/stream - Stream a recording file.
 
@@ -250,8 +246,6 @@ def setup_recording_routes(app, recording_manager):
         """
         import asyncio
 
-        if not check_password(request):
-            return web.json_response({"error": "Unauthorized"}, status=401)
 
         recording_id = request.match_info['id']
         recording = recording_manager.get_recording(recording_id)
@@ -268,7 +262,11 @@ def setup_recording_routes(app, recording_manager):
         # Security check
         recordings_dir = os.path.abspath(recording_manager.recordings_dir)
         file_abs = os.path.abspath(file_path)
-        if not file_abs.startswith(recordings_dir):
+        try:
+            in_recordings_dir = os.path.commonpath([recordings_dir, file_abs]) == recordings_dir
+        except ValueError:
+            in_recordings_dir = False
+        if not in_recordings_dir:
             return web.json_response({"error": "Access denied"}, status=403)
 
         # Determine content type based on extension
@@ -324,14 +322,14 @@ def setup_recording_routes(app, recording_manager):
         await response.write_eof()
         return response
 
+    @admin
     async def handle_active_recordings(request):
         """GET /api/recordings/active - Get only active recordings."""
-        if not check_password(request):
-            return web.json_response({"error": "Unauthorized"}, status=401)
 
         recordings = recording_manager.get_active_recordings()
         return web.json_response({"recordings": recordings})
 
+    @admin
     async def handle_record_via_get(request):
         """GET /record - Start recording and return a playable stream.
 
@@ -350,8 +348,6 @@ def setup_recording_routes(app, recording_manager):
         Example:
             /record?url=https%3A%2F%2Fvavoo.to%2Fplay%2F...&name=Sky%20Sport&duration=3600&extractor=vavoo&max_res=1
         """
-        if not check_password(request):
-            return web.json_response({"error": "Unauthorized"}, status=401)
 
         url = request.query.get('url')
         if not url:
@@ -383,12 +379,17 @@ def setup_recording_routes(app, recording_manager):
         if key_id and key:
             clearkey = f"{key_id}:{key}"
 
-        if duration:
+        if duration is not None and duration != "":
             try:
                 duration = int(duration)
-            except ValueError:
+            except (TypeError, ValueError):
                 return web.json_response(
                     {"error": "Duration must be a number"}, status=400)
+            if duration <= 0:
+                return web.json_response(
+                    {"error": "Duration must be positive"}, status=400)
+        else:
+            duration = None
 
         # Start recording in the background
         recording = await recording_manager.start_recording(
@@ -423,7 +424,7 @@ def setup_recording_routes(app, recording_manager):
                         logger.error(f"Failed to start recording after cleanup: {url}")
             # Even if recording failed, still redirect to live stream
             # so user can watch while we figure out what went wrong
-            logger.debug(f"Recording may have failed, but redirecting to live stream anyway")
+            logger.debug("Recording may have failed, but redirecting to live stream anyway")
 
         # Build proxy URL to watch the live stream while recording
         from urllib.parse import urlencode
@@ -457,14 +458,13 @@ def setup_recording_routes(app, recording_manager):
         # Redirect to the live stream proxy
         raise web.HTTPFound(proxy_url)
 
+    @admin
     async def handle_stop_and_stream(request):
         """GET /record/stop/{id} - Stop an active recording and redirect to stream.
 
         This endpoint is designed for Stremio integration: when clicked,
         it stops the recording and immediately redirects to play the recorded content.
         """
-        if not check_password(request):
-            return web.json_response({"error": "Unauthorized"}, status=401)
 
         recording_id = request.match_info['id']
         recording = recording_manager.get_recording(recording_id)
@@ -477,6 +477,8 @@ def setup_recording_routes(app, recording_manager):
             await recording_manager.stop_recording(recording_id)
             # Refresh recording data after stop
             recording = recording_manager.get_recording(recording_id)
+            if not recording:
+                return web.json_response({"error": "Recording not found"}, status=404)
 
         # Check if file exists and has content
         file_path = recording.get('file_path')

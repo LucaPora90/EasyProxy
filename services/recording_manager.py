@@ -2,7 +2,6 @@ import asyncio
 import uuid
 import logging
 import os
-import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -14,6 +13,7 @@ import aiohttp
 import config_store
 from services.recording_db import RecordingDB
 from config import PORT, API_PASSWORD
+from utils.hls_master import master_entries
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +80,7 @@ class RecordingManager:
 
         if '.mpd' in url_lower:
             return StreamType.MPD
-        elif 'vavoo.to' in url_lower:
+        elif any(d in url_lower for d in ('vavoo.to', 'kool.to', 'vavoo.net', 'kool.ws', 'huhu.to', 'oha.to', 'voltop.net')):
             return StreamType.VAVOO
         elif 'popcdn.day' in url_lower or 'freeshot' in url_lower:
             return StreamType.FREESHOT
@@ -233,31 +233,21 @@ class RecordingManager:
                         logger.error(f"Failed to fetch master playlist: {resp.status}")
                         return None, None
                     content = await resp.text()
-
-            video_url = None
-            audio_url = None
-
-            lines = content.strip().split('\n')
-            for i, line in enumerate(lines):
-                # Parse EXT-X-MEDIA for separate audio track
-                if line.startswith('#EXT-X-MEDIA:') and 'TYPE=AUDIO' in line:
-                    uri_match = re.search(r'URI="([^"]+)"', line)
-                    if uri_match and audio_url is None:
-                        if 'DEFAULT=YES' in line or audio_url is None:
-                            audio_url = uri_match.group(1)
-
-                # Parse EXT-X-STREAM-INF for video variant
-                elif line.startswith('#EXT-X-STREAM-INF:'):
-                    if i + 1 < len(lines):
-                        next_line = lines[i + 1].strip()
-                        if next_line and not next_line.startswith('#'):
-                            video_url = next_line
-
-            return video_url, audio_url
-
         except Exception as e:
             logger.error(f"Error parsing master playlist: {e}")
             return None, None
+
+        video_url = None
+        audio_url = None
+        for entry in master_entries(content.splitlines(), master_url):
+            if entry.kind == "variant":
+                video_url = entry.url or video_url
+            elif entry.type == "AUDIO" and entry.url and (
+                audio_url is None or entry.attributes.get("DEFAULT", "").strip().upper() == "YES"
+            ):
+                audio_url = entry.url
+
+        return video_url, audio_url
 
     # =========================================================================
     # FFmpeg Command Building
@@ -380,29 +370,29 @@ class RecordingManager:
             logger.info(f"Recording already exists for URL: {url[:80]}...")
             return None
 
-        filename = self._generate_filename(recording_id, name)
-        recordings_dir = config_store.get("recordings_dir", self.recordings_dir)
-        file_path = os.path.join(recordings_dir, filename)
-        if not os.path.exists(recordings_dir):
-            os.makedirs(recordings_dir)
-
-        # Apply duration limits
-        max_duration = config_store.get("max_recording_duration", 28800)
-        if duration:
-            duration = min(duration, max_duration)
-        else:
-            duration = max_duration
-
-        # Prepare stream-specific configuration
-        config = await self._prepare_stream_config(url, clearkey, extractor, max_res)
-
-        # Build FFmpeg command
-        cmd = self._build_ffmpeg_command(config, file_path, duration)
-
-        logger.info(f"Starting recording {recording_id}: {name}")
-        logger.debug(f"FFmpeg command: {' '.join(cmd)}")
-
         try:
+            filename = self._generate_filename(recording_id, name)
+            recordings_dir = config_store.get("recordings_dir", self.recordings_dir)
+            file_path = os.path.join(recordings_dir, filename)
+            if not os.path.exists(recordings_dir):
+                os.makedirs(recordings_dir)
+
+            # Apply duration limits
+            max_duration = config_store.get("max_recording_duration", 28800)
+            if duration:
+                duration = min(duration, max_duration)
+            else:
+                duration = max_duration
+
+            # Prepare stream-specific configuration
+            config = await self._prepare_stream_config(url, clearkey, extractor, max_res)
+
+            # Build FFmpeg command
+            cmd = self._build_ffmpeg_command(config, file_path, duration)
+
+            logger.info(f"Starting recording {recording_id}: {name}")
+            logger.debug(f"FFmpeg command: {' '.join(cmd)}")
+
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdin=asyncio.subprocess.PIPE,
@@ -425,6 +415,17 @@ class RecordingManager:
 
             return self.db.get_recording(recording_id)
 
+        except asyncio.CancelledError:
+            proc = self.processes.pop(recording_id, None)
+            self.start_times.pop(recording_id, None)
+            if proc and proc.returncode is None:
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except Exception:
+                    pass
+            self.db.update_recording_status(recording_id, 'failed', 'Recording startup cancelled')
+            raise
         except Exception as e:
             logger.error(f"Failed to start recording {recording_id}: {e}")
             self.db.update_recording_status(recording_id, 'failed', str(e))
@@ -480,7 +481,7 @@ class RecordingManager:
                     os.kill(pid, signal.SIGTERM)
                     await asyncio.sleep(2)
                     if self.db.is_pid_running(pid):
-                        os.kill(pid, signal.SIGKILL)
+                        os.kill(pid, getattr(signal, 'SIGKILL', signal.SIGTERM))
                     logger.debug(f"Stopped recording {recording_id} via PID {pid}")
                 except ProcessLookupError:
                     logger.debug(f"Process {pid} already terminated")

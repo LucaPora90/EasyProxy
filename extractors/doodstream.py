@@ -1,5 +1,4 @@
 import logging
-import os
 import random
 import re
 import string
@@ -9,14 +8,9 @@ from urllib.parse import urljoin, urlparse
 from curl_cffi.requests import AsyncSession
 from config import get_preferred_proxy_for_url
 import config as _cfg
-from extractors.base import BaseExtractor
-from utils.cookie_cache import CookieCache
+from extractors.base import BaseExtractor, ExtractorError, normalize_socks_proxy_url
 
 logger = logging.getLogger(__name__)
-
-
-class ExtractorError(Exception):
-    pass
 
 
 _DOOD_UA = (
@@ -29,26 +23,17 @@ class DoodStreamExtractor(BaseExtractor):
     DoodStream / PlayMogo extractor.
     """
 
-    def __init__(self, request_headers: dict = None, proxies: list = None):
-        super().__init__(request_headers or {}, proxies, extractor_name="doodstream")
+    def __init__(self, request_headers: dict = None, proxies: list = None, bypass_warp: bool = False):
+        super().__init__(request_headers or {}, proxies, extractor_name="doodstream", bypass_warp=bypass_warp)
         self.request_headers = request_headers or {}
         self.base_headers = self.request_headers.copy()
         self.base_headers["User-Agent"] = _DOOD_UA
         self.proxies = proxies or []
         self.last_used_proxy = None
         self.mediaflow_endpoint = "proxy_stream_endpoint"
-        self.cache = CookieCache("dood")
+
     async def _get_proxy(self, url: str, bypass_warp: bool = None) -> str | None:
         return await get_preferred_proxy_for_url(url, "doodstream", self.proxies, bypass_warp)
-
-    @staticmethod
-    def _normalize_proxy_url(proxy_url: str) -> str:
-        # Keep local-DNS SOCKS5 for WARP; remote DNS via wireproxy can stall.
-        if proxy_url.startswith("socks5://"):
-            return proxy_url
-        if "://" not in proxy_url:
-            return f"socks5h://{proxy_url}"
-        return proxy_url
 
     def _extract_pass_path(self, html: str) -> str | None:
         patterns = [
@@ -89,12 +74,6 @@ class DoodStreamExtractor(BaseExtractor):
             return str(int(time.time() * 1000))
         return str(int(time.time()))
 
-    def _is_valid_dood_page(self, html: str) -> bool:
-        if not html: return False
-        # Extended markers for newer domains
-        markers = ["pass_md5", "makePlay(", "token=", "get_player(", "vtt", "subtitle"]
-        return any(m in html for m in markers)
-
     def _log_parse_debug(self, html: str) -> None:
         markers = {
             "pass_md5": "pass_md5" in html,
@@ -124,8 +103,8 @@ class DoodStreamExtractor(BaseExtractor):
         proxy_url: str | None,
         bypass_warp: bool = False,
     ) -> dict | None:
-        normalized_proxy = self._normalize_proxy_url(proxy_url) if proxy_url else None
-        if normalized_proxy is None and not _cfg.is_direct_connection_allowed(bypass_warp):
+        normalized_proxy = normalize_socks_proxy_url(proxy_url) if proxy_url else None
+        if normalized_proxy is None and not self._force_direct and not _cfg.is_direct_connection_allowed(bypass_warp):
             raise ExtractorError(
                 "DoodStream: direct fallback disabled; no proxy route available"
             )
@@ -228,14 +207,5 @@ class DoodStreamExtractor(BaseExtractor):
         final_url = f"{base_stream}{rand_str}?token={token}&expiry={expiry}"
 
         logger.info(f"DoodStream successful sniffed extraction: {final_url[:60]}...")
-        return {
-            "destination_url": final_url,
-            "request_headers": {"User-Agent": ua, "Referer": f"{base_url}/", "Accept": "*/*"},
-            "mediaflow_endpoint": self.mediaflow_endpoint,
-            "selected_proxy": self.last_used_proxy,
-            "force_direct": self._force_direct,
-            "bypass_warp": self.bypass_warp_active,
-        }
+        return self._result(final_url, {"User-Agent": ua, "Referer": f"{base_url}/", "Accept": "*/*"})
 
-    async def close(self):
-        pass

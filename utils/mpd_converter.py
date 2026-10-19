@@ -104,6 +104,8 @@ class MPDToHLSConverter:
                 'duration': duration,
             }
             self._live_sequence_clocks[key] = clock
+            while len(self._live_sequence_clocks) > 512:
+                self._live_sequence_clocks.pop(next(iter(self._live_sequence_clocks)))
         else:
             # A source restart can move its media timeline backwards. Do not
             # let an old playback's origin produce negative/huge sequences.
@@ -605,7 +607,7 @@ class MPDToHLSConverter:
                     if is_null_key:
                         # Chiave nulla: usa comunque l'endpoint decrypt per il remux a TS
                         # ma aggiungi flag per saltare la decrittazione vera e propria
-                        logger.debug(f"🔓 Null key detected - using remux endpoint without decryption")
+                        logger.debug("🔓 Null key detected - using remux endpoint without decryption")
                         server_side_decryption = True
                         drm_token = next(
                             (
@@ -646,7 +648,7 @@ class MPDToHLSConverter:
                  ext_param = "ts"
             
             if ext_param == "ts" and not server_side_decryption:
-                 logger.debug(f"🔄 Concatenation requested (ext=ts)")
+                 logger.debug("🔄 Concatenation requested (ext=ts)")
                  server_side_decryption = True
                  # Use dummy key/id to satisfy the endpoint requirement, and set skip_decrypt=1
                  decryption_params = "&key=00000000000000000000000000000000&key_id=00000000000000000000000000000000&skip_decrypt=1"
@@ -733,9 +735,9 @@ class MPDToHLSConverter:
                         if r < 0:
                             next_time = next((int(item.get('t')) for item in timeline_entries[entry_index + 1:] if item.get('t') is not None), None)
                             if next_time is None:
-                                period = next(p for p in root.findall('mpd:Period', self.ns) if adaptation_set in list(p))
-                                period_start = self._duration_seconds(period.get('start', 'PT0S'))
-                                if period.get('duration'):
+                                period = next((p for p in root.findall('mpd:Period', self.ns) if adaptation_set in list(p)), None)
+                                period_start = self._duration_seconds(period.get('start', 'PT0S')) if period is not None else 0.0
+                                if period is not None and period.get('duration'):
                                     end_seconds = self._duration_seconds(period.get('duration'))
                                 elif root.get('mediaPresentationDuration'):
                                     end_seconds = self._duration_seconds(root.get('mediaPresentationDuration')) - period_start
@@ -835,7 +837,6 @@ class MPDToHLSConverter:
                         if not segments_to_use:
                             segments_to_use = [all_segments[-1]]
 
-                        total_duration = sum(seg['duration'] for seg in segments_to_use)
                         max_duration = max(seg['duration'] for seg in segments_to_use)
                         if segments_to_use:
                             if has_explicit_start_number:

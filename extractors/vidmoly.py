@@ -5,8 +5,8 @@ from extractors.base import BaseExtractor, ExtractorError
 class VidmolyExtractor(BaseExtractor):
     """Vidmoly URL extractor."""
 
-    def __init__(self, request_headers: dict, proxies: list = None):
-        super().__init__(request_headers, proxies, extractor_name="vidmoly")
+    def __init__(self, request_headers: dict, proxies: list = None, bypass_warp: bool = False):
+        super().__init__(request_headers, proxies, extractor_name="vidmoly", bypass_warp=bypass_warp)
 
     async def extract(self, url: str, **kwargs) -> dict:
         """Extract Vidmoly URL."""
@@ -52,14 +52,5 @@ class VidmolyExtractor(BaseExtractor):
         except ExtractorError as e:
             raise ExtractorError(f"VIDMOLY: Stream unavailable or timed out: {e}")
 
-        return {
-            "destination_url": master_url,
-            "request_headers": headers,
-            "mediaflow_endpoint": self.mediaflow_endpoint,
-            "selected_proxy": self.last_used_proxy,
-            "force_direct": self._force_direct,
-            "bypass_warp": self.bypass_warp_active,
-        }
+        return self._result(master_url, headers)
 
-    async def close(self):
-        await super().close()

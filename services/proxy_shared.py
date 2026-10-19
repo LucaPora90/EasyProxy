@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import logging
 import random
 import re
@@ -66,6 +67,43 @@ from services.manifest_rewriter import ManifestRewriter
 from services.secure_state import open_state, seal_state
 
 
+_TEMPLATES_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "templates"
+)
+
+
+def read_template(name: str) -> str:
+    """Read a template file with the shared {{APP_VERSION}} substitution."""
+    with open(os.path.join(_TEMPLATES_DIR, name), "r", encoding="utf-8") as handle:
+        return handle.read().replace("{{APP_VERSION}}", APP_VERSION)
+
+
+def json_response(payload, status=200):
+    """JSON response helper shared by the admin pages and route modules."""
+    return web.json_response(payload, status=status)
+
+
+def unauthorized():
+    return json_response({"error": "Unauthorized: Invalid API Password"}, status=401)
+
+
+def admin_guard(handler):
+    """Answer 401 before running a handler without a valid API password.
+
+    Works for plain handlers and for mixin methods (the request is located
+    among the arguments, so ``self`` does not confuse the guard).
+    """
+
+    @functools.wraps(handler)
+    async def wrapper(*args, **kwargs):
+        request = next((arg for arg in args if isinstance(arg, web.Request)), None)
+        if request is not None and not check_password(request):
+            return unauthorized()
+        return await handler(*args, **kwargs)
+
+    return wrapper
+
+
 def safe_log_endpoint(value: str | None) -> str:
     """Return URL endpoint without query tokens or credentials."""
     parsed = urlparse(str(value or ""))
@@ -113,7 +151,11 @@ def request_log_context(request=None, target_url: str | None = None, route: str 
     requested = query.get("orig_url") or query.get("original_channel_url") or query.get("url") or query.get("d")
     # Old/generated relay URLs may not carry extractor_key. Keep service logs
     # useful by inferring only the unambiguous provider URL we support here.
-    if extractor_fallback in {"unknown", "generic_hls"} and "vavoo.to" in str(requested or "").lower():
+    # (tutti i mirror frontend mediahubmx, non solo vavoo.to)
+    if extractor_fallback in {"unknown", "generic_hls"} and any(
+        d in str(requested or "").lower()
+        for d in ("vavoo.to", "kool.to", "vavoo.net", "kool.ws", "huhu.to", "oha.to", "voltop.net")
+    ):
         extractor_fallback = "vavoo"
     route_text = route or "unknown"
     return (
@@ -163,10 +205,6 @@ try:
 except ImportError:
     logger.warning("PlaylistBuilder module not found. PlaylistBuilder functionality disabled.")
 
-_STDLIB_MODULES = {
-    "asyncio", "logging", "random", "re", "sys", "os", "time", "socket",
-    "urllib", "base64", "binascii", "hashlib", "hmac", "json", "ssl",
-}
 
 class ProxyDeadRetryError(Exception):
     """Raised when the proxy dies during playlist fetch; triggers re-extraction."""
@@ -250,6 +288,8 @@ def check_vavoo_request(headers: dict, request: web.Request, url: str) -> bool:
         or "vavoo" in (headers.get("Origin") or "").lower()
         or "vavoo" in (request.headers.get("Referer") or "").lower()
         or "vavoo" in url.lower()
+        # Mirror frontend dello stesso backend (play URL senza "vavoo" dentro).
+        or any(d in url.lower() for d in ("kool.to", "kool.ws", "huhu.to", "oha.to", "voltop.net"))
         or any(x in url.lower() for x in ["/sunshine/", "lokke", "mediahubmx"])
     )
 
@@ -316,6 +356,4 @@ def get_active_streams() -> list:
     return active
 
 
-__all__ = [name for name in globals() if not name.startswith('__') and name not in _STDLIB_MODULES]
 # Commonly used stdlib modules exposed via star import for downstream compatibility
-__all__ += ["asyncio", "re", "sys", "os", "time", "json", "base64", "hashlib", "ssl", "socket", "random", "logging", "urllib"]

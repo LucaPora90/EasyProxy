@@ -2,7 +2,6 @@ import asyncio
 import base64
 import json
 import logging
-import random
 import re
 import socket
 import time
@@ -12,12 +11,11 @@ from typing import Optional, Dict, Any
 from urllib.parse import urlparse, parse_qs
 from config import BYPASS_WARP_CONTEXT, get_connector_for_proxy, get_preferred_proxy_for_url
 import config as _cfg
-from extractors.base import BaseExtractor
+from extractors.base import BaseExtractor, ExtractorError
 
 logger = logging.getLogger(__name__)
 
 # Tokens expire every 10 minutes (see vavoo_proxy.py TOKEN_ADDON_SIG)
-_TOKEN_MAX_AGE = 600
 _TOKEN_REFRESH_AGE = 480
 _PING_URLS = [
     "https://www.vavoo.tv/api/app/ping",
@@ -25,20 +23,32 @@ _PING_URLS = [
 ]
 _VYPN_PACKAGE = "net.vypn.app"
 _VYPN_VERSION = "1.4.1"
-_BASE_SITES = ["https://vavoo.to", "https://kool.to"]
+# Mirror frontend dello stesso backend mediahubmx (verificato ott 2026:
+# stessa firma dai ping, stesso catalogo, resolve cross-compatibile tra
+# domini). Il gate di extract() e l'auto-detect accettano tutti questi
+# domini; le basi di resolve/catalogo restano le 4 con fallback (huhu.to /
+# oha.to / voltop.net esclusi dalle basi: verificati giu' insieme a
+# vavoo.to / kool.to, stessa infra).
+VAVOO_MIRROR_DOMAINS = (
+    "vavoo.to",
+    "kool.to",
+    "vavoo.net",
+    "kool.ws",
+    "huhu.to",
+    "oha.to",
+    "voltop.net",
+)
+_BASE_SITES = ["https://vavoo.to", "https://kool.to", "https://vavoo.net", "https://kool.ws"]
 _LANGUAGE = "de"
 _REGION = "DE"
 
 
-class ExtractorError(Exception):
-    pass
-
-
 class VavooExtractor(BaseExtractor):
-    """Vavoo URL extractor — resolves vavoo.to play URLs to clean HLS via lokke.app auth."""
+    """Vavoo URL extractor — resolves vavoo play URLs (all mirror frontends)
+    to clean HLS via lokke.app auth."""
 
-    def __init__(self, request_headers: dict, proxies: list = None):
-        super().__init__(request_headers, proxies, extractor_name="vavoo")
+    def __init__(self, request_headers: dict, proxies: list = None, bypass_warp: bool = False):
+        super().__init__(request_headers, proxies, extractor_name="vavoo", bypass_warp=bypass_warp)
         self.request_headers = request_headers
         self.base_headers = {
             "user-agent": "okhttp/4.11.0"
@@ -50,6 +60,7 @@ class VavooExtractor(BaseExtractor):
         self._proxy = None  # scelto una volta, non cambia
         self.addon_sig = None
         self.addon_sig_ts = 0
+        self._addon_sig_proxy = None
         self.base_index = 0
 
     @property
@@ -104,23 +115,18 @@ class VavooExtractor(BaseExtractor):
                 direct_allowed,
             )
 
-            if (
-                self.session is not None
-                and not self.session.closed
-                and self._proxy == selected_proxy
-            ):
-                return self.session
-
-            if self.session is not None and not self.session.closed:
-                await self.session.close()
-            self.session = None
             self._proxy = selected_proxy
             self.last_used_proxy = selected_proxy
 
-            if self._proxy is None and not direct_allowed:
+            if self._proxy is None and not self._force_direct and not direct_allowed:
                 raise ClientConnectionError(
                     "Vavoo: direct fallback disabled; no proxy route available"
                 )
+
+            session = self._route_sessions.get(selected_proxy)
+            if session is not None and not session.closed:
+                self.session = session
+                return self.session
 
             timeout = ClientTimeout(total=60, connect=30, sock_read=30)
 
@@ -147,6 +153,7 @@ class VavooExtractor(BaseExtractor):
                 connector=connector,
                 headers={'User-Agent': self.base_headers["user-agent"]}
             )
+            self._route_sessions[selected_proxy] = self.session
         return self.session
 
     async def _get_external_ip(self) -> Optional[str]:
@@ -249,19 +256,23 @@ class VavooExtractor(BaseExtractor):
         return None
 
     async def _get_sig(self, force: bool = False) -> Optional[str]:
+        await self._get_session()
         now = time.time()
-        if self.addon_sig and not force and (now - self.addon_sig_ts < _TOKEN_REFRESH_AGE):
+        proxy_changed = getattr(self, "_addon_sig_proxy", None) != self._proxy
+        if self.addon_sig and not force and not proxy_changed and (now - self.addon_sig_ts < _TOKEN_REFRESH_AGE):
             return self.addon_sig
         sig = await self._fetch_addon_sig()
         if not sig:
-            if self.addon_sig:
+            if self.addon_sig and not proxy_changed:
                 logger.warning("Vavoo token refresh failed, reusing old addonSig")
-            return self.addon_sig
+                return self.addon_sig
+            return None
         client_ip = await self._get_external_ip()
         if client_ip:
             sig = self._rewrite_addon_sig_ip(sig, client_ip)
         self.addon_sig = sig
         self.addon_sig_ts = now
+        self._addon_sig_proxy = self._proxy
         logger.info("Vavoo addonSig obtained")
         return sig
 
@@ -274,21 +285,21 @@ class VavooExtractor(BaseExtractor):
             if live_id:
                 url = f"https://vavoo.to/vavoo-iptv/play/{live_id}"
 
-        # Normalize /play/X to /vavoo-iptv/play/X
+        # Normalize /play/X to /vavoo-iptv/play/X (il play-ID e' lo stesso su
+        # tutti i mirror, e il resolve e' cross-compatibile: la forma
+        # canonica vavoo.to si risolve da qualsiasi base).
         m = re.search(r'/play/([^/?#]+)', url)
         if m:
             url = f"https://vavoo.to/vavoo-iptv/play/{m.group(1)}"
 
-        for attempt in range(2):
-            if attempt > 0:
-                sig = await self._get_sig(force=True)
-                if not sig:
-                    return None
-            else:
-                sig = await self._get_sig()
-                if not sig:
-                    logger.warning("Vavoo no addonSig available, resolving without signature")
-
+        # Prova ogni base a turno: con un frontend giu' (connection refused,
+        # come osservato su vavoo.to/kool.to) si passa alla successiva invece
+        # di fallire subito. Firma rinnovata ad ogni cambio base.
+        last_err = None
+        sig = await self._get_sig()
+        if not sig:
+            logger.warning("Vavoo no addonSig available, resolving without signature")
+        for _ in range(len(_BASE_SITES)):
             # _get_sig() may rebuild session when proxy bypass is active.
             session = await self._get_session()
 
@@ -305,10 +316,18 @@ class VavooExtractor(BaseExtractor):
             body = {"language": _LANGUAGE, "region": _REGION, "url": url, "clientVersion": "3.0.2"}
             try:
                 async with session.post(self._resolve_url, json=body, headers=headers,
-                                        timeout=ClientTimeout(total=30), ssl=False) as resp:
-                    if resp.status in (451, 502) and attempt < 1:
+                                        timeout=ClientTimeout(total=15), ssl=False) as resp:
+                    # Switch di base solo su errori potenzialmente legati alla
+                    # singola base (gateway/backend): gli altri 4xx (400/401/
+                    # 403/404/429) dipendono dalla richiesta, riprovarli
+                    # altrove spreca solo tentativi/ping (il 429 peggiora).
+                    if resp.status in (451, 502, 500, 503, 504):
+                        last_err = f"HTTP {resp.status} on {_BASE_SITES[self.base_index]}"
                         logger.warning(f"Vavoo resolve status {resp.status}, switching base site")
                         self._switch_to_next_base()
+                        sig = await self._get_sig(force=True)
+                        if not sig:
+                            return None
                         continue
                     if resp.status != 200:
                         logger.warning(f"Vavoo resolve returned status {resp.status}")
@@ -324,12 +343,19 @@ class VavooExtractor(BaseExtractor):
                     logger.warning("Vavoo resolve response missing URL")
                     return None
             except Exception as e:
-                logger.warning(f"Vavoo resolve exception: {e}")
-                return None
+                last_err = e
+                logger.warning(f"Vavoo resolve exception on {_BASE_SITES[self.base_index]}, "
+                               f"switching base site: {e}")
+                self._switch_to_next_base()
+                sig = await self._get_sig(force=True)
+                if not sig:
+                    return None
+                continue
+        logger.warning(f"Vavoo resolve failed on all base sites, last error: {last_err}")
         return None
 
     async def extract(self, url: str, **kwargs) -> Dict[str, Any]:
-        if "vavoo.to" not in url:
+        if not any(d in url.lower() for d in VAVOO_MIRROR_DOMAINS):
             raise ExtractorError("Not a valid Vavoo URL")
 
         self._apply_routing_kwargs(url, kwargs)
@@ -356,6 +382,11 @@ class VavooExtractor(BaseExtractor):
 
     async def close(self):
         async with self._session_lock:
-            if self.session and not self.session.closed:
-                await self.session.close()
+            sessions = set(self._route_sessions.values())
+            if self.session is not None:
+                sessions.add(self.session)
+            for session in sessions:
+                if not session.closed:
+                    await session.close()
+            self._route_sessions.clear()
             self.session = None

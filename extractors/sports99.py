@@ -2,16 +2,29 @@ import re
 import base64
 import urllib.parse
 import logging
-from urllib.parse import urljoin, urlparse
 from extractors.base import BaseExtractor, ExtractorError
 
 logger = logging.getLogger(__name__)
 
+def _b64url_decode_urlsafe(value: str) -> str:
+    """Decode URL-safe base64, falling back to the raw input when it is not base64."""
+    padded = value.replace("-", "+").replace("_", "/")
+    padded += "=" * (-len(padded) % 4)
+    try:
+        decoded = base64.b64decode(padded)
+    except Exception:
+        return value
+    try:
+        return decoded.decode("utf-8")
+    except Exception:
+        return decoded.decode("latin-1")
+
+
 class Sports99Extractor(BaseExtractor):
     """Sports99 / CDNLiveTV URL extractor."""
 
-    def __init__(self, request_headers: dict, proxies: list = None):
-        super().__init__(request_headers, proxies, extractor_name="sports99")
+    def __init__(self, request_headers: dict, proxies: list = None, bypass_warp: bool = False):
+        super().__init__(request_headers, proxies, extractor_name="sports99", bypass_warp=bypass_warp)
 
     async def extract(self, url: str, **kwargs) -> dict:
         """Extract Sports99 stream URL."""
@@ -60,44 +73,17 @@ class Sports99Extractor(BaseExtractor):
                         expr = concat_match.group(1)
                         var_names = re.findall(rf'{func_name}\(([a-zA-Z0-9_]+)\)', expr)
                         
-                        def decode_val(s):
-                            s = s.replace('-', '+').replace('_', '/')
-                            while len(s) % 4:
-                                s += '='
-                            try:
-                                decoded = base64.b64decode(s)
-                                try:
-                                    return decoded.decode('utf-8')
-                                except:
-                                    return decoded.decode('latin-1')
-                            except:
-                                return s
-
-                        stream_url = "".join(decode_val(vars_dict.get(vn, "")) for vn in var_names)
+                        stream_url = "".join(_b64url_decode_urlsafe(vars_dict.get(vn, "")) for vn in var_names)
                         if "playlist.m3u8" in stream_url:
                             logger.info(f"[Sports99] Extracted stream URL via base64 concatenation: {stream_url}")
-                            return {
-                                "destination_url": stream_url,
-                                "request_headers": stream_headers,
-                                "mediaflow_endpoint": self.mediaflow_endpoint,
-                                "selected_proxy": self.last_used_proxy,
-                                "force_direct": self._force_direct,
-                                "bypass_warp": self.bypass_warp_active,
-                            }
+                            return self._result(stream_url, stream_headers)
 
                 # Fallback 2: check if already unpacked in HTML
                 if "playlist.m3u8" in html:
                     m3u8_match = re.search(r'["\'](https?://[^"\']+\.m3u8[^"\']*)["\']', html)
                     if m3u8_match:
-                        logger.info(f"[Sports99] Found direct URL in HTML")
-                        return {
-                            "destination_url": m3u8_match.group(1),
-                            "request_headers": stream_headers,
-                            "mediaflow_endpoint": self.mediaflow_endpoint,
-                            "selected_proxy": self.last_used_proxy,
-                            "force_direct": self._force_direct,
-                            "bypass_warp": self.bypass_warp_active,
-                        }
+                        logger.info("[Sports99] Found direct URL in HTML")
+                        return self._result(m3u8_match.group(1), stream_headers)
                 raise ExtractorError("SPORTS99: Packed script not found")
 
             h_str, u, n_str, t, e, _ = match.groups()
@@ -118,14 +104,7 @@ class Sports99Extractor(BaseExtractor):
 
             logger.info(f"[Sports99] Successfully extracted: {stream_url}")
             
-            return {
-                "destination_url": stream_url,
-                "request_headers": stream_headers,
-                "mediaflow_endpoint": self.mediaflow_endpoint,
-                "selected_proxy": self.last_used_proxy,
-                "force_direct": self._force_direct,
-                "bypass_warp": self.bypass_warp_active,
-            }
+            return self._result(stream_url, stream_headers)
 
         except Exception as err:
             logger.error(f"[Sports99] Extraction error: {err}")
@@ -171,20 +150,6 @@ class Sports99Extractor(BaseExtractor):
             # Find all constant declarations
             consts = dict(re.findall(r"const\s+([a-zA-Z0-9_]+)\s*=\s*'([^']+)';", js_code))
             
-            def modified_atob(s):
-                """Helper to decode base64 with potential URL-safe characters."""
-                s = s.replace('-', '+').replace('_', '/')
-                while len(s) % 4:
-                    s += '='
-                try:
-                    decoded = base64.b64decode(s)
-                    try:
-                        return decoded.decode('utf-8')
-                    except:
-                        return decoded.decode('latin-1')
-                except:
-                    return s
-
             # Find construction lines like: const HaLKeS... = decodeFunc(Var1) + decodeFunc(Var2) + ...
             # The JS uses dynamic function names for decodeFunc, but they always take one argument.
             construction_lines = re.findall(
@@ -195,7 +160,7 @@ class Sports99Extractor(BaseExtractor):
             for var_name, expression in construction_lines:
                 # Extract variables inside parentheses
                 parts = re.findall(r"\(([a-zA-Z0-9_]+)\)", expression)
-                decoded_parts = [modified_atob(consts.get(p, "")) for p in parts]
+                decoded_parts = [_b64url_decode_urlsafe(consts.get(p, "")) for p in parts]
                 full_url = "".join(decoded_parts)
                 
                 if "playlist.m3u8" in full_url and "token=" in full_url:
@@ -206,5 +171,3 @@ class Sports99Extractor(BaseExtractor):
             logger.error(f"[Sports99] URL extraction error: {err}")
             return None
 
-    async def close(self):
-        await super().close()

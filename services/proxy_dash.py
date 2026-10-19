@@ -1,5 +1,4 @@
 import re
-import time
 import aiohttp
 from urllib.parse import urljoin, urlparse, unquote
 from config import STRICT_PROXY_CONTEXT, resolve_proxy_alias
@@ -10,7 +9,6 @@ from services.proxy_shared import (
     check_password,
     get_ssl_setting_for_url,
     get_proxy_for_url,
-    mark_proxy_dead,
     decrypt_segment,
     is_browser_key_request,
     fetch_browser_backed_key,
@@ -156,7 +154,9 @@ class HLSProxyDashMixin:
                 forced_proxy = None
             if bypass_proxies:
                 forced_proxy = None
-                _shared.BYPASS_PROXIES_CONTEXT.set(True)
+                _dash_proxy_token = _shared.BYPASS_PROXIES_CONTEXT.set(True)
+            else:
+                _dash_proxy_token = None
 
             if hasattr(self, "_touch_extractor_activity"):
                 self._touch_extractor_activity(extractor_key, routing.get("stream_key"))
@@ -167,7 +167,11 @@ class HLSProxyDashMixin:
             }
             if routing.get("stream_key"):
                 session_kwargs["session_key"] = routing["stream_key"]
-            _session, _ = await self._get_proxy_session(segment_url, **session_kwargs)
+            try:
+                _session, _ = await self._get_proxy_session(segment_url, **session_kwargs)
+            finally:
+                if _dash_proxy_token is not None:
+                    _shared.BYPASS_PROXIES_CONTEXT.reset(_dash_proxy_token)
             if client_range:
                 headers["Range"] = client_range
             elif is_init and init_range:
@@ -354,11 +358,12 @@ class HLSProxyDashMixin:
 
             # ✅ Use pooled session for better performance
             proxy_used = None
+            _key_proxy_token = None
             raw_proxy = request.query.get("proxy") or None
             forced_proxy = resolve_proxy_alias(raw_proxy)
             if raw_proxy and raw_proxy.lower() == "off":
                 forced_proxy = None
-                _shared.BYPASS_PROXIES_CONTEXT.set(True)
+                _key_proxy_token = _shared.BYPASS_PROXIES_CONTEXT.set(True)
             bypass_warp = request.query.get("warp", "").lower() == "off"
             extractor_key = request.query.get("extractor_key")
             if extractor_key:
@@ -367,7 +372,8 @@ class HLSProxyDashMixin:
                     bypass_warp = True
                 if ext_proxy_off:
                     forced_proxy = None
-                    _shared.BYPASS_PROXIES_CONTEXT.set(True)
+                    if _key_proxy_token is None:
+                        _key_proxy_token = _shared.BYPASS_PROXIES_CONTEXT.set(True)
             if bypass_warp and forced_proxy and _shared.is_warp_proxy_url(forced_proxy):
                 forced_proxy = None
 
@@ -446,7 +452,7 @@ class HLSProxyDashMixin:
             # Caso 'auth' - URL che contengono 'auth' richiedono headers speciali
             if "auth" in key_url.lower():
                 logger.debug(
-                    f"🔐 Detected 'auth' key URL, ensuring special headers are present"
+                    "🔐 Detected 'auth' key URL, ensuring special headers are present"
                 )
                 if "X-User-Agent" not in headers:
                     headers["X-User-Agent"] = headers.get(
@@ -651,5 +657,7 @@ class HLSProxyDashMixin:
             )
             return web.Response(text=f"Key error: {str(e)}", status=500)
         finally:
+            if locals().get("_key_proxy_token") is not None:
+                _shared.BYPASS_PROXIES_CONTEXT.reset(_key_proxy_token)
             if session_need_close and session and not session.closed:
                 await session.close()

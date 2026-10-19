@@ -11,34 +11,9 @@
             --bg-primary: #09090f;
             --bg-secondary: #111119;
             --bg-tertiary: #1a1a28;
-            --surface: rgba(255, 255, 255, 0.03);
-            --surface-glass: rgba(255, 255, 255, 0.06);
-            --surface-elevated: rgba(255, 255, 255, 0.1);
-            --primary-gradient: linear-gradient(135deg, #6366f1 0%, #a855f7 50%, #ec4899 100%);
-            --secondary-gradient: linear-gradient(135deg, #06b6d4 0%, #3b82f6 100%);
-            --accent-gradient: linear-gradient(135deg, #10b981 0%, #059669 100%);
-            --neon-gradient: linear-gradient(90deg, #06b6d4, #a855f7, #ec4899, #a855f7, #06b6d4);
-            --accent-primary: #6366f1;
-            --accent-secondary: #a855f7;
-            --accent-success: #10b981;
-            --accent-warning: #f59e0b;
-            --accent-error: #ef4444;
-            --accent-info: #06b6d4;
-            --neon-green: #39ff14;
             --text-primary: #ffffff;
             --text-secondary: #a1a1aa;
             --text-muted: #6b6b80;
-            --text-accent: #e4e4e7;
-            --border-primary: rgba(255, 255, 255, 0.08);
-            --border-accent: rgba(255, 255, 255, 0.15);
-            --glow-primary: 0 0 30px rgba(99, 102, 241, 0.25);
-            --glow-secondary: 0 0 40px rgba(168, 85, 247, 0.3);
-            --glow-success: 0 0 30px rgba(16, 185, 129, 0.25);
-            --shadow-dark: 0 25px 60px -15px rgba(0, 0, 0, 0.8);
-            --transition-fast: all 0.15s cubic-bezier(0.4, 0, 0.2, 1);
-            --transition-normal: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-            --border-radius: 16px;
-            --border-radius-large: 24px;
         }
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -258,7 +233,7 @@
         }
         .badge-on { background: rgba(16,185,129,0.15); color: var(--accent-success); }
         .badge-off { background: rgba(239,68,68,0.15); color: var(--accent-error); }
-        .badge-warp { background: rgba(59,130,246,0.15); color: #3b82f6; }
+        
         .status { margin: 0.5rem 0 0.75rem; font-size: 0.8rem; color: var(--text-muted); }
         .status.connected { color: var(--accent-success); }
         .status.disconnected { color: var(--accent-error); }
@@ -320,7 +295,6 @@
         .toast.show { transform: translateY(0); opacity: 1; }
         .toast-success { background: rgba(16,185,129,0.9); color: #fff; }
         .toast-error { background: rgba(239,68,68,0.9); color: #fff; }
-        .toast-info { background: rgba(99,102,241,0.9); color: #fff; }
         .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; }
         @media (max-width: 700px) {
             .grid-2 { grid-template-columns: 1fr; }
@@ -343,48 +317,9 @@
             border-radius: 20px; border: 1px solid var(--border-primary);
             margin-top: 0.75rem;
         }
-        .modal-overlay {
-            position: fixed; inset: 0; z-index: 999;
-            background: rgba(0,0,0,0.6); backdrop-filter: blur(4px);
-            display: none; align-items: center; justify-content: center;
-        }
-        .modal-overlay.show { display: flex; }
-        .modal-box {
-            background: var(--bg-secondary); border: 1px solid var(--border-primary);
-            border-radius: 16px; padding: 1.5rem; width: 90%; max-width: 500px;
-            max-height: 70vh; display: flex; flex-direction: column;
-        }
-        .modal-box h3 { margin-bottom: 1rem; font-size: 1.1rem; }
-        .modal-list { flex: 1; overflow-y: auto; margin-bottom: 1rem; }
-        .modal-list .item {
-            display: flex; align-items: center; justify-content: space-between;
-            padding: 6px 10px; margin-bottom: 4px;
-            background: var(--bg-tertiary); border-radius: 8px;
-            font-size: 0.8rem;
-        }
-        .modal-list .item .remove {
-            cursor: pointer; color: var(--accent-error); font-weight: 700;
-            padding: 2px 8px; border-radius: 4px;
-        }
-        .modal-list .item .remove:hover { background: rgba(239,68,68,0.15); }
-        .modal-add-row { display: flex; gap: 8px; }
-        .modal-add-row input { flex: 1; }
-        .add-form { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
-        .add-form input, .add-form select { flex: 1; min-width: 120px; }
-        .ll-item {
-            display: flex; align-items: center; justify-content: space-between;
-            padding: 6px 10px; margin-bottom: 4px;
-            background: var(--bg-tertiary); border-radius: 8px; font-size: 0.8rem;
-        }
-        .ll-item .ll-name { font-weight: 500; color: var(--text-primary); }
-        .ll-item .ll-level { color: var(--text-secondary); padding: 0 8px; }
-        .ll-item .ll-remove {
-            cursor: pointer; color: var(--accent-error); font-weight: 700;
-            padding: 2px 8px; border-radius: 4px;
-        }
-        .ll-item .ll-remove:hover { background: rgba(239,68,68,0.15); }
+
     </style>
-    <link rel="stylesheet" href="/static/ep-ui.css">
+    <link rel="stylesheet" href="/static/ep-ui.css?v={{APP_VERSION}}">
 </head>
 <body>
 <canvas id="particles-canvas"></canvas>
@@ -487,7 +422,7 @@
                 <label>Enabled</label>
                 <div id="warp-toggle" class="toggle" onclick="toggleWarp()"></div>
                 <span id="warp-label" class="badge badge-off">OFF</span>
-                <button class="btn btn-primary btn-sm" style="margin-left:auto" onclick="reconnectWarp()">🔄 New IP</button>
+                <button id="warp-reconnect-btn" class="btn btn-primary btn-sm" style="margin-left:auto" onclick="reconnectWarp()">🔄 New IP</button>
             </div>
             <div class="row">
                 <label>License Key</label>
@@ -654,21 +589,12 @@
     </div>
 </div>
 
+    <script src="/static/ep-ui.js?v={{APP_VERSION}}"></script>
 <script>
 let config = {};
 let extractorProxies = {};
 let sslOff = false;
 let extractorProxyMode = 'proxy';
-
-function formatBytes(bytes, decimals = 2) {
-    if (!bytes || bytes === 0) return '0 B';
-    const k = 1024;
-    const dm = decimals < 0 ? 0 : decimals;
-    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
-}
-
 function formatSpeed(bytesPerSec) {
     if (!bytesPerSec || bytesPerSec <= 0) return '0 B/s';
     const k = 1024;
@@ -681,39 +607,90 @@ function updateSpeedtestButtons(cfg) {
     // No-op: single button, always enabled
 }
 
+function renderSpeedtestResults(data) {
+    const result = document.getElementById('speedtest-result');
+    result.style.display = 'block';
+    if (data.error) { result.innerHTML = 'Error: ' + escHtml(data.error); return; }
+    if (!data.results || !data.results.length) { result.innerHTML = 'No results (run not started?)'; return; }
+    result.innerHTML = '<div>' + data.results.map(function(r) {
+            if (r.error) {
+                return '<div class="speedtest-card error">' +
+                    '<div style="font-weight:600;font-size:0.8rem;margin-bottom:4px">' + escHtml(r.name) + '</div>' +
+                    '<div style="color:var(--accent-error);font-size:0.7rem">❌ ' + escHtml(String(r.error).slice(0, 120)) + '</div></div>';
+            }
+            const srv = r.server || {};
+            return '<div class="speedtest-card">' +
+                '<div style="font-weight:600;font-size:0.8rem;margin-bottom:4px">' + escHtml(r.name) + '</div>' +
+                (r.proxy_used ? '<div style="font-size:0.65rem;color:var(--accent-warning);margin-bottom:2px">📡 ' + escHtml(r.proxy_used) + '</div>' : '') +
+                (r.external_ip ? '<div style="font-size:0.65rem;color:var(--text-muted);margin-bottom:2px">Exit IP: ' + escHtml(r.external_ip) + '</div>' : '') +
+                '<div style="font-size:0.65rem;color:var(--text-muted);margin-bottom:4px">' + (srv.sponsor && srv.sponsor !== 'Unknown' ? escHtml(srv.sponsor) + ' · ' : '') + escHtml(srv.location) + '</div>' +
+                '<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:0.75rem"><span style="color:var(--text-muted)">Ping</span><span style="color:var(--accent-primary)">' + escHtml(r.ping_ms) + ' ms</span></div>' +
+                '<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:0.75rem"><span style="color:var(--text-muted)">⬇ Download</span><span style="color:var(--accent-success);font-weight:700">' + escHtml(r.download_mbps) + ' Mbps</span></div>' +
+                '<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:0.75rem"><span style="color:var(--text-muted)">⬆ Upload</span><span style="color:var(--accent-success);font-weight:700">' + escHtml(r.upload_mbps) + ' Mbps</span></div>' +
+            '</div>';
+    }).join('') + '</div>';
+}
+
+function withAdminQuery(path) {
+    const pw = new URLSearchParams(window.location.search).get('api_password');
+    return path + (pw ? '?api_password=' + encodeURIComponent(pw) : '');
+}
+async function pollAdminJob(url, resultEl, busyText) {
+    const deadline = Date.now() + 15 * 60 * 1000;
+    let data = null;
+    const authUrl = withAdminQuery(url);
+    while (Date.now() < deadline) {
+        await new Promise(function(r) { setTimeout(r, 2000); });
+        const resp = await fetch(authUrl);
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        data = await resp.json();
+        if (data.status !== 'running') break;
+        resultEl.innerHTML = busyText;
+    }
+    if (!data || data.status === 'running') throw new Error('timeout');
+    return data;
+}
+
 async function runAllSpeedtests() {
     const btn = document.getElementById('speedtest-btn');
     if (btn.disabled) return;
     const result = document.getElementById('speedtest-result');
     btn.disabled = true;
-    btn.innerHTML = '⏳ Running...';
+    btn.innerHTML = 'Running...';
     result.style.display = 'block';
     result.innerHTML = 'Running speed tests...';
     try {
-        const resp = await fetch('/api/admin/speedtest', { method: 'POST' });
-        const data = await resp.json();
-        if (data.error) { result.innerHTML = '❌ ' + data.error; return; }
-        result.innerHTML = '<div>' + data.results.map(function(r) {
-            if (r.error) {
-                return '<div class="speedtest-card error">' +
-                    '<div style="font-weight:600;font-size:0.8rem;margin-bottom:4px">' + r.name + '</div>' +
-                    '<div style="color:var(--accent-error);font-size:0.7rem">❌ ' + r.error.slice(0, 120) + '</div></div>';
-            }
-            return '<div class="speedtest-card">' +
-                '<div style="font-weight:600;font-size:0.8rem;margin-bottom:4px">' + r.name + '</div>' +
-                (r.proxy_used ? '<div style="font-size:0.65rem;color:var(--accent-orange);margin-bottom:2px">📡 ' + r.proxy_used + '</div>' : '') +
-                (r.external_ip ? '<div style="font-size:0.65rem;color:var(--text-muted);margin-bottom:2px">IP uscente: ' + r.external_ip + '</div>' : '') +
-                '<div style="font-size:0.65rem;color:var(--text-muted);margin-bottom:4px">' + (r.server.sponsor && r.server.sponsor !== 'Unknown' ? r.server.sponsor + ' · ' : '') + r.server.location + '</div>' +
-                '<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:0.75rem"><span style="color:var(--text-muted)">Ping</span><span style="color:var(--accent-primary)">' + r.ping_ms + ' ms</span></div>' +
-                '<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:0.75rem"><span style="color:var(--text-muted)">⬇ Download</span><span style="color:var(--accent-success);font-weight:700">' + r.download_mbps + ' Mbps</span></div>' +
-                '<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:0.75rem"><span style="color:var(--text-muted)">⬆ Upload</span><span style="color:var(--accent-success);font-weight:700">' + r.upload_mbps + ' Mbps</span></div>' +
-            '</div>';
-        }).join('') + '</div>';
+        await fetch(withAdminQuery('/api/admin/speedtest'), { method: 'POST' });
+        renderSpeedtestResults(await pollAdminJob('/api/admin/speedtest', result, 'Running speed tests... (can take a few minutes)'));
     } catch (e) {
-        result.innerHTML = '❌ Error: ' + e.message;
+        result.innerHTML = 'Error: ' + escHtml(e.message);
     } finally {
         btn.disabled = false;
-        btn.innerHTML = '🚀 Run Speed Tests';
+        btn.innerHTML = 'Run Speed Tests';
+    }
+}
+
+// Page load: resume an in-flight run or show the last results.
+async function initSpeedtest() {
+    const btn = document.getElementById('speedtest-btn');
+    const result = document.getElementById('speedtest-result');
+    try {
+        const resp = await fetch(withAdminQuery('/api/admin/speedtest'));
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (data.status === 'running') {
+            btn.disabled = true;
+            result.style.display = 'block';
+            result.innerHTML = 'Running speed tests...';
+            renderSpeedtestResults(await pollAdminJob('/api/admin/speedtest', result, 'Running speed tests... (can take a few minutes)'));
+        } else if (data.results && data.results.length) {
+            renderSpeedtestResults(data);
+        }
+    } catch (e) {
+        result.style.display = 'block';
+        result.innerHTML = 'Error: ' + escHtml(e.message);
+    } finally {
+        btn.disabled = false;
     }
 }
 
@@ -723,37 +700,66 @@ function extractorLabel(name) {
     return EXTRACTOR_LABELS[name] || name;
 }
 
+function renderExtractorResults(data) {
+    const result = document.getElementById('extractors-test-result');
+    result.style.display = 'block';
+    if (data.error) { result.innerHTML = 'Error: ' + escHtml(data.error); return; }
+    const rows = (data.results || []).map(function(r) {
+        const cls = r.ok ? 'speedtest-card' : 'speedtest-card error';
+        const icon = r.ok ? '✅' : '❌';
+        const detail = r.ok
+            ? ''
+            : '<div style="color:var(--accent-error);font-size:0.7rem;word-break:break-all">' + escHtml((r.error || 'failed').replace(/https?:\/\/\S+/g, '🔗')) + '</div>';
+        return '<div class="' + cls + '">' +
+            '<div style="font-weight:600;font-size:0.8rem;margin-bottom:4px">' + icon + ' ' + escHtml(extractorLabel(r.extractor)) + '</div>' +
+            detail + '</div>';
+    }).join('');
+    const skipped = (data.skipped || []).length
+        ? '<div style="grid-column:1/-1;color:var(--text-muted);font-size:0.7rem">Skipped (no link): ' + data.skipped.map(x => escHtml(extractorLabel(x))).join(', ') + '</div>'
+        : '';
+    result.innerHTML = '<div>' + rows + skipped + '</div>';
+}
+
 async function runExtractorTests() {
     const btn = document.getElementById('extractors-test-btn');
     if (btn.disabled) return;
     const result = document.getElementById('extractors-test-result');
     btn.disabled = true;
-    btn.innerHTML = '⏳ Testing...';
+    btn.innerHTML = 'Testing...';
     result.style.display = 'block';
     result.innerHTML = 'Running extractor tests...';
     try {
-        const resp = await fetch('/api/admin/extractors/test', { method: 'POST' });
-        const data = await resp.json();
-        if (data.error) { result.innerHTML = '❌ ' + data.error; return; }
-        const rows = (data.results || []).map(function(r) {
-            const cls = r.ok ? 'speedtest-card' : 'speedtest-card error';
-            const icon = r.ok ? '✅' : '❌';
-            const detail = r.ok
-                ? ''
-                : '<div style="color:var(--accent-error);font-size:0.7rem;word-break:break-all">' + (r.error || 'failed').replace(/https?:\/\/\S+/g, '…') + '</div>';
-            return '<div class="' + cls + '">' +
-                '<div style="font-weight:600;font-size:0.8rem;margin-bottom:4px">' + icon + ' ' + extractorLabel(r.extractor) + '</div>' +
-                detail + '</div>';
-        }).join('');
-        const skipped = (data.skipped || []).length
-            ? '<div style="grid-column:1/-1;color:var(--text-muted);font-size:0.7rem">Skipped (no link): ' + data.skipped.map(extractorLabel).join(', ') + '</div>'
-            : '';
-        result.innerHTML = '<div>' + rows + skipped + '</div>';
+        await fetch(withAdminQuery('/api/admin/extractors/test'), { method: 'POST' });
+        renderExtractorResults(await pollAdminJob('/api/admin/extractors/test', result, 'Testing extractors... (can take a few minutes)'));
     } catch (e) {
-        result.innerHTML = '❌ Error: ' + e.message;
+        result.innerHTML = 'Error: ' + escHtml(e.message);
     } finally {
         btn.disabled = false;
-        btn.innerHTML = '🧪 Test Extractors';
+        btn.innerHTML = 'Test Extractors';
+    }
+}
+
+// Page load: resume an in-flight run or show the last results.
+async function initExtractorTests() {
+    const btn = document.getElementById('extractors-test-btn');
+    const result = document.getElementById('extractors-test-result');
+    try {
+        const resp = await fetch(withAdminQuery('/api/admin/extractors/test'));
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (data.status === 'running') {
+            btn.disabled = true;
+            result.style.display = 'block';
+            result.innerHTML = 'Testing extractors...';
+            renderExtractorResults(await pollAdminJob('/api/admin/extractors/test', result, 'Testing extractors... (can take a few minutes)'));
+        } else if ((data.results && data.results.length) || data.error) {
+            renderExtractorResults(data);
+        }
+    } catch (e) {
+        result.style.display = 'block';
+        result.innerHTML = 'Error: ' + escHtml(e.message);
+    } finally {
+        btn.disabled = false;
     }
 }
 
@@ -769,9 +775,9 @@ function renderActiveStreams(streams) {
             const elapsed = s.elapsed_since_active;
             const elapsedText = elapsed <= 0 ? 'just now' : `${elapsed}s ago`;
             return `<tr style="border-bottom: 1px solid var(--border-primary); transition: background 0.15s;" onmouseover="this.style.background='rgba(255,255,255,0.015)'" onmouseout="this.style.background='none'">
-                <td style="padding:12px 16px; font-weight:600; font-family:monospace;">${s.ip}</td>
-                <td style="padding:12px 16px; word-break:break-all;" title="${s.user_agent ? 'UA: ' + s.user_agent : ''}">
-                    <div style="max-height:60px; overflow:hidden; text-overflow:ellipsis;">${s.url}</div>
+                <td style="padding:12px 16px; font-weight:600; font-family:monospace;">${escHtml(s.ip)}</td>
+                <td style="padding:12px 16px; word-break:break-all;" title="${s.user_agent ? 'UA: ' + escHtml(s.user_agent) : ''}">
+                    <div style="max-height:60px; overflow:hidden; text-overflow:ellipsis;">${escHtml(s.url)}</div>
                 </td>
                 <td style="padding:12px 16px; text-align:right; color:var(--text-muted);">${elapsedText}</td>
             </tr>`;
@@ -782,14 +788,6 @@ function renderActiveStreams(streams) {
             <td colspan="3" style="padding:24px;text-align:center;color:var(--text-muted)">No active streams</td>
         </tr>`;
     }
-}
-
-
-function toast(msg, type='success') {
-    const t = document.getElementById('toast');
-    t.textContent = msg;
-    t.className = 'toast toast-' + type + ' show';
-    setTimeout(() => t.classList.remove('show'), 2500);
 }
 
 function setToggle(id, value) {
@@ -803,9 +801,7 @@ function setToggle(id, value) {
 }
 
 async function loadConfig() {
-    const params = new URLSearchParams(window.location.search);
-    const pw = params.get('api_password');
-    const url = '/api/admin/config' + (pw ? '?api_password=' + pw : '');
+    const url = withAdminQuery('/api/admin/config');
     try {
         const resp = await fetch(url);
         if (!resp.ok) { toast('Failed to load config (check API password)', 'error'); return; }
@@ -882,10 +878,10 @@ function renderExtractorProxies() {
         div.className = 'extractor-row';
         const modeLabel = isFile ? '<span style="font-size:0.7rem;color:var(--accent-primary);padding:2px 6px;border:1px solid var(--accent-primary);border-radius:4px;margin-right:4px">FILE</span>' : '';
         div.innerHTML = `
-            <span class="name">${name}</span>
+            <span class="name">${escHtml(name)}</span>
             ${modeLabel}
-            <input type="text" value="${value}" onchange="updateExtractorProxy('${name}', this.value)">
-            <button class="btn btn-danger btn-sm" onclick="removeExtractorProxy('${name}')">✕</button>
+            <input type="text" value="${escHtml(value)}" data-name="${escHtml(name)}" onchange="updateExtractorProxy(this.dataset.name, this.value)">
+            <button class="btn btn-danger btn-sm" data-name="${escHtml(name)}" onclick="removeExtractorProxy(this.dataset.name)">✕</button>
         `;
         container.appendChild(div);
     }
@@ -986,9 +982,7 @@ function humanizeKey(key) {
 }
 
 async function saveField(key, value) {
-    const params = new URLSearchParams(window.location.search);
-    const pw = params.get('api_password');
-    const resp = await fetch('/api/admin/config' + (pw ? '?api_password=' + pw : ''), {
+    const resp = await fetch(withAdminQuery('/api/admin/config'), {
         method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({[key]: value})
     });
@@ -1016,12 +1010,10 @@ function toggleExtractorProxyMode() {
 }
 
 async function reconnectWarp() {
-    const params = new URLSearchParams(window.location.search);
-    const pw = params.get('api_password');
-    const btn = document.querySelector('#warp-status + .row .btn-primary');
+    const btn = document.getElementById('warp-reconnect-btn') || document.querySelector('#warp-status + .row .btn-primary');
     if (btn) { btn.textContent = '⏳ Reconnecting...'; btn.disabled = true; }
     try {
-        const resp = await fetch('/api/admin/warp/reconnect' + (pw ? '?api_password=' + pw : ''), {
+        const resp = await fetch(withAdminQuery('/api/admin/warp/reconnect'), {
             method: 'POST'
         });
         const data = await resp.json();
@@ -1031,21 +1023,19 @@ async function reconnectWarp() {
         } else {
             toast(data.message || 'Reconnect failed', 'error');
         }
-        if (btn) { btn.textContent = '🔄 New IP'; btn.disabled = false; }
     } catch(e) {
         toast('Reconnect error: ' + e.message, 'error');
+    } finally {
+        if (btn) { btn.textContent = '🔄 New IP'; btn.disabled = false; }
     }
-    if (btn) { btn.textContent = '🔄 Reconnect WARP (new IP)'; btn.disabled = false; }
 }
 
 function logout() {
     window.location.href = '/admin/logout';
 }
 function downloadConfig() {
-    const params = new URLSearchParams(window.location.search);
-    const pw = params.get('api_password');
     const a = document.createElement('a');
-    a.href = '/api/admin/config/download' + (pw ? '?api_password=' + pw : '');
+    a.href = withAdminQuery('/api/admin/config/download');
     a.download = 'easyproxy_config.json';
     document.body.appendChild(a);
     a.click();
@@ -1055,12 +1045,10 @@ function downloadConfig() {
 async function uploadConfig(event) {
     const file = event.target.files[0];
     if (!file) return;
-    const params = new URLSearchParams(window.location.search);
-    const pw = params.get('api_password');
     const formData = new FormData();
     formData.append('config', file);
     try {
-        const resp = await fetch('/api/admin/config/upload' + (pw ? '?api_password=' + pw : ''), {
+        const resp = await fetch(withAdminQuery('/api/admin/config/upload'), {
             method: 'POST', body: formData
         });
         if (resp.ok) {
@@ -1078,9 +1066,7 @@ async function uploadConfig(event) {
 
 async function toggleWarp() {
     const newVal = !config.enable_warp;
-    const params = new URLSearchParams(window.location.search);
-    const pw = params.get('api_password');
-    const resp = await fetch('/api/admin/warp/toggle' + (pw ? '?api_password=' + pw : ''), {
+    const resp = await fetch(withAdminQuery('/api/admin/warp/toggle'), {
         method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({enable: newVal})
     });
@@ -1094,9 +1080,7 @@ async function toggleWarp() {
 
 async function refreshWarpStatus() {
     try {
-        const params = new URLSearchParams(window.location.search);
-        const pw = params.get('api_password');
-        const url = '/api/admin/config' + (pw ? '?api_password=' + encodeURIComponent(pw) : '');
+        const url = withAdminQuery('/api/admin/config');
         const r = await fetch(url);
         if (!r.ok) return;
         const data = await r.json();
@@ -1119,8 +1103,8 @@ function renderTransportRoutes() {
         const div = document.createElement('div');
         div.className = 'extractor-row';
         div.innerHTML = `
-            <span class="name" title="${r.url}">${r.url}</span>
-            <span style="flex:1;font-size:0.8rem;color:var(--text-muted)">${r.proxy || 'Direct'}</span>
+            <span class="name" title="${escHtml(r.url)}">${escHtml(r.url)}</span>
+            <span style="flex:1;font-size:0.8rem;color:var(--text-muted)">${escHtml(r.proxy || 'Direct')}</span>
             <span style="font-size:0.7rem;padding:2px 8px;border-radius:4px;background:${r.disable_ssl ? 'rgba(239,68,68,0.15)' : 'rgba(16,185,129,0.15)'};color:${r.disable_ssl ? 'var(--accent-error)' : 'var(--accent-success)'}">${r.disable_ssl ? 'SSL OFF' : 'SSL ON'}</span>
             <button class="btn btn-danger btn-sm" onclick="removeTransportRoute(${i})">✕</button>
         `;
@@ -1179,9 +1163,7 @@ async function addExtractorProxy() {
     const name = sel.value;
     const value = document.getElementById('new-extractor-proxy').value.trim();
     if (!name || !value) { toast('Select an extractor and enter a value', 'error'); return; }
-    const params = new URLSearchParams(window.location.search);
-    const pw = params.get('api_password');
-    const resp = await fetch('/api/admin/extractor/proxy' + (pw ? '?api_password=' + pw : ''), {
+    const resp = await fetch(withAdminQuery('/api/admin/extractor/proxy'), {
         method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({extractor: name, proxy: value, type: extractorProxyMode})
     });
@@ -1199,20 +1181,28 @@ async function updateExtractorProxy(name, value) {
     const entry = extractorProxies[name];
     const isFile = entry && entry.file;
     const type = isFile ? 'file' : 'proxy';
-    const params = new URLSearchParams(window.location.search);
-    const pw = params.get('api_password');
-    const resp = await fetch('/api/admin/extractor/proxy' + (pw ? '?api_password=' + pw : ''), {
+    const trimmed = (value || '').trim();
+    const resp = await fetch(withAdminQuery('/api/admin/extractor/proxy'), {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({extractor: name, proxy: value, type: type})
+        body: JSON.stringify({extractor: name, proxy: trimmed, type: type})
     });
-    if (resp.ok) toast('Updated proxy for ' + name);
-    else toast('Failed to update', 'error');
+    if (resp.ok) {
+        if (!trimmed) {
+            delete extractorProxies[name];
+            renderExtractorProxies();
+            populateExtractorSelect(config.available_extractors || []);
+            toast('Removed proxy for ' + name);
+        } else {
+            extractorProxies[name] = isFile ? {file: trimmed} : trimmed;
+            toast('Updated proxy for ' + name);
+        }
+    } else {
+        toast('Failed to update', 'error');
+    }
 }
 
 async function removeExtractorProxy(name) {
-    const params = new URLSearchParams(window.location.search);
-    const pw = params.get('api_password');
-    const resp = await fetch('/api/admin/extractor/proxy' + (pw ? '?api_password=' + pw : ''), {
+    const resp = await fetch(withAdminQuery('/api/admin/extractor/proxy'), {
         method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({extractor: name, proxy: ''})
     });
@@ -1232,61 +1222,6 @@ async function toggleDvr() {
     setToggle('dvr-toggle', newVal);
 }
 
-// Particles
-const canvas = document.getElementById('particles-canvas');
-const ctx = canvas.getContext('2d');
-let particles = [];
-function resize() { canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
-resize();
-window.addEventListener('resize', resize);
-class Particle {
-    constructor() { this.reset(); }
-    reset() {
-        this.x = Math.random() * canvas.width;
-        this.y = Math.random() * canvas.height;
-        this.vx = (Math.random() - 0.5) * 0.4;
-        this.vy = (Math.random() - 0.5) * 0.4;
-        this.size = Math.random() * 2 + 0.5;
-        this.alpha = Math.random() * 0.4 + 0.1;
-        this.pulse = Math.random() * Math.PI * 2;
-        this.pulseSpeed = Math.random() * 0.02 + 0.005;
-    }
-    update() {
-        this.x += this.vx; this.y += this.vy;
-        this.pulse += this.pulseSpeed;
-        if (this.x < 0 || this.x > canvas.width) this.vx *= -1;
-        if (this.y < 0 || this.y > canvas.height) this.vy *= -1;
-    }
-    draw() {
-        const a = this.alpha * (0.6 + 0.4 * Math.sin(this.pulse));
-        ctx.beginPath();
-        ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(168, 85, 247, ${a})`;
-        ctx.fill();
-    }
-}
-for (let i = 0; i < 100; i++) particles.push(new Particle());
-function animate() {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    for (const p of particles) { p.update(); p.draw(); }
-    for (let i = 0; i < particles.length; i++) {
-        for (let j = i + 1; j < particles.length; j++) {
-            const dx = particles[i].x - particles[j].x;
-            const dy = particles[i].y - particles[j].y;
-            const dist = Math.sqrt(dx * dx + dy * dy);
-            if (dist < 150) {
-                ctx.beginPath();
-                ctx.moveTo(particles[i].x, particles[i].y);
-                ctx.lineTo(particles[j].x, particles[j].y);
-                ctx.strokeStyle = `rgba(99, 102, 241, ${0.1 * (1 - dist / 150)})`;
-                ctx.lineWidth = 0.5;
-                ctx.stroke();
-            }
-        }
-    }
-    requestAnimationFrame(animate);
-}
-animate();
 </script>
 
 <script>
@@ -1301,7 +1236,7 @@ function renderExcludeDomains() {
     for (const domain of custom) {
         const div = document.createElement('div');
         div.className = 'extractor-row';
-        div.innerHTML = `<span>${domain}</span><button class="btn btn-danger btn-sm" onclick="removeExcludeDomain('${domain}')">✕</button>`;
+        div.innerHTML = `<span>${escHtml(domain)}</span><button class="btn btn-danger btn-sm" data-domain="${escHtml(domain)}" onclick="removeExcludeDomain(this.dataset.domain)">✕</button>`;
         container.appendChild(div);
     }
 }
@@ -1340,7 +1275,7 @@ function renderProxyExcludeDomains() {
     for (const domain of custom) {
         const div = document.createElement('div');
         div.className = 'extractor-row';
-        div.innerHTML = `<span>${domain}</span><button class="btn btn-danger btn-sm" onclick="removeProxyExcludeDomain('${domain}')">✕</button>`;
+        div.innerHTML = `<span>${escHtml(domain)}</span><button class="btn btn-danger btn-sm" data-domain="${escHtml(domain)}" onclick="removeProxyExcludeDomain(this.dataset.domain)">✕</button>`;
         container.appendChild(div);
     }
 }
@@ -1369,12 +1304,12 @@ async function removeProxyExcludeDomain(domain) {
 }
 
 loadConfig();
+initSpeedtest();
+initExtractorTests();
 
 // Poll system resources every 5 seconds
 setInterval(async () => {
-    const params = new URLSearchParams(window.location.search);
-    const pw = params.get('api_password');
-    const url = '/api/admin/config' + (pw ? '?api_password=' + pw : '');
+    const url = withAdminQuery('/api/admin/config');
     try {
         const resp = await fetch(url);
         if (resp.ok) {
@@ -1406,6 +1341,7 @@ setInterval(async () => {
     }
 }, 5000);
 </script>
-<script src="/static/ep-nav.js"></script>
+<script src="/static/ep-particles.js?v={{APP_VERSION}}"></script>
+<script src="/static/ep-nav.js?v={{APP_VERSION}}"></script>
 </body>
 </html>

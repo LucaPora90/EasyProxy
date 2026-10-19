@@ -21,6 +21,20 @@ class ExtractorError(Exception):
     pass
 
 
+def normalize_socks_proxy_url(proxy_url: str) -> str:
+    """Resolve a proxy alias, keeping the scheme the routing policy selected.
+
+    socks5:// stays local-DNS (remote DNS through wireproxy can stall); a bare
+    host:port becomes socks5h:// so the SOCKS endpoint resolves the hostname.
+    """
+    proxy_url = _cfg.resolve_proxy_alias(str(proxy_url).strip()) or str(proxy_url).strip()
+    if proxy_url.startswith("socks5://"):
+        return proxy_url
+    if "://" not in proxy_url:
+        return f"socks5h://{proxy_url}"
+    return proxy_url
+
+
 class MockResponse:
     """Small response adapter shared by text and binary extractor results."""
 
@@ -49,7 +63,7 @@ class BaseExtractor:
     # to the solver's (IPv4) address.
     force_ipv4 = False
 
-    def __init__(self, request_headers: dict, proxies: list = None, extractor_name: str = "generic"):
+    def __init__(self, request_headers: dict, proxies: list = None, extractor_name: str = "generic", bypass_warp: bool = False):
         self.request_headers = request_headers
         self.base_headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -63,7 +77,9 @@ class BaseExtractor:
         self._route_sessions = {}
         # New-contract routing state (None = defer to contexts). Set by
         # _apply_routing_kwargs at the top of extract(); see AGENTS.md.
-        self.bypass_warp_active = None
+        self._init_bypass_warp = bool(bypass_warp)
+        self.bypass_warp_active = bool(bypass_warp) if bypass_warp else None
+        self._last_computed_bypass_warp = self.bypass_warp_active
         self._forced_proxy = None
         self._force_direct = False
         self.last_used_proxy = None
@@ -73,19 +89,28 @@ class BaseExtractor:
         warp/direct as kwargs, not via context). proxy_exclude_domains drops
         even an explicit ?proxy= (WARP exempt); see config.effective_forced_proxy."""
         kwargs = kwargs or {}
+        if self.bypass_warp_active != getattr(self, "_last_computed_bypass_warp", None):
+            self._init_bypass_warp = bool(self.bypass_warp_active)
         raw_proxy = kwargs.get("proxy")
-        bypass_proxies = str(raw_proxy or "").lower() in {"off", "none", "no"} or BYPASS_PROXIES_CONTEXT.get()
-        bypass_warp = bool(kwargs.get("bypass_warp") or str(kwargs.get("warp", "")).lower() == "off" or BYPASS_WARP_CONTEXT.get() or self.bypass_warp_active)
+        raw_proxy_norm = str(raw_proxy or "").strip().lower()
+        bypass_proxies = raw_proxy_norm in {"off", "none", "no", "false", "0", "direct"} or BYPASS_PROXIES_CONTEXT.get()
+        warp_off = bool(kwargs.get("bypass_warp") or str(kwargs.get("warp", "")).strip().lower() in {"off", "false", "0"})
+        direct_flag = str(kwargs.get("direct", "")).strip().lower() in {"1", "true", "yes", "on"} or raw_proxy_norm == "direct"
+        bypass_warp = bool(warp_off or direct_flag or BYPASS_WARP_CONTEXT.get() or self._init_bypass_warp)
         self.bypass_warp_active = bypass_warp
-        direct_requested = str(kwargs.get("direct", "")).lower() in {"1", "true", "yes", "on"} or (bypass_proxies and bypass_warp)
+        self._last_computed_bypass_warp = bypass_warp
+        direct_requested = direct_flag or (bypass_proxies and bypass_warp)
         if direct_requested or (bypass_proxies and bypass_warp):
             self._forced_proxy, self._force_direct = None, True
         elif bypass_proxies:
             self._forced_proxy, self._force_direct = (_cfg.WARP_PROXY_URL if _cfg._get_dynamic_warp_enabled() else None), False
             if not self._forced_proxy:
                 self._force_direct = True
-        elif raw_proxy and str(raw_proxy).lower() not in {"on", "auto", "true", ""}:
-            self._forced_proxy, self._force_direct = str(raw_proxy), False
+        elif raw_proxy and raw_proxy_norm not in {"on", "auto", "true", ""}:
+            resolved = _cfg.resolve_proxy_alias(str(raw_proxy).strip())
+            if resolved and "://" not in resolved:
+                resolved = f"socks5h://{resolved}"
+            self._forced_proxy, self._force_direct = str(resolved), False
         else:
             self._forced_proxy, self._force_direct = None, False
         self._forced_proxy = _cfg.effective_forced_proxy(url, self._forced_proxy)
@@ -107,9 +132,14 @@ class BaseExtractor:
         self.last_used_proxy = proxy
         return proxy
 
-    def _routing_result_fields(self) -> dict:
-        """MANDATORY result fields: downstream uses them for segments."""
+    def _result(self, destination_url: str, request_headers: dict,
+                mediaflow_endpoint: str | None = None) -> dict:
+        """Standard extractor result. The routing fields are mandatory: the
+        segment/playlist paths reuse them to keep the same route."""
         return {
+            "destination_url": destination_url,
+            "request_headers": request_headers,
+            "mediaflow_endpoint": mediaflow_endpoint or self.mediaflow_endpoint,
             "selected_proxy": self.last_used_proxy,
             "force_direct": self._force_direct,
             "bypass_warp": self.bypass_warp_active,
@@ -176,11 +206,9 @@ class BaseExtractor:
                     return MockResponse(content, response.status, response.headers, str(response.url), response.cookies)
             except ALL_PROXY_ERRORS + (asyncio.TimeoutError, ClientConnectionError, aiohttp.ClientResponseError) as e:
                 is_proxy_err = isinstance(e, ALL_PROXY_ERRORS)
-                is_timeout = isinstance(e, asyncio.TimeoutError)
                 
                 # Check for 403 or network errors to trigger fallback. Keep
                 # intermediate failures quiet: a later retry may succeed.
-                status = getattr(e, 'status', None)
                 if attempt >= retries - 1:
                     logger.error(
                         "[%s] Request failed after %s attempts for %s: %s",

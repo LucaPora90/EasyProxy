@@ -5,8 +5,8 @@ from extractors.base import BaseExtractor, ExtractorError
 class StreamtapeExtractor(BaseExtractor):
     """Streamtape URL extractor."""
 
-    def __init__(self, request_headers: dict, proxies: list = None):
-        super().__init__(request_headers, proxies, extractor_name="streamtape")
+    def __init__(self, request_headers: dict, proxies: list = None, bypass_warp: bool = False):
+        super().__init__(request_headers, proxies, extractor_name="streamtape", bypass_warp=bypass_warp)
         self.mediaflow_endpoint = "proxy_stream_endpoint"
 
     @staticmethod
@@ -36,14 +36,5 @@ class StreamtapeExtractor(BaseExtractor):
             raise ExtractorError("Streamtape URL extraction failed")
 
         self.base_headers["referer"] = url
-        return {
-            "destination_url": final_url,
-            "request_headers": self.base_headers,
-            "mediaflow_endpoint": self.mediaflow_endpoint,
-            "selected_proxy": self.last_used_proxy,
-            "force_direct": self._force_direct,
-            "bypass_warp": self.bypass_warp_active,
-        }
+        return self._result(final_url, self.base_headers)
 
-    async def close(self):
-        await super().close()

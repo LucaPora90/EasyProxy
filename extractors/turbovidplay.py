@@ -14,8 +14,8 @@ class TurboVidPlayExtractor(BaseExtractor):
         "turbovidhls.com",
     ]
 
-    def __init__(self, request_headers: dict, proxies: list = None):
-        super().__init__(request_headers, proxies, extractor_name="turbovidplay")
+    def __init__(self, request_headers: dict, proxies: list = None, bypass_warp: bool = False):
+        super().__init__(request_headers, proxies, extractor_name="turbovidplay", bypass_warp=bypass_warp)
 
     def _get_origin(self, url: str) -> str:
         """Get origin from URL."""
@@ -83,14 +83,5 @@ class TurboVidPlayExtractor(BaseExtractor):
         # 5. Final headers
         self.base_headers.update({"referer": url, "origin": origin})
 
-        return {
-            "destination_url": real_m3u8,
-            "request_headers": self.base_headers,
-            "mediaflow_endpoint": self.mediaflow_endpoint,
-            "selected_proxy": self.last_used_proxy,
-            "force_direct": self._force_direct,
-            "bypass_warp": self.bypass_warp_active,
-        }
+        return self._result(real_m3u8, self.base_headers)
 
-    async def close(self):
-        await super().close()

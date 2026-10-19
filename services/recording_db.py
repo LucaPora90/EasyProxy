@@ -117,9 +117,6 @@ class RecordingDB:
             """, (limit,))
         return [dict(row) for row in cursor.fetchall()]
 
-    def get_active_recordings(self) -> List[Dict[str, Any]]:
-        return self.get_all_recordings(status='recording')
-
     def update_recording_status(self, recording_id: str, status: str,
                                  error_message: str = None) -> bool:
         if status in ('completed', 'failed', 'stopped'):
@@ -152,13 +149,21 @@ class RecordingDB:
         return deleted
 
     def is_pid_running(self, pid: int) -> bool:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        if not pid or pid <= 0:
             return False
-        except OSError:
-            return True
-        return True
+        try:
+            import psutil
+            return psutil.pid_exists(pid)
+        except Exception:
+            if os.name == "nt":
+                return False
+            try:
+                os.kill(pid, 0)
+                return True
+            except PermissionError:
+                return True
+            except OSError:
+                return False
 
     def get_old_recordings(self, days: int) -> List[Dict[str, Any]]:
         from datetime import timedelta

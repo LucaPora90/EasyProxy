@@ -5,8 +5,8 @@ from extractors.base import BaseExtractor, ExtractorError
 class VidozaExtractor(BaseExtractor):
     """Vidoza URL extractor."""
 
-    def __init__(self, request_headers: dict, proxies: list = None):
-        super().__init__(request_headers, proxies, extractor_name="vidoza")
+    def __init__(self, request_headers: dict, proxies: list = None, bypass_warp: bool = False):
+        super().__init__(request_headers, proxies, extractor_name="vidoza", bypass_warp=bypass_warp)
         self.mediaflow_endpoint = "proxy_stream_endpoint"
 
     async def extract(self, url: str, **kwargs) -> dict:
@@ -60,14 +60,7 @@ class VidozaExtractor(BaseExtractor):
         if cookies:
             headers["cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
 
-        return {
-            "destination_url": mp4_url,
-            "request_headers": headers,
-            "mediaflow_endpoint": self.mediaflow_endpoint,
-            "selected_proxy": self.last_used_proxy,
-            "force_direct": self._force_direct,
-            "bypass_warp": self.bypass_warp_active,
-        }
+        return self._result(mp4_url, headers)
 
     async def _extract_sharevideo(self, url: str, parsed) -> dict:
         """Resolve a vidoza.in /video/<id> page to its direct CDN MP4."""
@@ -97,14 +90,5 @@ class VidozaExtractor(BaseExtractor):
         if not mp4_url:
             raise ExtractorError("VIDOZA: vidoza.in API returned no video URL")
 
-        return {
-            "destination_url": mp4_url,
-            "request_headers": {},
-            "mediaflow_endpoint": self.mediaflow_endpoint,
-            "selected_proxy": self.last_used_proxy,
-            "force_direct": self._force_direct,
-            "bypass_warp": self.bypass_warp_active,
-        }
+        return self._result(mp4_url, {})
 
-    async def close(self):
-        await super().close()
