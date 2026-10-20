@@ -5,8 +5,7 @@ import base64
 import json
 import math
 import time
-from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
+
 from html.parser import HTMLParser
 import urllib.parse
 from urllib.parse import urlparse, urljoin
@@ -224,19 +223,16 @@ class DLStreamsExtractor(BaseExtractor):
     # and turn concurrent requests into 500s.
     EXTRACT_BUDGET_SECONDS = 20.0
     CANDIDATE_TIMEOUT_SECONDS = 6
-    # Players poll the extractor every few seconds. Re-scraping the player
-    # pages on every poll gets the iframe host to answer 429, so reuse a
-    # validated stream URL for a short window instead. When a re-scrape fails,
-    # serve the last known URL only if it still probes alive (never hang the
-    # player 40-50s on a dead playlist) with a small backoff so the failing
-    # host is not hammered. Stale window tracks the signed-token lifetime (~3-4 min).
-    STREAM_CACHE_SECONDS = 30.0
-    STREAM_CACHE_STALE_SECONDS = 300.0
-    STREAM_CACHE_FAIL_BACKOFF_SECONDS = 15.0
-    MAX_HOST_BACKOFF_SECONDS = 3600.0
+    # No resolved-URL cache and no host backoff: the extractor endpoint answers
+    # with a redirect to the stable /proxy manifest URL, so manifest reloads go
+    # to the proxy and the extractor runs once per playback (plus 403 re-extracts).
     # Channels whose first player is pinned by hand (see _build_player_urls).
     # The recorded player preference must never override that pin.
     PLAYER1_FIRST_CHANNELS = frozenset({"861"})
+
+    # Shared across instances: the extractor instance is retired right after
+    # each extraction, so the last validated player must outlive it.
+    _player_preference: dict = {}
 
     def __init__(self, request_headers: dict = None, proxies: list = None, bypass_warp: bool = False):
         super().__init__(request_headers or {}, proxies, extractor_name="dlstreams", bypass_warp=bypass_warp)
@@ -252,66 +248,9 @@ class DLStreamsExtractor(BaseExtractor):
         self.proxies = proxies or []
         self.bypass_warp_active = bypass_warp
         self._inflight_extract_tasks: dict = {}
-        self._stream_cache: dict = {}
-        # channel_id -> player page URL that last validated, so a re-scrape
-        # keeps the same source instead of jumping to another player.
-        self._player_preference: dict[str, str] = {}
-        # host -> monotonic deadline: honour upstream Retry-After instead of
-        # scraping a host that already said "too many requests".
-        self._host_backoff: dict[str, float] = {}
 
-    @staticmethod
-    def _host_of(url: str) -> str:
-        return (urlparse(url).hostname or "").lower()
-
-    @classmethod
-    def _parse_retry_after(cls, value: str | None) -> float | None:
-        """Retry-After as delta-seconds or HTTP-date, clamped to a sane range."""
-        raw = str(value or "").strip()
-        if not raw:
-            return None
-        seconds = None
-        if raw.isdigit():
-            seconds = float(raw)
-        else:
-            try:
-                target = parsedate_to_datetime(raw)
-            except (TypeError, ValueError):
-                return None
-            if target is None:
-                return None
-            if target.tzinfo is None:
-                target = target.replace(tzinfo=timezone.utc)
-            seconds = (target - datetime.now(timezone.utc)).total_seconds()
-        if seconds is None:
-            return None
-        return max(1.0, min(float(seconds), cls.MAX_HOST_BACKOFF_SECONDS))
-
-    def _host_limited_for(self, url: str) -> float:
-        """Seconds left before this host may be queried again (0 = free)."""
-        deadline = self._host_backoff.get(self._host_of(url), 0.0)
-        return max(0.0, deadline - time.monotonic())
-
-    def _mark_host_limited(self, url: str, retry_after: str | None) -> float:
-        host = self._host_of(url)
-        seconds = self._parse_retry_after(retry_after)
-        if seconds is None:
-            seconds = self.STREAM_CACHE_FAIL_BACKOFF_SECONDS
-        self._host_backoff[host] = time.monotonic() + seconds
-        logger.warning("DLStreams: %s rate-limited, backing off %.0fs", host, seconds)
-        return seconds
-
-    def _rate_limit_wait(self) -> float:
-        """Longest remaining host backoff, dropping expired entries."""
-        now = time.monotonic()
-        self._host_backoff = {
-            host: deadline
-            for host, deadline in self._host_backoff.items()
-            if deadline > now
-        }
-        if not self._host_backoff:
-            return 0.0
-        return max(self._host_backoff.values()) - now
+    def _route_key(self) -> tuple:
+        return (self._forced_proxy, self._force_direct, self.bypass_warp_active)
 
     def _prioritize_player_urls(self, channel_id: str, requested_url: str = "", watch_html: str = "") -> list[str]:
         players = self._build_player_urls(channel_id, requested_url=requested_url)
@@ -332,7 +271,7 @@ class DLStreamsExtractor(BaseExtractor):
         # mid-playback changes the media sequence, the PIDs and the parameter
         # sets, which players report as "media sequence changed unexpectedly"
         # plus "non-existing SPS/PPS" and a frozen/green picture.
-        pinned = self._player_preference.get(channel_id)
+        pinned = self._player_preference.get((channel_id, self._route_key()))
         if (
             pinned in players
             and players[0] != pinned
@@ -704,15 +643,14 @@ class DLStreamsExtractor(BaseExtractor):
             return max(1.0, min(default, _remaining()))
 
         watch_html = ""
-        if urlparse(url).path == "/watch.php" and not self._host_limited_for(url):
+        pinned = self._player_preference.get((channel_id, self._route_key()))
+        if urlparse(url).path == "/watch.php" and not pinned:
             try:
                 async with session.get(
                     url, headers=self.base_headers, timeout=_timeout(3)
                 ) as resp:
                     if resp.status == 200:
                         watch_html = await resp.text()
-                    elif resp.status == 429:
-                        self._mark_host_limited(url, resp.headers.get("Retry-After"))
             except Exception as exc:
                 logger.debug("DLStreams: default player unavailable: %s", exc)
         player_urls = self._prioritize_player_urls(
@@ -728,14 +666,6 @@ class DLStreamsExtractor(BaseExtractor):
                     len(player_urls),
                 )
                 break
-            limited_for = self._host_limited_for(candidate)
-            if limited_for > 0:
-                logger.debug(
-                    "DLStreams: %s rate-limited for another %.0fs, skipping",
-                    self._host_of(candidate),
-                    limited_for,
-                )
-                continue
             try:
                 headers = {
                     "User-Agent": self.base_headers["User-Agent"],
@@ -747,8 +677,6 @@ class DLStreamsExtractor(BaseExtractor):
                 async with session.get(candidate, headers=headers, timeout=_timeout(self.CANDIDATE_TIMEOUT_SECONDS)) as resp:
                     if resp.status != 200:
                         logger.debug("DLStreams: candidate %s returned status %s", candidate, resp.status)
-                        if resp.status == 429:
-                            self._mark_host_limited(candidate, resp.headers.get("Retry-After"))
                         continue
                     html = await resp.text()
                 
@@ -785,15 +713,7 @@ class DLStreamsExtractor(BaseExtractor):
                     logger.debug("DLStreams: iframe %s already attempted, skipping", iframe_src)
                     continue
                 seen_iframes.add(iframe_src)
-                limited_for = self._host_limited_for(iframe_src)
-                if limited_for > 0:
-                    logger.debug(
-                        "DLStreams: %s rate-limited for another %.0fs, skipping iframe",
-                        self._host_of(iframe_src),
-                        limited_for,
-                    )
-                    continue
-                
+
                 # Fetch iframe player page
                 iframe_headers = headers.copy()
                 iframe_headers["Referer"] = candidate
@@ -802,8 +722,6 @@ class DLStreamsExtractor(BaseExtractor):
                 async with session.get(iframe_src, headers=iframe_headers, timeout=_timeout(self.CANDIDATE_TIMEOUT_SECONDS)) as resp:
                     if resp.status != 200:
                         logger.debug("DLStreams: iframe %s returned status %s", iframe_src, resp.status)
-                        if resp.status == 429:
-                            self._mark_host_limited(iframe_src, resp.headers.get("Retry-After"))
                         continue
                     iframe_html = await resp.text()
                 
@@ -881,10 +799,8 @@ class DLStreamsExtractor(BaseExtractor):
                 ):
                     logger.info("DLStreams: working stream found via %s", candidate)
                     if channel_id not in self.PLAYER1_FIRST_CHANNELS:
-                        self._player_preference[channel_id] = candidate
-                    result = self._build_result(stream_url, playback_headers)
-                    result["_validated"] = True
-                    return result
+                        self._player_preference[(channel_id, self._route_key())] = candidate
+                    return self._build_result(stream_url, playback_headers)
                 logger.info("DLStreams: stream from %s is dead, trying next player", candidate)
                 continue
                 
@@ -957,83 +873,20 @@ class DLStreamsExtractor(BaseExtractor):
         )
         channel_key = (f"premium{channel_id}", req_mode, self._forced_proxy, self._force_direct, self.bypass_warp_active)
 
-        cached = self._stream_cache.get(channel_key)
-        if cached and cached[0] > time.monotonic() and not kwargs.get("force_refresh"):
-            logger.debug("DLStreams: reusing cached stream URL for %s", channel_key)
-            return dict(cached[2])
-
-        try:
-            existing_task = self._inflight_extract_tasks.get(channel_key)
-            if existing_task and not existing_task.done():
-                logger.debug("DLStreams: waiting for in-flight extraction of %s", channel_key)
-                result = await existing_task
-            else:
-                task = asyncio.create_task(self._extract_impl(url, channel_id=channel_id, **kwargs))
-                self._inflight_extract_tasks[channel_key] = task
-                try:
-                    result = await task
-                finally:
-                    current_task = self._inflight_extract_tasks.get(channel_key)
-                    if current_task is task:
-                        self._inflight_extract_tasks.pop(channel_key, None)
-        except Exception:
-            if cached and cached[1] > time.monotonic():
-                if await self._is_cached_still_alive(cached[2]):
-                    logger.warning(
-                        "DLStreams: extraction failed for %s, serving last known stream URL",
-                        channel_key,
-                    )
-                    self._backoff_cache_entry(channel_key, cached)
-                    return dict(cached[2])
-                logger.warning(
-                    "DLStreams: cached stream for %s is dead, not serving stale",
-                    channel_key,
-                )
-            raise
-
-        if result and result.pop("_validated", False):
-            now = time.monotonic()
-            self._stream_cache[channel_key] = (
-                now + self.STREAM_CACHE_SECONDS,
-                now + self.STREAM_CACHE_STALE_SECONDS,
-                dict(result),
-            )
-        elif result and cached and cached[1] > time.monotonic():
-            if await self._is_cached_still_alive(cached[2]):
-                logger.warning(
-                    "DLStreams: no player validated for %s, serving last known stream URL",
-                    channel_key,
-                )
-                self._backoff_cache_entry(channel_key, cached)
-                return dict(cached[2])
-            logger.warning(
-                "DLStreams: cached stream for %s is dead, not serving stale",
-                channel_key,
-            )
-        elif result:
-            result.pop("_validated", None)
+        existing_task = self._inflight_extract_tasks.get(channel_key)
+        if existing_task and not existing_task.done():
+            logger.debug("DLStreams: waiting for in-flight extraction of %s", channel_key)
+            result = await existing_task
+        else:
+            task = asyncio.create_task(self._extract_impl(url, channel_id=channel_id, **kwargs))
+            self._inflight_extract_tasks[channel_key] = task
+            try:
+                result = await task
+            finally:
+                current_task = self._inflight_extract_tasks.get(channel_key)
+                if current_task is task:
+                    self._inflight_extract_tasks.pop(channel_key, None)
         return result
-
-    def _backoff_cache_entry(self, channel_key, cached: tuple[float, float, dict]) -> None:
-        """Delay the next scrape, honouring any Retry-After from the hosts."""
-        wait = max(self.STREAM_CACHE_FAIL_BACKOFF_SECONDS, self._rate_limit_wait())
-        self._stream_cache[channel_key] = (
-            time.monotonic() + wait,
-            cached[1],
-            cached[2],
-        )
-
-    async def _is_cached_still_alive(self, cached_result: dict) -> bool:
-        """Bounded video probe before serving a stale URL after a failed refresh."""
-        try:
-            stream_url = (cached_result or {}).get("destination_url", "")
-            if not stream_url:
-                return False
-            headers = (cached_result or {}).get("request_headers", {}) or {}
-            session = await self._get_session(stream_url)
-            return await self._is_stream_alive(session, stream_url, headers, budget=4.0)
-        except Exception:
-            return False
 
     async def _extract_impl(self, url: str, channel_id: str, **kwargs) -> Dict[str, Any]:
         try:

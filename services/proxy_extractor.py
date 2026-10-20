@@ -203,34 +203,39 @@ class HLSProxyExtractorHandlerMixin:
             extractor = await self.get_extractor(
                 url, dict(request.headers), host=host_param, bypass_warp=bypass_warp
             )
+            try:
+                # Check if this extractor should bypass WARP or proxies based on admin config
+                extractor_key = self._extractor_key_for_instance(extractor)
+                if extractor_key:
+                    base_key = extractor_key.replace("_direct", "").replace("_noproxy", "")
 
-            # Check if this extractor should bypass WARP or proxies based on admin config
-            extractor_key = self._extractor_key_for_instance(extractor)
-            if extractor_key:
-                base_key = extractor_key.replace("_direct", "").replace("_noproxy", "")
-                
-                # Check WARP-off extractor policy.
-                warp_off_list = config_store.get("warp_off_extractors", [])
-                if base_key in warp_off_list:
-                    bypass_warp = True
-                    BYPASS_WARP_CONTEXT.set(True)
-                    logger.debug(f"WARP off for extractor: {base_key}")
-                    
-                # Check proxy off
-                proxy_off_list = config_store.get("proxy_off_extractors", [])
-                if base_key in proxy_off_list:
-                    BYPASS_PROXIES_CONTEXT.set(True)
-                    logger.debug(f"Proxy off for extractor: {base_key}")
-                    
-                if base_key in warp_off_list or base_key in proxy_off_list:
-                    extractor = await self.get_extractor(
-                        url, dict(request.headers), host=host_param, bypass_warp=bypass_warp
+                    # Check WARP-off extractor policy.
+                    warp_off_list = config_store.get("warp_off_extractors", [])
+                    if base_key in warp_off_list:
+                        bypass_warp = True
+                        BYPASS_WARP_CONTEXT.set(True)
+                        logger.debug(f"WARP off for extractor: {base_key}")
+
+                    # Check proxy off
+                    proxy_off_list = config_store.get("proxy_off_extractors", [])
+                    if base_key in proxy_off_list:
+                        BYPASS_PROXIES_CONTEXT.set(True)
+                        logger.debug(f"Proxy off for extractor: {base_key}")
+
+                    if base_key in warp_off_list or base_key in proxy_off_list:
+                        self._retire_extractors([extractor])
+                        extractor = await self.get_extractor(
+                            url, dict(request.headers), host=host_param, bypass_warp=bypass_warp
+                        )
+
+                extractor_timeout = getattr(extractor, "REQUEST_TIMEOUT_TOTAL", 30)
+                async with self.hold_extractor(extractor):
+                    result = await asyncio.wait_for(
+                        extractor.extract(url, **extractor_kwargs),
+                        timeout=extractor_timeout,
                     )
-
-            extractor_timeout = getattr(extractor, "REQUEST_TIMEOUT_TOTAL", 30)
-            result = await asyncio.wait_for(
-                extractor.extract(url, **extractor_kwargs), timeout=extractor_timeout
-            )
+            finally:
+                self._retire_extractors([extractor])
             result_query_params = _protected_extractor_params(result)
             extractor_key = getattr(extractor, "extractor_name", None) or self._extractor_key_for_instance(extractor)
             if extractor_key:
@@ -385,6 +390,20 @@ class HLSProxyExtractorHandlerMixin:
                     f"{urllib.parse.quote(value, safe='')}"
                 )
 
+            # 1. URL COMPLETO (Solo per il redirect)
+            full_proxy_url = f"{proxy_base}{endpoint}?d={encoded_url}{header_params}"
+
+            # Carry over redirect_stream param for nested redirects
+            if redirect_stream:
+                full_proxy_url += "&redirect_stream=true"
+
+            # DLStreams extraction is slow and rate-limited: send the player to
+            # the stable proxy manifest instead of serving it from this endpoint,
+            # so HLS reloads never re-scrape the provider.
+            if redirect_stream and extractor_key == "dlstreams" and endpoint == "/proxy/hls/manifest.m3u8":
+                logger.info("[PLAY] Redirecting DLStreams manifest to the stable proxy URL")
+                return web.HTTPFound(full_proxy_url)
+
             if redirect_stream and captured_manifest and endpoint == "/proxy/hls/manifest.m3u8":
                 original_channel_url = request.query.get("orig_url") or request.query.get("url") or request.query.get("d", "")
                 no_bypass = request.query.get("no_bypass") == "1"
@@ -403,9 +422,6 @@ class HLSProxyExtractorHandlerMixin:
                     stream_headers=stream_headers,
                     original_channel_url=original_channel_url,
                     api_password=api_password,
-                    get_extractor_func=lambda url, headers, host=None: self.get_extractor(
-                        url, headers, host, bypass_warp=bypass_warp
-                    ),
                     no_bypass=no_bypass,
                     shorten_url_func=self.shorten_hls_url,
                     bypass_warp=bypass_warp,
@@ -462,13 +478,6 @@ class HLSProxyExtractorHandlerMixin:
                     rel_url=URL(endpoint).with_query(proxy_query)
                 )
                 return await self.handle_proxy_request(proxy_request)
-
-            # 1. URL COMPLETO (Solo per il redirect)
-            full_proxy_url = f"{proxy_base}{endpoint}?d={encoded_url}{header_params}"
-
-            # Carry over redirect_stream param for nested redirects
-            if redirect_stream:
-                full_proxy_url += "&redirect_stream=true"
 
             if redirect_stream:
                 logger.info("[PLAY] Proxying stream directly without redirect")
