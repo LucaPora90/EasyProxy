@@ -570,6 +570,11 @@
                     <label>Destination URL</label>
                     <input id="destinationUrl" type="url" placeholder="https://example.com/stream.m3u8">
                 </div>
+                <div class="form-group" id="clearkeyGroup" style="display:none;">
+                    <label for="proxyClearkey">ClearKey (KID:KEY)</label>
+                    <input id="proxyClearkey" type="text" placeholder="a016bbf8...:f7a70af4..." autocomplete="off" spellcheck="false">
+                    <div class="form-hint">DASH decryption keys in hex, format <code>KID:KEY</code> — comma-separated for multiple keys (<code>KID1:KEY1,KID2:KEY2</code>). Appended as <code>&amp;clearkey=</code>.</div>
+                </div>
                 <div class="form-group">
                     <label>Request Headers</label>
                     <textarea id="requestHeaders" rows="5" placeholder='{"User-Agent":"Mozilla/5.0","Referer":"https://site.example/"}'></textarea>
@@ -979,6 +984,7 @@
             const disableSSL = document.getElementById('proxyDisableSSL').checked;
             const forceNativeMpd = document.getElementById('proxyNativeMpd').checked;
             const maxRes = document.getElementById('proxyMaxRes').checked;
+            const clearkey = document.getElementById('proxyClearkey').value.trim();
             const result = document.getElementById('proxyResult');
 
             if (forceNativeMpd) endpoint = '/proxy/mpd/manifest.mpd';
@@ -1022,7 +1028,7 @@
 
                 const data = JSON.parse(text);
                 let urls = data.urls || [];
-                if (redirectStream || bypassWarp || proxyMode || disableSSL || maxRes || apiPassword) {
+                if (redirectStream || bypassWarp || proxyMode || disableSSL || maxRes || apiPassword || clearkey) {
                     urls = urls.map(u => {
                         const urlObj = new URL(u);
                         if (redirectStream) urlObj.searchParams.set('redirect_stream', 'true');
@@ -1030,6 +1036,7 @@
                         if (proxyMode) urlObj.searchParams.set('proxy', proxyMode);
                         if (disableSSL) urlObj.searchParams.set('disable_ssl', '1');
                         if (maxRes) urlObj.searchParams.set('max_res', 'true');
+                        if (clearkey) urlObj.searchParams.set('clearkey', clearkey);
                         if (apiPassword) urlObj.searchParams.set('api_password', apiPassword);
                         return urlObj.toString();
                     });
@@ -1206,7 +1213,17 @@
             }
         }
 
-        const proxyInputs = ['proxyEndpoint', 'destinationUrl', 'requestHeaders', 'proxyRedirectStream', 'proxyBypassWarp', 'proxyMode', 'proxyDisableSSL', 'proxyNativeMpd', 'proxyMaxRes'];
+        const proxyInputs = ['proxyEndpoint', 'destinationUrl', 'proxyClearkey', 'requestHeaders', 'proxyRedirectStream', 'proxyBypassWarp', 'proxyMode', 'proxyDisableSSL', 'proxyNativeMpd', 'proxyMaxRes'];
+
+        function toggleClearkeyBox() {
+            const endpoint = document.getElementById('proxyEndpoint').value;
+            const forceNativeMpd = document.getElementById('proxyNativeMpd').checked;
+            const isMpd = endpoint.includes('/proxy/mpd/') || forceNativeMpd;
+            document.getElementById('clearkeyGroup').style.display = isMpd ? 'block' : 'none';
+        }
+        document.getElementById('proxyEndpoint').addEventListener('change', toggleClearkeyBox);
+        document.getElementById('proxyNativeMpd').addEventListener('change', toggleClearkeyBox);
+        toggleClearkeyBox();
         const extractorInputs = ['extractorHost', 'extractorHostSelect', 'extractorUrl', 'extractorExtension', 'extractorRedirectStream', 'extractorBypassWarp', 'extractorProxyMode', 'extractorDisableSSL', 'extractorMaxRes'];
 
         function sortSelectOptions(selectId) {
