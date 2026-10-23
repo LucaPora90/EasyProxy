@@ -6,6 +6,7 @@ import json
 import math
 import shutil
 import time
+from datetime import datetime
 
 import urllib.parse
 from urllib.parse import urlparse, urljoin
@@ -35,6 +36,10 @@ logger = logging.getLogger(__name__)
 _VIDEO_PROBE_MIN_BYTES = 1024 * 1024
 _VIDEO_PROBE_MAX_ERRORS = 3
 _VIDEO_PROBE_TIMEOUT = 6.0
+# Player health (see _player_rank). A live player that downloads its segment
+# in most of its duration stutters; a delayed one is still watchable.
+MAX_LIVE_LAG_SECONDS = 120.0
+MAX_SEGMENT_LOAD_RATIO = 0.75
 _VIDEO_PROBE_MARKERS = (
     "error while decoding",
     "top block unavailable",
@@ -235,6 +240,10 @@ class DLStreamsExtractor(BaseExtractor):
     # Shared across instances: the extractor instance is retired right after
     # each extraction, so the last validated player must outlive it.
     _player_preference: dict = {}
+    # A re-extraction inside this window keeps the pinned player even when it
+    # is not ideal (no mid-playback switch); every accepted extraction renews
+    # it, so an ongoing playback stays put while new viewers get a fresh ranking.
+    PIN_STICKY_SECONDS = 300.0
 
     def __init__(self, request_headers: dict = None, proxies: list = None, bypass_warp: bool = False):
         super().__init__(request_headers or {}, proxies, extractor_name="dlstreams", bypass_warp=bypass_warp)
@@ -250,6 +259,9 @@ class DLStreamsExtractor(BaseExtractor):
         self.proxies = proxies or []
         self.bypass_warp_active = bypass_warp
         self._inflight_extract_tasks: dict = {}
+
+    def _pin_player(self, channel_id: str, candidate: str) -> None:
+        self._player_preference[(channel_id, self._route_key())] = (candidate, time.monotonic())
 
     def _route_key(self) -> tuple:
         return (self._forced_proxy, self._force_direct, self.bypass_warp_active)
@@ -268,7 +280,7 @@ class DLStreamsExtractor(BaseExtractor):
         # mid-playback changes the media sequence, the PIDs and the parameter
         # sets, which players report as "media sequence changed unexpectedly"
         # plus "non-existing SPS/PPS" and a frozen/green picture.
-        pinned = self._player_preference.get((channel_id, self._route_key()))
+        pinned = (self._player_preference.get((channel_id, self._route_key())) or (None,))[0]
         if (
             pinned in players
             and players[0] != pinned
@@ -373,6 +385,47 @@ class DLStreamsExtractor(BaseExtractor):
             if (low.endswith(".m3u8")) == want_playlist:
                 return cls._inherit_query_if_missing(urljoin(base_url, line), base_url)
         return None
+
+    @staticmethod
+    def _playlist_lag(body: str, now: float) -> float | None:
+        """Seconds the live edge trails the wall clock (EXT-X-PROGRAM-DATE-TIME)."""
+        edge = None
+        for raw in (body or "").splitlines():
+            line = raw.strip()
+            if line.startswith("#EXT-X-PROGRAM-DATE-TIME:"):
+                try:
+                    stamp = line.split(":", 1)[1].replace("Z", "+00:00")
+                    edge = datetime.fromisoformat(stamp).timestamp()
+                except ValueError:
+                    edge = None
+            elif line.startswith("#EXTINF:") and edge is not None:
+                try:
+                    edge += float(line[8:].split(",", 1)[0])
+                except ValueError:
+                    pass
+        return None if edge is None else max(0.0, now - edge)
+
+    @staticmethod
+    def _segment_load_ratio(fetch: tuple | None, duration: float | None) -> float | None:
+        """Time to download the whole segment over its play time (near 1 stutters)."""
+        if not fetch or not duration:
+            return None
+        elapsed, read, total = fetch
+        if not read:
+            return None
+        if total and total > read:
+            elapsed *= total / read
+        return elapsed / duration
+
+    @staticmethod
+    def _player_rank(lag: float | None, load_ratio: float | None) -> tuple:
+        """Lower is better: a smooth player beats a stuttering one, then less delay.
+
+        Unknown values (no PROGRAM-DATE-TIME, fMP4/encrypted probe) are not
+        penalised, so the only player of a channel is never discarded.
+        """
+        smooth = load_ratio is None or load_ratio <= MAX_SEGMENT_LOAD_RATIO
+        return (not smooth, lag or 0.0)
 
     @staticmethod
     def _segment_looks_like_image(segment_url: str, content_type: str, head: bytes) -> bool:
@@ -488,6 +541,8 @@ class DLStreamsExtractor(BaseExtractor):
     ) -> bool:
         """Bounded probe; verify the segment carries a decodable video track."""
         max_bytes = 16 * 1024 * 1024
+        self._segment_fetch = None
+        started = time.monotonic()
         async with session.get(
             segment_url, headers=headers, timeout=ClientTimeout(total=timeout)
         ) as resp:
@@ -508,6 +563,7 @@ class DLStreamsExtractor(BaseExtractor):
                     body.extend(chunk)
                     if len(body) > max_bytes:
                         return False
+                self._segment_fetch = (time.monotonic() - started, len(body), len(body))
                 unwrapped = await asyncio.to_thread(
                     HLSProxyCoreMixin._strip_fake_png_header_from_ts, bytes(body)
                 )
@@ -543,6 +599,7 @@ class DLStreamsExtractor(BaseExtractor):
                 pending = pending[complete:]
                 if video_found and len(body) >= _VIDEO_PROBE_MIN_BYTES:
                     break
+            self._segment_fetch = (time.monotonic() - started, len(body), resp.content_length)
             if (
                 resp.status == 200 and not pending and not video_found
                 and self._ts_video_payload(bytes(body)) is False
@@ -646,6 +703,14 @@ class DLStreamsExtractor(BaseExtractor):
                 except Exception as e:
                     logger.debug("DLStreams: key probe of %s failed: %s", key_url, e)
                     return False
+            first_duration = re.search(r"#EXTINF:\s*([\d.]+)", current_body)
+            self._last_health = (
+                self._playlist_lag(current_body, time.time()),
+                self._segment_load_ratio(
+                    getattr(self, "_segment_fetch", None),
+                    float(first_duration.group(1)) if first_duration else None,
+                ),
+            )
             self._last_validated_manifest = current_body or master
             return True
         except Exception as e:
@@ -692,6 +757,13 @@ class DLStreamsExtractor(BaseExtractor):
         # Every candidate gets the one-frame video decode probe, so a broken
         # video track is skipped even when its TS container is valid.
         player_urls = self._prioritize_player_urls(channel_id, requested_url=url)
+        # Alive but delayed or stuttering players: kept to fall back on the best.
+        fallback = None
+        slow_players = 0
+        pin = self._player_preference.get((channel_id, self._route_key()))
+        sticky = (
+            pin[0] if pin and time.monotonic() - pin[1] <= self.PIN_STICKY_SECONDS else None
+        )
 
         for candidate_index, candidate in enumerate(player_urls):
             if _remaining() <= 2.0:
@@ -830,13 +902,34 @@ class DLStreamsExtractor(BaseExtractor):
                 # The premium edge needs a per-viewer token on the playlist URL,
                 # so hand over the tokenized URL (validation bundles it too).
                 stream_url = await self._with_premium_token(session, stream_url, playback_headers)
-                if await self._is_stream_alive(
+                if not await self._is_stream_alive(
                     session, stream_url, playback_headers, budget=_remaining()
                 ):
+                    logger.info("DLStreams: stream from %s is dead, trying next player", candidate)
+                    continue
+                lag, load_ratio = self._last_health
+                rank = self._player_rank(lag, load_ratio)
+                if candidate == sticky or (not rank[0] and rank[1] <= MAX_LIVE_LAG_SECONDS):
                     logger.info("DLStreams: working stream found via %s", candidate)
-                    self._player_preference[(channel_id, self._route_key())] = candidate
+                    self._pin_player(channel_id, candidate)
                     return self._build_result(stream_url, playback_headers)
-                logger.info("DLStreams: stream from %s is dead, trying next player", candidate)
+                logger.info(
+                    "DLStreams: %s alive but lag=%s load=%s, trying next player",
+                    candidate,
+                    "n/a" if lag is None else f"{lag:.0f}s",
+                    "n/a" if load_ratio is None else f"{load_ratio:.2f}",
+                )
+                if fallback is None or rank < fallback[0]:
+                    fallback = (
+                        rank, candidate, stream_url, playback_headers,
+                        self._last_validated_manifest,
+                    )
+                slow_players += rank[0]
+                if slow_players >= 2:
+                    # Two players load slowly: the bottleneck is our own link,
+                    # probing more players would only add traffic.
+                    logger.info("DLStreams: players load slowly from here, stop probing")
+                    break
                 continue
                 
             except Exception as e:
@@ -848,6 +941,12 @@ class DLStreamsExtractor(BaseExtractor):
                     break
                 continue
 
+        if fallback:
+            _, candidate, stream_url, playback_headers, manifest = fallback
+            logger.info("DLStreams: no ideal player, using best available %s", candidate)
+            self._pin_player(channel_id, candidate)
+            self._last_validated_manifest = manifest
+            return self._build_result(stream_url, playback_headers)
         return None
 
 
