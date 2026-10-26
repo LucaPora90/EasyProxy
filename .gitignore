@@ -14,6 +14,8 @@ dlstreams_activity.txt
 !/scripts/wireproxy_ctl.sh
 !/scripts/cinejoy_runner.mjs
 !/scripts/pow_solver.js
+!/scripts/build_windows_dist.py
+!/scripts/get_version.py
 config.json
 /downloaded_files
 /cache
@@ -25,4 +27,8 @@ config.json
 /tests
 /output
 /node_modules
+/dist/
+/build/
+/bin/
+/release_assets/
 package-lock.json

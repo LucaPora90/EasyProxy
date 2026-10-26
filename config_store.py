@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import logging
 import threading
 
@@ -8,7 +9,11 @@ logger = logging.getLogger(__name__)
 # Docker keeps its persistent volume at /data.  Native Windows runs should
 # keep the same layout inside the EasyProxy checkout instead of writing to
 # the drive root (C:\data).
-_PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_DIR = (
+    os.path.dirname(os.path.abspath(sys.executable))
+    if getattr(sys, "frozen", False)
+    else os.path.dirname(os.path.abspath(__file__))
+)
 _DEFAULT_CONFIG_DIR = (
     os.path.join(_PROJECT_DIR, "data") if os.name == "nt" else "/data"
 )

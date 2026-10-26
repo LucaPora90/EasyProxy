@@ -4,10 +4,12 @@ import asyncio
 import ipaddress
 import logging
 import os
+import sys
 import re
 import shutil
 import signal
 import stat
+import subprocess
 import time
 
 import aiohttp
@@ -25,7 +27,7 @@ TOR_CHECK_URL = "https://check.torproject.org/api/ip"
 TOR_GEOIP_PATH = "/usr/share/tor/geoip"
 TOR_CONTROL_HOST = "127.0.0.1"
 TOR_CONTROL_PORT = 9051
-TOR_BOOTSTRAP_TIMEOUT = 90
+TOR_BOOTSTRAP_TIMEOUT = 180
 TOR_MAX_CIRCUIT_DIRTINESS = "30 days"
 
 _BIND_RE = re.compile(r"^(?P<host>[A-Za-z0-9_.\-\[\]:]+):(?P<port>\d{1,5})$")
@@ -40,8 +42,85 @@ class TorError(Exception):
     """Raised for user-facing Tor errors."""
 
 
+def _tor_binary() -> str | None:
+    found = shutil.which("tor")
+    if found:
+        return found
+    from pathlib import Path
+    bases = []
+    if getattr(sys, "frozen", False):
+        bases.append(Path(sys.executable).parent)
+        if hasattr(sys, "_MEIPASS"):
+            bases.append(Path(sys._MEIPASS))
+    else:
+        bases.append(Path(__file__).resolve().parent.parent)
+
+    # On Windows an active CTF/antivirus component blocks any process whose
+    # executable is literally named "tor.exe" (TLS handshakes abort during the
+    # relay handshake), while the identical binary runs fine under any other
+    # name. The bundled binary therefore ships as "torclient.exe" first.
+    exe_names = ("torclient.exe", "tor.exe") if os.name == "nt" else ("tor",)
+    for base in bases:
+        for exe_name in exe_names:
+            for candidate in (
+                base / "bin" / exe_name,
+                base / exe_name,
+                base / "tor" / exe_name,
+                base / "tor" / "tor" / exe_name,
+            ):
+                if candidate.is_file():
+                    return str(candidate)
+    return None
+
+
+def _lyrebird_binary() -> str | None:
+    found = shutil.which("lyrebird")
+    if found:
+        return found
+    from pathlib import Path
+    bases = []
+    if getattr(sys, "frozen", False):
+        bases.append(Path(sys.executable).parent)
+        if hasattr(sys, "_MEIPASS"):
+            bases.append(Path(sys._MEIPASS))
+    else:
+        bases.append(Path(__file__).resolve().parent.parent)
+
+    for base in bases:
+        for candidate in (
+            base / "bin" / ("lyrebird.exe" if os.name == "nt" else "lyrebird"),
+            base / ("lyrebird.exe" if os.name == "nt" else "lyrebird"),
+            base / "tor" / "pluggable_transports" / ("lyrebird.exe" if os.name == "nt" else "lyrebird"),
+        ):
+            if candidate.is_file():
+                return str(candidate).replace("\\", "/")
+    return None
+
+
+def _resolve_geoip_files() -> tuple[str | None, str | None]:
+    from pathlib import Path
+    bases = []
+    if getattr(sys, "frozen", False):
+        bases.append(Path(sys.executable).parent)
+        if hasattr(sys, "_MEIPASS"):
+            bases.append(Path(sys._MEIPASS))
+    else:
+        bases.append(Path(__file__).resolve().parent.parent)
+    bases.append(Path(config_store.CONFIG_DIR))
+
+    for base in bases:
+        for folder in (base / "data", base):
+            v4 = folder / "geoip"
+            v6 = folder / "geoip6"
+            if v4.is_file():
+                return str(v4).replace("\\", "/"), str(v6).replace("\\", "/") if v6.is_file() else None
+    if os.path.isfile("/usr/share/tor/geoip"):
+        return "/usr/share/tor/geoip", "/usr/share/tor/geoip6" if os.path.isfile("/usr/share/tor/geoip6") else None
+    return None, None
+
+
 def available() -> bool:
-    return bool(shutil.which("tor"))
+    return bool(_tor_binary())
 
 
 def get_bind() -> str:
@@ -146,6 +225,24 @@ def _repair_tor_data_permissions(tor_uid: int, tor_gid: int) -> None:
             os.chmod(path, 0o600)
 
 
+def _format_torrc_path(path: str) -> str:
+    if os.name == "nt":
+        p = os.path.abspath(path)
+        try:
+            import ctypes
+            # GetShortPathNameW only works on existing paths: shorten the parent dir
+            # (files like tor.log may not exist yet), then re-append the name.
+            parent, name = os.path.split(p)
+            os.makedirs(parent, exist_ok=True)
+            buf = ctypes.create_unicode_buffer(500)
+            if ctypes.windll.kernel32.GetShortPathNameW(parent, buf, 500) and " " not in name:
+                return f"{buf.value}\\{name}".replace("\\", "/")
+        except Exception:
+            pass
+        escaped = p.replace("\\", "\\\\")
+        return f'"{escaped}"' if " " in escaped else escaped
+    return path
+
 def _write_torrc() -> None:
     tor_uid, tor_gid = _tor_identity()
     run_as_debian_tor = tor_uid is not None and tor_gid is not None
@@ -163,14 +260,23 @@ def _write_torrc() -> None:
         host = f"[{host}]"
     lines = [
         f"SocksPort {host}:{port}",
-        f"DataDirectory {TOR_DATA_DIR}",
+        f"DataDirectory {_format_torrc_path(TOR_DATA_DIR)}",
         "ClientOnly 1",
         "AvoidDiskWrites 0",
+        "ConfluxEnabled 0",
+        "DormantOnFirstStartup 0",
+        "DormantCanceledByStartup 1",
         f"MaxCircuitDirtiness {TOR_MAX_CIRCUIT_DIRTINESS}",
     ]
+    geoip4, geoip6 = _resolve_geoip_files()
+    if geoip4:
+        lines.append(f"GeoIPFile {_format_torrc_path(geoip4)}")
+    if geoip6:
+        lines.append(f"GeoIPv6File {_format_torrc_path(geoip6)}")
+
     exit_nodes = get_exit_nodes()
     if exit_nodes:
-        if "{" in exit_nodes and not os.path.exists(TOR_GEOIP_PATH):
+        if "{" in exit_nodes and not geoip4 and not os.path.exists(TOR_GEOIP_PATH):
             raise TorError(
                 "Tor GeoIP database is missing (install tor-geoipdb); "
                 "cannot select an exit country"
@@ -183,9 +289,17 @@ def _write_torrc() -> None:
     lines += [
         f"ControlPort {TOR_CONTROL_HOST}:{TOR_CONTROL_PORT}",
         "CookieAuthentication 1",
-        f"CookieAuthFile {os.path.join(TOR_DATA_DIR, 'control_auth_cookie')}",
-        f"Log notice file {TOR_LOG_PATH}",
+        f"CookieAuthFile {_format_torrc_path(os.path.join(TOR_DATA_DIR, 'control_auth_cookie'))}",
+        f"Log notice file {_format_torrc_path(TOR_LOG_PATH)}",
     ]
+    lyrebird = _lyrebird_binary()
+    use_bridges = bool(config_store.get("tor_use_bridges", False))
+    if use_bridges and lyrebird:
+        lines.append("UseBridges 1")
+        lyrebird_cmd = _format_torrc_path(lyrebird)
+        lines.append(f"ClientTransportPlugin snowflake exec {lyrebird_cmd}")
+        lines.append("Bridge snowflake 192.0.2.3:80 2B280B23E1107BB62ABFC40DDCC8824814F80A72 fingerprint=2B280B23E1107BB62ABFC40DDCC8824814F80A72 url=https://1098762253.rsc.cdn77.org/ fronts=app.datapacket.com,www.datapacket.com ice=stun:stun.epygi.com:3478,stun:stun.uls.co.za:3478,stun:stun.voipgate.com:3478,stun:stun.mixvoip.com:3478,stun:stun.telnyx.com:3478,stun:stun.hot-chilli.net:3478,stun:stun.fitauto.ru:3478,stun:stun.m-online.net:3478 utls-imitate=hellorandomizedalpn")
+        lines.append("Bridge snowflake 192.0.2.4:80 8838024498816A039FCBBAB14E6F40A0843051FA fingerprint=8838024498816A039FCBBAB14E6F40A0843051FA url=https://1098762253.rsc.cdn77.org/ fronts=app.datapacket.com,www.datapacket.com ice=stun:stun.epygi.com:3478,stun:stun.uls.co.za:3478,stun:stun.voipgate.com:3478,stun:stun.mixvoip.com:3478,stun:stun.telnyx.com:3478,stun:stun.hot-chilli.net:3478,stun:stun.fitauto.ru:3478,stun:stun.m-online.net:3478 utls-imitate=hellorandomizedalpn")
     # Debian's package user prevents Tor from running as root in Docker.
     if run_as_debian_tor:
         lines.append("User debian-tor")
@@ -320,7 +434,10 @@ async def _terminate(process: asyncio.subprocess.Process | None) -> None:
     if not process or process.returncode is not None:
         return
     try:
-        process.send_signal(signal.SIGTERM)
+        if os.name == "nt":
+            process.kill()
+        else:
+            process.send_signal(signal.SIGTERM)
     except ProcessLookupError:
         return
     try:
@@ -348,8 +465,9 @@ async def _process_output(process: asyncio.subprocess.Process) -> str:
 
 
 async def _verify_config() -> None:
+    tor_cmd = _tor_binary() or "tor"
     process = await asyncio.create_subprocess_exec(
-        "tor", "--verify-config", "-f", TORRC_PATH,
+        tor_cmd, "--verify-config", "-f", TORRC_PATH,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -468,12 +586,10 @@ async def _pin_current_exit() -> None:
 
 
 async def _pin_default_exit() -> None:
-    """Pin an exit according to the stored preference (country or current)."""
+    """Pin an exit according to the stored country preference."""
     country = get_exit_country()
     if country:
         await _pin_country_exit(country)
-    else:
-        await _pin_current_exit()
 
 
 def _stale_tor_pids() -> list[int]:
@@ -497,7 +613,9 @@ def _stale_tor_pids() -> list[int]:
         pass
     for proc in psutil.process_iter(["pid", "name", "cmdline"]):
         try:
-            if (proc.info["name"] or "").lower() != "tor":
+            # The bundled tor binary ships as torclient.exe because a Windows
+            # security component blocks processes literally named "tor.exe".
+            if (proc.info["name"] or "").lower() not in ("tor", "tor.exe", "torclient.exe"):
                 continue
             cmdline = " ".join(proc.info["cmdline"] or [])
             if proc.info["pid"] in candidates or TORRC_PATH in cmdline:
@@ -508,7 +626,7 @@ def _stale_tor_pids() -> list[int]:
     pids = []
     for pid in candidates - skip:
         try:
-            if (psutil.Process(pid).name() or "").lower() == "tor":
+            if (psutil.Process(pid).name() or "").lower() in ("tor", "tor.exe", "torclient.exe"):
                 pids.append(pid)
         except (psutil.Error, OSError):
             continue
@@ -521,7 +639,8 @@ async def _terminate_stale_tor() -> list[int]:
     victims = []
     for pid in pids:
         try:
-            psutil.Process(pid).terminate()
+            p = psutil.Process(pid)
+            p.kill()
             victims.append(pid)
         except (psutil.Error, OSError):
             continue
@@ -548,6 +667,7 @@ async def _start() -> None:
         if not available():
             raise TorError("Tor is not installed; use the EasyProxy Docker image")
         set_bind(get_bind())
+        await _terminate_stale_tor()
         _write_torrc()
         await _verify_config()
         host, port = _split_bind(get_bind())
@@ -556,10 +676,13 @@ async def _start() -> None:
         process = None
         try:
             while time.monotonic() < deadline:
+                tor_cmd = _tor_binary() or "tor"
+                creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
                 process = await asyncio.create_subprocess_exec(
-                    "tor", "-f", TORRC_PATH, "--RunAsDaemon", "0",
+                    tor_cmd, "-f", TORRC_PATH, "--RunAsDaemon", "0",
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    creationflags=creationflags,
                 )
                 _process = process
                 _bootstrap_level = None
@@ -596,6 +719,20 @@ async def _start() -> None:
                             f"Tor exited during startup (code {process.returncode}): {detail or 'no Tor output'}"
                         )
                     if await _port_ready(host, port):
+                        try:
+                            cookie_path = os.path.join(TOR_DATA_DIR, "control_auth_cookie")
+                            if os.path.isfile(cookie_path):
+                                with open(cookie_path, "rb") as h:
+                                    cookie = h.read().hex()
+                                reader, writer = await asyncio.wait_for(
+                                    asyncio.open_connection(TOR_CONTROL_HOST, TOR_CONTROL_PORT), timeout=2
+                                )
+                                await _control_command(reader, writer, f"AUTHENTICATE {cookie}")
+                                await _control_command(reader, writer, "SIGNAL ACTIVE")
+                                writer.close()
+                                await writer.wait_closed()
+                        except Exception:
+                            pass
                         level = await _bootstrap_progress()
                         if level is not None:
                             _bootstrap_level = level
@@ -620,13 +757,13 @@ async def _start() -> None:
 
 
 async def start() -> None:
-    """Start Tor and pin its exit automatically when no pin exists yet."""
+    """Start Tor and pin its exit automatically when a country is selected."""
     await _start()
-    if not get_exit_nodes():
+    if get_exit_country() and not get_exit_nodes():
         try:
             await _pin_default_exit()
         except TorError as exc:
-            logger.warning("Could not auto-pin a Tor exit: %s", exc)
+            logger.debug("Could not auto-pin a Tor exit: %s", exc)
 
 
 async def stop() -> None:
@@ -651,7 +788,7 @@ async def check() -> dict:
     connector = ProxyConnector.from_url(f"socks5://{get_bind()}", rdns=True)
     started = time.perf_counter()
     try:
-        timeout = aiohttp.ClientTimeout(total=25)
+        timeout = aiohttp.ClientTimeout(total=45)
         async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
             async with session.get(TOR_CHECK_URL) as response:
                 payload = await response.json(content_type=None)
@@ -661,6 +798,8 @@ async def check() -> dict:
         result["ok"] = result["is_tor"] and bool(result["egress_ip"])
         if not result["ok"]:
             result["error"] = "The connection did not reach the Tor network"
+    except asyncio.TimeoutError:
+        result["error"] = "Tor circuit building timed out"
     except Exception as exc:  # noqa: BLE001 - surfaced in admin panel
         result["error"] = str(exc)
     return result
@@ -727,11 +866,11 @@ async def ensure_running() -> None:
         except TorError as exc:
             logger.warning("Tor could not be started: %s", exc)
             return
-    if _pid() is not None and not get_exit_nodes():
+    if _pid() is not None and get_exit_country() and not get_exit_nodes():
         try:
             await _pin_default_exit()
         except TorError as exc:
-            logger.warning("Could not pin a Tor exit: %s", exc)
+            logger.debug("Could not pin a Tor exit: %s", exc)
 
 
 async def keepalive_loop(interval: float = 30.0) -> None:

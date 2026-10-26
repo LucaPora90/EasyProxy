@@ -14,7 +14,17 @@ from extractors.base import ExtractorError
 
 
 def node_bin() -> str | None:
-    return shutil.which("node")
+    found = shutil.which("node")
+    if found:
+        return found
+    base = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent.parent
+    for candidate in (
+        base / "bin" / ("node.exe" if os.name == "nt" else "node"),
+        base / ("node.exe" if os.name == "nt" else "node"),
+    ):
+        if candidate.is_file():
+            return str(candidate)
+    return None
 
 
 async def run_node_runner(runner_path: str, args: list, env: dict | None = None,
@@ -25,7 +35,11 @@ async def run_node_runner(runner_path: str, args: list, env: dict | None = None,
     if not node:
         raise ExtractorError(f"{label}: Node.js is required for this extractor")
     if not os.path.exists(runner_path):
-        raise ExtractorError(f"{label}: runner script not found at {runner_path}")
+        fallback = os.path.join(getattr(sys, "_MEIPASS", ""), "scripts", os.path.basename(runner_path))
+        if os.path.exists(fallback):
+            runner_path = fallback
+        else:
+            raise ExtractorError(f"{label}: runner script not found at {runner_path}")
 
     proc = None
     try:

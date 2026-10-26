@@ -13,6 +13,11 @@ import aiohttp
 import base64
 import hashlib
 import socket
+import sys
+import shutil
+import subprocess
+import psutil
+import config_store
 import config as _config
 import services.wg_tunnels as wg_tunnels
 from services.session_lifetime import retire_session
@@ -41,6 +46,29 @@ _PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WARP_CTL_SCRIPT = os.environ.get("WARP_CTL_SCRIPT") or os.path.join(
     _PROJECT_DIR, "scripts", "wireproxy_ctl.sh"
 )
+
+
+def _wireproxy_binary() -> str | None:
+    found = shutil.which("wireproxy")
+    if found:
+        return found
+    from pathlib import Path
+    bases = []
+    if getattr(sys, "frozen", False):
+        if hasattr(sys, "_MEIPASS"):
+            bases.append(Path(sys._MEIPASS))
+        bases.append(Path(sys.executable).parent)
+    else:
+        bases.append(Path(__file__).resolve().parent.parent)
+
+    for base in bases:
+        for candidate in (
+            base / "bin" / ("wireproxy.exe" if os.name == "nt" else "wireproxy"),
+            base / ("wireproxy.exe" if os.name == "nt" else "wireproxy"),
+        ):
+            if candidate.is_file():
+                return str(candidate)
+    return None
 
 
 class SharedSessionWrapper:
@@ -102,6 +130,8 @@ class HLSProxyCoreMixin:
             asyncio.create_task(self._cleanup_stale_sessions()),
             asyncio.create_task(self._warp_keepalive()),
         }
+        if _shared.ENABLE_WARP:
+            asyncio.create_task(self._ensure_wireproxy_running())
 
     async def _cleanup_stale_sessions(self):
         """Periodic cleanup of stale CDN tokens and idle proxy sessions to prevent memory accumulation when idle."""
@@ -288,8 +318,30 @@ class HLSProxyCoreMixin:
         return False
 
 
+    async def _ensure_wireproxy_running(self):
+        try:
+            state, _ = await self._wireproxy_process_state()
+            if state != "up":
+                rc = await self._run_warp_control("start")
+                if rc == 0:
+                    logger.info("Auto-started userspace wireproxy for WARP")
+        except Exception as e:
+            logger.warning("Could not auto-start wireproxy: %s", e)
+
     async def _wireproxy_process_state(self) -> tuple[str, str]:
         """Return wireproxy process state without confusing it with tunnel state."""
+        if os.name == "nt" or not os.path.exists("/bin/sh"):
+            target_name = "wireproxy.exe" if os.name == "nt" else "wireproxy"
+            for p in psutil.process_iter(['name', 'cmdline']):
+                try:
+                    if p.info['name'] and target_name in p.info['name'].lower():
+                        cmd = " ".join(p.info.get('cmdline') or []).lower()
+                        if "warp_wireproxy" in cmd or "warp.conf" in cmd:
+                            return "up", "status=running"
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+            return "down", "process not running"
+
         control_script = WARP_CTL_SCRIPT
         if not os.path.exists(control_script):
             return "unknown", "control script unavailable"
@@ -487,6 +539,64 @@ class HLSProxyCoreMixin:
 
     async def _run_warp_control(self, action: str) -> int:
         """Run the explicit userspace WARP control action."""
+        if os.name == "nt" or not os.path.exists("/bin/sh"):
+            wp_bin = _wireproxy_binary()
+            if not wp_bin:
+                logger.warning("wireproxy binary not found in PATH or bin/")
+                return 127
+
+            conf_path = os.path.join(config_store.CONFIG_DIR, "warp_wireproxy.conf")
+            if not os.path.isfile(conf_path):
+                bundled_conf = os.path.join(getattr(sys, "_MEIPASS", _PROJECT_DIR), "data", "warp_wireproxy.conf")
+                if os.path.isfile(bundled_conf):
+                    try:
+                        os.makedirs(config_store.CONFIG_DIR, exist_ok=True)
+                        shutil.copy2(bundled_conf, conf_path)
+                    except Exception as e:
+                        logger.warning("Failed to copy bundled warp_wireproxy.conf: %s", e)
+                elif os.path.isfile(os.path.join(config_store.CONFIG_DIR, "warp.conf")):
+                    try:
+                        from services.wg_tunnels import prepare_wireproxy_conf
+                        prepare_wireproxy_conf(os.path.join(config_store.CONFIG_DIR, "warp.conf"), conf_path, 1080)
+                    except Exception as e:
+                        logger.warning("Failed to prepare warp_wireproxy.conf: %s", e)
+                        return 1
+                else:
+                    logger.warning("No warp configuration found in %s", config_store.CONFIG_DIR)
+                    return 1
+
+            if action in ("stop", "restart"):
+                target = "wireproxy.exe" if os.name == "nt" else "wireproxy"
+                for p in psutil.process_iter(['name', 'cmdline']):
+                    try:
+                        if p.info['name'] and target in p.info['name'].lower():
+                            cmd = " ".join(p.info.get('cmdline') or []).lower()
+                            if "warp_wireproxy" in cmd or "warp.conf" in cmd:
+                                p.terminate()
+                            try:
+                                p.wait(timeout=2)
+                            except (psutil.TimeoutExpired, psutil.Error):
+                                p.kill()
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+                if action == "stop":
+                    return 0
+                await asyncio.sleep(0.5)
+
+            if action in ("start", "restart"):
+                try:
+                    subprocess.Popen(
+                        [wp_bin, "-c", conf_path],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                    )
+                    return 0
+                except Exception as exc:
+                    logger.warning("Failed to start wireproxy: %s", exc)
+                    return 1
+            return 0
+
         proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -518,14 +628,14 @@ class HLSProxyCoreMixin:
             logger.warning("WARP control %s failed: %s", action, exc)
             return 127
 
-    async def reconnect_warp(self) -> dict:
+    async def reconnect_warp(self, force: bool = False) -> dict:
         """Restart wireproxy and verify the WARP path after reconnect."""
         if not hasattr(self, "_warp_reconnect_lock"):
             self._warp_reconnect_lock = asyncio.Lock()
 
         now = time.time()
         last_reconnect = getattr(self, "_last_warp_reconnect_time", 0)
-        if now - last_reconnect < 60:
+        if not force and now - last_reconnect < 60:
             return {"status": "ok", "message": "Cooldown active"}
         if self._warp_reconnect_lock.locked():
             return {"status": "ok", "message": "Reconnect already in progress"}
@@ -558,6 +668,7 @@ class HLSProxyCoreMixin:
 
     async def _stop_warp_proxy(self):
         try:
+            self._last_warp_reconnect_time = 0.0
             await self._run_warp_control("stop")
         except Exception as exc:
             logger.debug("WARP userspace process already stopped: %s", exc)

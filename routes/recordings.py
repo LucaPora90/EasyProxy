@@ -6,6 +6,7 @@ import functools
 
 import config
 from config import check_password, APP_VERSION
+from services.updater import is_newer_version
 import config_store
 from services.proxy_shared import admin_guard as admin
 from services.proxy_shared import get_public_base_url, read_template
@@ -33,7 +34,7 @@ def setup_recording_routes(app, recording_manager):
             proxy = app.get('proxy')
             latest_version = getattr(proxy, 'latest_version', 'Unknown') if proxy else 'Unknown'
             warp_status = getattr(proxy, 'warp_status', 'Unknown') if proxy else 'Unknown'
-            is_outdated = latest_version not in ["Checking...", "Unknown", "Error", APP_VERSION]
+            is_outdated = is_newer_version(latest_version, APP_VERSION)
             version_status_class = "outdated" if is_outdated else ""
             html_content = html_content.replace("{{LATEST_VERSION}}", latest_version)
             html_content = html_content.replace("{{VERSION_STATUS_CLASS}}", version_status_class)

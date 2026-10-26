@@ -348,6 +348,10 @@
                 Upload Config
                 <input type="file" id="upload-input" accept=".json" style="display:none" onchange="uploadConfig(event)">
             </label>
+            <button class="btn btn-primary btn-sm" id="btn-self-update" style="{{UPDATE_BUTTON_STYLE}}" onclick="checkOrApplyUpdate()">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="width:15px;height:15px"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+                Aggiorna EasyProxy
+            </button>
         </div>
     </div>
 
@@ -1340,6 +1344,48 @@ setInterval(async () => {
         // Silently ignore
     }
 }, 5000);
+
+async function checkOrApplyUpdate() {
+    const btn = document.getElementById('btn-self-update');
+    btn.disabled = true;
+    const oldText = btn.innerHTML;
+    btn.innerHTML = 'Verifica in corso...';
+    try {
+        const res = await fetch('/api/admin/update/check');
+        const data = await res.json();
+        if (data.is_docker) {
+            alert(`Stai eseguendo EasyProxy all'interno di un container Docker.\nVersione attuale: v${data.current_version}\nUltima release: v${data.latest_version}\n\nNei container gli aggiornamenti si effettuano scaricando l'immagine aggiornata:\ndocker pull ghcr.io/realbestia1/easyproxy:latest\n(oppure impostando Watchtower per farlo in automatico).`);
+            btn.disabled = false;
+            btn.innerHTML = oldText;
+            return;
+        }
+        if (data.update_available) {
+            if (confirm(`Nuova versione disponibile: v${data.latest_version} (attuale: v${data.current_version}).\n\nVuoi scaricare l'aggiornamento e riavviare EasyProxy ora?`)) {
+                btn.innerHTML = 'Download e riavvio in corso...';
+                const upRes = await fetch('/api/admin/update/apply', { method: 'POST' });
+                const upData = await upRes.json();
+                alert(upData.message);
+                if (upData.success) {
+                    setTimeout(() => location.reload(), 4500);
+                } else {
+                    btn.disabled = false;
+                    btn.innerHTML = oldText;
+                }
+            } else {
+                btn.disabled = false;
+                btn.innerHTML = oldText;
+            }
+        } else {
+            alert(`EasyProxy è già aggiornato all'ultima versione (v${data.current_version}).`);
+            btn.disabled = false;
+            btn.innerHTML = oldText;
+        }
+    } catch (e) {
+        alert('Errore durante la verifica aggiornamenti: ' + e);
+        btn.disabled = false;
+        btn.innerHTML = oldText;
+    }
+}
 </script>
 <script src="/static/ep-particles.js?v={{APP_VERSION}}"></script>
 <script src="/static/ep-nav.js?v={{APP_VERSION}}"></script>

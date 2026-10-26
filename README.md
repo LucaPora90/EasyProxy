@@ -22,6 +22,17 @@ A powerful, lightweight proxy server designed to handle HLS, M3U8, and DASH (MPD
 
 ## 🚀 Quick Start
 
+### 🪟 Windows (Standalone Executable - Recommended on Windows)
+On Windows **nothing needs to be installed** (no Python, no Docker, no external tools):
+1. Download **`EasyProxy-windows-amd64.zip`** from the [Releases](https://github.com/realbestia1/EasyProxy/releases/latest) section.
+2. Extract the ZIP into a folder of your choice.
+3. Launch **`EasyProxy.exe`**.
+4. Open the dashboard in your browser at **`http://localhost:7860`**.
+
+> All required components are preconfigured and bundled: Wireproxy (WARP/WireGuard), Tor (Snowflake) and FlareSolverr (portable Chromium with automatic Turnstile solving).
+>
+> 🔄 **Built-in auto-update**: `EasyProxy.exe` updates itself with one click from the Web control panel (`/admin`) as soon as a new version is released on GitHub, or from a terminal with `EasyProxy.exe --update`.
+
 ### 🐳 Docker (Recommended)
 The Docker image includes EasyProxy plus integrated CF Turnstile Solver for maximum compatibility. 
 
@@ -31,28 +42,7 @@ To run the container and persist config/recordings on your host machine, mount t
 docker run -d -p 7860:7860 -v ./data:/data --name EasyProxy ghcr.io/realbestia1/easyproxy:latest
 ```
 
-### 🐍 Python (Local)
-
-#### Prerequisites (All Platforms)
-- **Python 3.11+**
-- **Git** (for cloning dependencies)
-
-#### 🪟 Windows Setup
-The easiest way to get EasyProxy plus solvers on Windows:
-1. Clone the repository and enter the folder.
-2. Run **`start_full.bat`**.
-*This script automatically handles CF Turnstile Solver, patches, and dependencies.*
-
-#### 🐧 Linux / macOS Setup
-1. **Install dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
-2. **Start EasyProxy**:
-   ```bash
-   python app.py
-   ```
-#### 📱 Termux (Android)
+### 📱 Termux (Android)
 EasyProxy plus solvers is fully supported on Android via Termux + Ubuntu proot.
 
 The setup supports proot-distro 5 and earlier releases, and installs Python dependencies in an isolated virtual environment at `/root/EasyProxy/.venv`.
@@ -97,6 +87,7 @@ easyproxy-update
 
 | Method | Description |
 | :--- | :--- |
+| **Windows Standalone** | Portable, self-contained executable (`EasyProxy.exe`) with Tor, WARP and FlareSolverr bundled. No prerequisites. |
 | **Docker** | Standard `docker build .` uses the single `Dockerfile` with solvers included. |
 | **Docker Compose** | Run the complete stack (Proxy + Solvers) with `docker-compose up -d`. |
 | **HuggingFace** | Use `Dockerfile-hf` for seamless deployment on HF Spaces. |

@@ -8,6 +8,7 @@ import threading
 import services.proxy_shared as _shared
 from services import wg_tunnels
 from services import tor_proxy
+from services.updater import check_update_info, apply_self_update, can_self_update, is_newer_version
 from services.proxy_shared import (
     logger, web, APP_VERSION, admin_guard,
     check_password, get_client_ip, PlaylistBuilder, ClientSession, ClientTimeout,
@@ -143,12 +144,14 @@ class HLSProxyPagesMixin:
             html_content = self._read_template("index.html")
 
             # Determine version status class
-            is_outdated = self.latest_version not in ["Checking...", "Unknown", "Error", APP_VERSION]
+            is_outdated = is_newer_version(self.latest_version, APP_VERSION)
             version_status_class = "outdated" if is_outdated else ""
+            update_link_class = "outdated" if (can_self_update() and is_outdated) else ""
 
             html_content = html_content.replace("{{APP_VERSION}}", APP_VERSION)
             html_content = html_content.replace("{{LATEST_VERSION}}", self.latest_version)
             html_content = html_content.replace("{{VERSION_STATUS_CLASS}}", version_status_class)
+            html_content = html_content.replace("{{UPDATE_LINK_CLASS}}", update_link_class)
             self.warp_status = await self.get_warp_status()
             html_content = html_content.replace("{{WARP_STATUS}}", self.warp_status)
             return web.Response(text=html_content, content_type="text/html")
@@ -248,7 +251,7 @@ class HLSProxyPagesMixin:
         """Serve la pagina web per generare URL proxy ed extractor."""
         try:
             html_content = self._read_template("url_generator.html")
-            is_outdated = self.latest_version not in ["Checking...", "Unknown", "Error", APP_VERSION]
+            is_outdated = is_newer_version(self.latest_version, APP_VERSION)
             version_status_class = "outdated" if is_outdated else ""
             html_content = html_content.replace("{{APP_VERSION}}", APP_VERSION)
             html_content = html_content.replace("{{LATEST_VERSION}}", self.latest_version)
@@ -268,7 +271,7 @@ class HLSProxyPagesMixin:
         """Gestisce l'interfaccia web del playlist builder."""
         try:
             html_content = self._read_template("builder.html")
-            is_outdated = self.latest_version not in ["Checking...", "Unknown", "Error", APP_VERSION]
+            is_outdated = is_newer_version(self.latest_version, APP_VERSION)
             version_status_class = "outdated" if is_outdated else ""
             html_content = html_content.replace("{{APP_VERSION}}", APP_VERSION)
             html_content = html_content.replace("{{LATEST_VERSION}}", self.latest_version)
@@ -293,12 +296,14 @@ class HLSProxyPagesMixin:
             html_content = self._read_template("info.html")
 
             # Determine version status class
-            is_outdated = self.latest_version not in ["Checking...", "Unknown", "Error", APP_VERSION]
+            is_outdated = is_newer_version(self.latest_version, APP_VERSION)
             version_status_class = "outdated" if is_outdated else ""
+            update_link_class = "outdated" if (can_self_update() and is_outdated) else ""
 
             html_content = html_content.replace("{{APP_VERSION}}", APP_VERSION)
             html_content = html_content.replace("{{LATEST_VERSION}}", self.latest_version)
             html_content = html_content.replace("{{VERSION_STATUS_CLASS}}", version_status_class)
+            html_content = html_content.replace("{{UPDATE_LINK_CLASS}}", update_link_class)
             self.warp_status = await self.get_warp_status()
             html_content = html_content.replace("{{WARP_STATUS}}", self.warp_status)
             return web.Response(text=html_content, content_type="text/html")
@@ -312,7 +317,7 @@ class HLSProxyPagesMixin:
 
     async def handle_favicon(self, request):
         """Serve il file favicon.ico."""
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        base_dir = getattr(sys, "_MEIPASS", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         favicon_path = os.path.join(base_dir, "static", "favicon.ico")
         if os.path.exists(favicon_path):
             return web.FileResponse(favicon_path)
@@ -579,6 +584,7 @@ class HLSProxyPagesMixin:
         try:
             html = self._read_template("admin.html")
             html = html.replace("{{APP_VERSION}}", APP_VERSION)
+            html = html.replace("{{UPDATE_BUTTON_STYLE}}", "" if can_self_update() else "display:none !important;")
             return web.Response(text=html, content_type="text/html")
         except Exception as e:
             logger.error(f"Error loading admin page: {e}")
@@ -685,7 +691,7 @@ class HLSProxyPagesMixin:
         if enable:
             logger.info("WARP enabled via admin panel")
             self._warp_status_checked_at = 0.0
-            result = await self.reconnect_warp()
+            result = await self.reconnect_warp(force=True)
             if result.get("status") != "ok":
                 logger.warning(f"WARP enable failed: {result.get('message')}")
                 return web.json_response({"status": "error", "message": result.get("message", "WARP connect failed")}, status=500)
@@ -700,7 +706,7 @@ class HLSProxyPagesMixin:
 
     @admin_guard
     async def handle_admin_api_warp_reconnect(self, request):
-        result = await self.reconnect_warp()
+        result = await self.reconnect_warp(force=True)
         status_code = 200 if result.get("status") == "ok" else 500
         return web.json_response(result, status=status_code)
 
@@ -843,6 +849,16 @@ class HLSProxyPagesMixin:
             _SPEEDTEST_STATE["running"] = False
             # Release the freed pages instead of waiting for the 60s tick.
             await self._compact_heap()
+
+    @admin_guard
+    async def handle_admin_api_update_check(self, request):
+        info = await check_update_info()
+        return web.json_response(info)
+
+    @admin_guard
+    async def handle_admin_api_update_apply(self, request):
+        success, message = await apply_self_update()
+        return web.json_response({"success": success, "message": message})
 
     @admin_guard
     async def handle_admin_api_test_extractors(self, request):

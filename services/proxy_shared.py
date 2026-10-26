@@ -67,9 +67,8 @@ from services.manifest_rewriter import ManifestRewriter
 from services.secure_state import open_state, seal_state
 
 
-_TEMPLATES_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "templates"
-)
+_RESOURCE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_TEMPLATES_DIR = os.path.join(_RESOURCE_DIR, "templates")
 
 
 def read_template(name: str) -> str:

@@ -20,6 +20,9 @@ import os
 import re
 import shutil
 import time
+import sys
+import subprocess
+import psutil
 import urllib.parse
 
 import aiohttp
@@ -78,6 +81,29 @@ _BIND_RE = re.compile(r"^(?P<host>[A-Za-z0-9_.\-\[\]:]+):(?P<port>\d{1,5})$")
 _PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CTL_SCRIPT = os.path.join(_PROJECT_DIR, "scripts", "wireproxy_ctl.sh")
 
+
+def _wireproxy_binary() -> str | None:
+    found = shutil.which("wireproxy")
+    if found:
+        return found
+    from pathlib import Path
+    bases = []
+    if getattr(sys, "frozen", False):
+        if hasattr(sys, "_MEIPASS"):
+            bases.append(Path(sys._MEIPASS))
+        bases.append(Path(sys.executable).parent)
+    else:
+        bases.append(Path(__file__).resolve().parent.parent)
+
+    for base in bases:
+        for candidate in (
+            base / "bin" / ("wireproxy.exe" if os.name == "nt" else "wireproxy"),
+            base / ("wireproxy.exe" if os.name == "nt" else "wireproxy"),
+        ):
+            if candidate.is_file():
+                return str(candidate)
+    return None
+
 _server_cache = {"fetched_at": 0.0, "used_at": 0.0, "servers": []}
 _server_lock = asyncio.Lock()
 
@@ -92,6 +118,30 @@ class TunnelError(Exception):
 
 def _data_dir() -> str:
     return config_store.CONFIG_DIR
+
+
+def prepare_wireproxy_conf(src_path: str, dst_path: str, bind_port: str | int = 1080) -> bool:
+    """Generate wireproxy configuration from a WireGuard profile, binding to a local SOCKS5 port."""
+    if not os.path.isfile(src_path):
+        return False
+    with open(src_path, "r", encoding="utf-8", errors="replace") as f:
+        content = f.read()
+
+    cleaned = re.sub(
+        r"(?m)^(Address|AllowedIPs|DNS)\s*=.*$",
+        lambda m: re.sub(r", *[^, ]*:[^, ]*", "", m.group(0)),
+        content,
+    )
+
+    bind_str = str(bind_port)
+    bind_addr = bind_str if ":" in bind_str else f"127.0.0.1:{bind_str}"
+
+    conf = cleaned.strip() + f"\n\n[Socks5]\nBindAddress = {bind_addr}\n"
+
+    os.makedirs(os.path.dirname(os.path.abspath(dst_path)), exist_ok=True)
+    with open(dst_path, "w", encoding="utf-8") as f:
+        f.write(conf)
+    return True
 
 
 def profile_path(slot: str) -> str:
@@ -110,11 +160,9 @@ def log_path(slot: str) -> str:
 
 
 def available() -> bool:
-    """wireproxy control needs the POSIX helper script and the binary."""
-    if os.name == "nt":
-        return False
-    if not os.path.exists(CTL_SCRIPT):
-        return False
+    """wireproxy control needs the POSIX helper script or the binary."""
+    if os.name == "nt" or not os.path.exists(CTL_SCRIPT):
+        return bool(_wireproxy_binary())
     return bool(shutil.which("wireproxy") or os.path.exists("/usr/local/bin/wireproxy"))
 
 
@@ -184,12 +232,16 @@ def _read_pid(slot: str) -> int | None:
 
 
 def process_running(slot: str) -> bool:
-    """Check the recorded pid without spawning a shell (Linux /proc only)."""
+    """Check the recorded pid."""
     pid = _read_pid(slot)
     if not pid:
         return False
     if os.name == "nt":
-        return False
+        try:
+            p = psutil.Process(pid)
+            return "wireproxy" in p.name().lower()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+            return False
     try:
         with open(f"/proc/{pid}/comm", "r") as handle:
             return handle.read().strip() == "wireproxy"
@@ -201,6 +253,111 @@ async def run_ctl(slot: str, action: str, timeout: float = 30.0) -> tuple[int, s
     """Run the wireproxy helper for one slot and return (returncode, output)."""
     if not available():
         return 127, "wireproxy control is not available on this platform"
+
+    if os.name == "nt" or not os.path.exists(CTL_SCRIPT):
+        wp_bin = _wireproxy_binary()
+        if not wp_bin:
+            return 127, "wireproxy binary not found"
+        t_dir = tunnel_dir(slot)
+        os.makedirs(t_dir, exist_ok=True)
+        conf_file = os.path.join(t_dir, "wireproxy.conf")
+        pid_file = _pid_file(slot)
+        log_file = log_path(slot)
+
+        if action in ("stop", "restart"):
+            old_pid = _read_pid(slot)
+            if old_pid:
+                try:
+                    proc = psutil.Process(old_pid)
+                    if "wireproxy" in proc.name().lower():
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=3)
+                        except psutil.TimeoutExpired:
+                            proc.kill()
+                except Exception:
+                    pass
+            if os.path.isfile(pid_file):
+                try:
+                    os.remove(pid_file)
+                except OSError:
+                    pass
+            if os.path.isfile(conf_file):
+                try:
+                    os.remove(conf_file)
+                except OSError:
+                    pass
+            if action == "stop":
+                return 0, f"Stopped wireproxy for {slot}"
+            await asyncio.sleep(0.5)
+
+        if action in ("start", "restart"):
+            src_profile = profile_path(slot)
+            if not os.path.isfile(src_profile):
+                return 1, f"Profile {src_profile} not found"
+            bind_addr = get_bind(slot)
+            if not prepare_wireproxy_conf(src_profile, conf_file, bind_addr):
+                return 1, "Failed to write wireproxy config"
+            try:
+                log_handle = open(log_file, "a", encoding="utf-8", errors="replace")
+                proc = subprocess.Popen(
+                    [wp_bin, "-c", conf_file],
+                    stdout=log_handle,
+                    stderr=subprocess.STDOUT,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                )
+                with open(pid_file, "w") as pf:
+                    pf.write(str(proc.pid))
+                return 0, f"Started wireproxy for {slot} (pid {proc.pid})"
+            except Exception as exc:
+                return 1, f"Failed to spawn wireproxy: {exc}"
+
+        if action == "status":
+            running = process_running(slot)
+            return (0, "status=running") if running else (1, "status=stopped")
+
+        if action == "probe":
+            running = process_running(slot)
+            if not running:
+                return 1, "wireproxy process is down"
+            bind = get_bind(slot)
+            probe_url = os.environ.get("WG_PROBE_URL", "https://www.cloudflare.com/cdn-cgi/trace")
+            try:
+                from aiohttp_socks import ProxyConnector
+                connector = ProxyConnector.from_url(f"socks5://{bind}")
+                timeout = aiohttp.ClientTimeout(total=8)
+                async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+                    async with session.get(probe_url) as resp:
+                        text = (await resp.text()).strip()
+                        if resp.status == 200:
+                            return 0, text
+                        return 1, f"HTTP {resp.status}"
+            except Exception as e:
+                return 1, f"Tunnel probe: SOCKS traffic failed: {e}"
+
+        if action == "ping":
+            running = process_running(slot)
+            if not running:
+                return 1, "wireproxy process is down"
+            bind = get_bind(slot)
+            ping_url = os.environ.get("WG_PING_URL", "https://api.ipify.org")
+            t0 = time.monotonic()
+            try:
+                from aiohttp_socks import ProxyConnector
+                connector = ProxyConnector.from_url(f"socks5://{bind}")
+                timeout = aiohttp.ClientTimeout(total=10)
+                async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+                    t_conn = time.monotonic()
+                    async with session.get(ping_url) as resp:
+                        body = (await resp.text()).strip()
+                        t_done = time.monotonic()
+                        ping_time = max(0.01, t_conn - t0)
+                        http_time = max(0.01, t_done - t_conn)
+                        return 0, f"{body}\n{ping_time:.3f} {http_time:.3f} {resp.status}"
+            except Exception as e:
+                return 1, f"VPN check failed: {e}"
+
+        return 0, "ok"
     env = dict(os.environ)
     env.update({
         "WG_CONFIG_FILE": profile_path(slot),

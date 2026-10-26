@@ -213,6 +213,19 @@
             animation: errPulse 2s infinite;
         }
 
+        .update-link {
+            display: none;
+        }
+
+        .update-link.outdated {
+            display: inline-flex;
+            background: rgba(99, 102, 241, 0.2);
+            color: #818cf8;
+            font-weight: 700;
+            border: 1px solid rgba(99, 102, 241, 0.4);
+            animation: errPulse 2s infinite;
+        }
+
         @keyframes errPulse {
             0%, 100% { opacity: 1; }
             50% { opacity: 0.6; }
@@ -476,6 +489,7 @@
                     <span>Latest:</span>
                     <span class="version-latest {{VERSION_STATUS_CLASS}}">{{LATEST_VERSION}}</span>
                 </div>
+                <a href="/admin" class="version-chip update-link {{UPDATE_LINK_CLASS}}" style="text-decoration:none;cursor:pointer;">⬆️ Aggiorna</a>
                 <div class="warp-chip">WARP: {{WARP_STATUS}}</div>
             </div>
         </div>

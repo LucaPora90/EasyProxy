@@ -1,6 +1,7 @@
 from services.proxy_shared import PlaylistBuilder, logger
 import asyncio
 import os
+import sys
 from services.proxy_core import HLSProxyCoreMixin
 from services.proxy_dash import HLSProxyDashMixin
 from services.proxy_extractor import HLSProxyExtractorHandlerMixin
@@ -67,7 +68,8 @@ class HLSProxy(
         # Template/OpenAPI cache (read once, serve many)
         self._template_cache = {}
         self._openapi_text = None
-        self._template_cache_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "templates")
+        resource_dir = getattr(sys, "_MEIPASS", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        self._template_cache_dir = os.path.join(resource_dir, "templates")
 
         # Version information
         self.latest_version = "Checking..."
