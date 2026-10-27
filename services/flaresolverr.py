@@ -287,6 +287,22 @@ class FlareSolverrManager:
 
 
 
+        # An explicitly configured source tree wins over a bundled binary.
+
+        default_dir = "/opt/flaresolverr" if os.name != "nt" else ""
+
+        root_dir = os.getenv("FLARESOLVERR_DIR", default_dir)
+
+        if root_dir and os.path.isdir(root_dir):
+
+            source_script = Path(root_dir) / "src" / "flaresolverr.py"
+
+            if source_script.is_file():
+
+                return [sys.executable, str(source_script)]
+
+
+
         # Check local flaresolverr binary next to executable, MEIPASS, or project
 
         bases = []
@@ -324,20 +340,6 @@ class FlareSolverrManager:
                 if candidate.is_file():
 
                     return [str(candidate)]
-
-
-
-        default_dir = "/opt/flaresolverr" if os.name != "nt" else ""
-
-        root_dir = os.getenv("FLARESOLVERR_DIR", default_dir)
-
-        if root_dir and os.path.isdir(root_dir):
-
-            source_script = Path(root_dir) / "src" / "flaresolverr.py"
-
-            if source_script.is_file():
-
-                return [sys.executable, str(source_script)]
 
 
 

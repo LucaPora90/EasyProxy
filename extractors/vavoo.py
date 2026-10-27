@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import socket
+import ssl
 import time
 import uuid
 from aiohttp import ClientConnectionError, ClientSession, ClientTimeout, TCPConnector
@@ -62,6 +63,7 @@ class VavooExtractor(BaseExtractor):
         self.addon_sig_ts = 0
         self._addon_sig_proxy = None
         self.base_index = 0
+        self._last_resolve_error = None
 
     @property
     def _resolve_url(self) -> str:
@@ -342,6 +344,17 @@ class VavooExtractor(BaseExtractor):
                             return str(data["data"]["url"])
                     logger.warning("Vavoo resolve response missing URL")
                     return None
+            except ssl.SSLError as e:
+                # The TLS handshake died before any HTTP request: the base did
+                # not even see it, so switching base sites (and forcing a new
+                # addonSig) only burns time on the same broken route.
+                last_err = e
+                logger.warning(
+                    "Vavoo TLS handshake failed via %s, aborting base-site failover: %s",
+                    self._proxy or "direct",
+                    e,
+                )
+                break
             except Exception as e:
                 last_err = e
                 logger.warning(f"Vavoo resolve exception on {_BASE_SITES[self.base_index]}, "
@@ -352,6 +365,7 @@ class VavooExtractor(BaseExtractor):
                     return None
                 continue
         logger.warning(f"Vavoo resolve failed on all base sites, last error: {last_err}")
+        self._last_resolve_error = last_err
         return None
 
     async def extract(self, url: str, **kwargs) -> Dict[str, Any]:
@@ -361,7 +375,10 @@ class VavooExtractor(BaseExtractor):
         self._apply_routing_kwargs(url, kwargs)
         resolved_url = await self._resolve_via_mediahubmx(url)
         if not resolved_url:
-            raise ExtractorError("Vavoo resolve failed")
+            detail = f": {self._last_resolve_error}" if self._last_resolve_error else ""
+            raise ExtractorError(
+                f"Vavoo resolve failed via {self._proxy or 'direct'}{detail}"
+            )
 
         logger.info(f"Resolved via mediahubmx: {resolved_url[:80]}...")
 

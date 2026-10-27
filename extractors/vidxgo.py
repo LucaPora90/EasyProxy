@@ -6,13 +6,15 @@ with curl_cffi browser impersonation, sharing one session so the signed URL
 stays bound to the client that asked for it.
 """
 
+import asyncio
 import logging
 import re
+import time
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
 import config as _cfg
-from extractors.base import BaseExtractor, ExtractorError
+from extractors.base import BaseExtractor, ExtractorError, RateLimitError
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +48,46 @@ PLAY_HEADERS = {
 }
 ORIGIN = "https://v.vidxgo.co"
 MAX_PLAYLISTS = 16
+
+# /t/<id> is rate limited per egress IP and the signed URL it returns expires
+# after ~3 minutes. Players reload the extractor URL every few seconds, so keep
+# a successful extraction briefly and collapse concurrent lookups into one
+# upstream call (the extractor instance is retired after each request).
+RESULT_TTL = 90.0
+RATE_LIMIT_COOLDOWN = 15.0
+MAX_RATE_LIMIT_COOLDOWN = 60.0
+MAX_CACHE_ENTRIES = 128
+
+_result_cache: dict[tuple, tuple[float, float, dict]] = {}
+_cooldowns: dict[tuple, float] = {}
+_locks: dict[tuple, tuple[Any, asyncio.Lock]] = {}
+
+
+def _lock_for(key: tuple) -> asyncio.Lock:
+    """One lock per cache key, rebuilt if the event loop changed."""
+    loop = asyncio.get_running_loop()
+    entry = _locks.get(key)
+    if entry is None or entry[0] is not loop:
+        entry = (loop, asyncio.Lock())
+        _locks[key] = entry
+    return entry[1]
+
+
+def _prune(now: float) -> None:
+    if len(_result_cache) > MAX_CACHE_ENTRIES:
+        for key, (expires_at, _created, _result) in list(_result_cache.items()):
+            if expires_at <= now:
+                _result_cache.pop(key, None)
+        while len(_result_cache) > MAX_CACHE_ENTRIES:
+            _result_cache.pop(next(iter(_result_cache)))
+    if len(_cooldowns) > MAX_CACHE_ENTRIES:
+        for key, until in list(_cooldowns.items()):
+            if until <= now:
+                _cooldowns.pop(key, None)
+    if len(_locks) > MAX_CACHE_ENTRIES:
+        for key, (_loop, lock) in list(_locks.items()):
+            if key not in _result_cache and not lock.locked():
+                _locks.pop(key, None)
 
 
 class VidXgoExtractor(BaseExtractor):
@@ -124,30 +166,41 @@ class VidXgoExtractor(BaseExtractor):
                     captured[child_url] = res.text
                     pending.append((child_url, res.text))
 
-    async def extract(self, url: str, **kwargs) -> dict[str, Any]:
-        self._validate_url(url)
+    @staticmethod
+    def _retry_after(response, default: float = RATE_LIMIT_COOLDOWN) -> float:
+        raw = (getattr(response, "headers", None) or {}).get("Retry-After")
+        try:
+            seconds = float(str(raw).strip())
+        except (TypeError, ValueError):
+            return default
+        return min(max(seconds, 1.0), MAX_RATE_LIMIT_COOLDOWN)
 
-        self._apply_routing_kwargs(url, kwargs)
-        proxy = await self._resolve_proxy(url)
-        self.selected_proxy = proxy
-
+    async def _fetch_result(self, token_url: str, proxies, cooldown_key: tuple, deep: bool):
+        """Ask /t/<id> for a signed URL and read the master playlist."""
         session_cls = _curl_session_cls()
         if session_cls is None:
             raise ExtractorError("VidXgo: curl_cffi is required")
-        runner_proxy = self._normalize_proxy(proxy)
-        proxies = {"http": runner_proxy, "https": runner_proxy} if runner_proxy else None
-        deep = bool(kwargs.get("force_refresh") or kwargs.get("background_refresh"))
-
         session = session_cls(impersonate="firefox133")
+        expires_at = time.monotonic() + RESULT_TTL
         try:
             token_response = await session.get(
-                self._token_endpoint(url),
+                token_url,
                 headers=TOKEN_HEADERS,
                 proxies=proxies,
                 verify=False,
                 timeout=25,
                 allow_redirects=True,
             )
+            if token_response.status_code == 429:
+                cooldown = self._retry_after(token_response)
+                _cooldowns[cooldown_key] = time.monotonic() + cooldown
+                logger.warning(
+                    "VidXgo: token endpoint rate limited, backing off %.0fs", cooldown
+                )
+                raise RateLimitError(
+                    f"VidXgo: rate limited (HTTP 429), retry in {int(cooldown)}s",
+                    retry_after=cooldown,
+                )
             if token_response.status_code != 200:
                 raise ExtractorError(
                     f"VidXgo: token endpoint returned HTTP {token_response.status_code}"
@@ -159,6 +212,14 @@ class VidXgoExtractor(BaseExtractor):
             stream_url = str((payload or {}).get("url") or "").strip()
             if not stream_url.startswith("http"):
                 raise ExtractorError("VidXgo: token endpoint returned no stream URL")
+
+            # The payload advertises the signed URL expiry (epoch ms): never
+            # reuse it past that, and cap it with our own TTL.
+            try:
+                expires_in = float(payload.get("expire")) / 1000 - time.time()
+            except (TypeError, ValueError, AttributeError):
+                expires_in = RESULT_TTL
+            expires_at = time.monotonic() + min(RESULT_TTL, max(5.0, expires_in))
 
             master = await session.get(
                 stream_url,
@@ -183,12 +244,70 @@ class VidXgoExtractor(BaseExtractor):
 
         return {
             "destination_url": stream_url,
-            "request_headers": dict(PLAY_HEADERS),
             "captured_manifest": master.text,
             "captured_manifests": captured_manifests,
+        }, expires_at
+
+    def _with_routing(self, data: dict) -> dict[str, Any]:
+        """Attach per-request routing state; it must never come from the cache."""
+        return {
+            "destination_url": data["destination_url"],
+            "request_headers": dict(PLAY_HEADERS),
+            "captured_manifest": data["captured_manifest"],
+            "captured_manifests": data["captured_manifests"],
             "mediaflow_endpoint": self.mediaflow_endpoint,
             "selected_proxy": self.selected_proxy,
             "force_direct": self._force_direct,
             "bypass_warp": self.bypass_warp_active,
             "disable_ssl": True,
         }
+
+    async def extract(self, url: str, **kwargs) -> dict[str, Any]:
+        self._validate_url(url)
+
+        self._apply_routing_kwargs(url, kwargs)
+        proxy = await self._resolve_proxy(url)
+        self.selected_proxy = proxy
+
+        runner_proxy = self._normalize_proxy(proxy)
+        proxies = {"http": runner_proxy, "https": runner_proxy} if runner_proxy else None
+        force_refresh = bool(kwargs.get("force_refresh"))
+        deep = bool(force_refresh or kwargs.get("background_refresh"))
+
+        token_url = self._token_endpoint(url)
+        cooldown_key = (token_url, runner_proxy)
+        cache_key = (token_url, runner_proxy, deep)
+        started = time.monotonic()
+
+        def cached_result():
+            entry = _result_cache.get(cache_key)
+            now = time.monotonic()
+            if not entry or entry[0] <= now:
+                return None
+            # A forced refresh only reuses a token fetched after this call
+            # began, i.e. the result of a concurrent identical refresh.
+            if force_refresh and entry[1] < started:
+                return None
+            return self._with_routing(entry[2])
+
+        result = cached_result()
+        if result is not None:
+            return result
+
+        async with _lock_for(cache_key):
+            result = cached_result()
+            if result is not None:
+                return result
+            cooldown_left = _cooldowns.get(cooldown_key, 0) - time.monotonic()
+            if cooldown_left > 0:
+                raise RateLimitError(
+                    f"VidXgo: rate limited (HTTP 429), retry in {int(cooldown_left) + 1}s",
+                    retry_after=cooldown_left,
+                )
+            data, expires_at = await self._fetch_result(
+                token_url, proxies, cooldown_key, deep
+            )
+            _result_cache[cache_key] = (expires_at, time.monotonic(), data)
+            _cooldowns.pop(cooldown_key, None)
+            _prune(time.monotonic())
+            return self._with_routing(data)

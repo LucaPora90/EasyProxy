@@ -21,6 +21,14 @@ class ExtractorError(Exception):
     pass
 
 
+class RateLimitError(ExtractorError):
+    """Upstream asked us to back off; carries the Retry-After delay."""
+
+    def __init__(self, message: str, retry_after: float = 0):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 def normalize_socks_proxy_url(proxy_url: str) -> str:
     """Resolve a proxy alias, keeping the scheme the routing policy selected.
 

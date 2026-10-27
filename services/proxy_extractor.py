@@ -18,6 +18,7 @@ import base64
 import urllib.parse
 import config as _config
 from yarl import URL
+from extractors.base import ExtractorError, RateLimitError
 from services.proxy_shared import seal_clearkey
 
 
@@ -505,7 +506,7 @@ class HLSProxyExtractorHandlerMixin:
                     "expired",
                     "no longer available",
                 ]
-            ) or isinstance(e, (asyncio.TimeoutError, asyncio.CancelledError)) or type(e).__name__ == "ExtractorError"  # ponytail: expected extractor failures shouldn't print a traceback
+            ) or isinstance(e, (asyncio.TimeoutError, asyncio.CancelledError, ExtractorError))  # ponytail: expected extractor failures shouldn't print a traceback
 
             error_desc = str(e) or type(e).__name__
             log_proxy = selected_proxy or (
@@ -523,7 +524,13 @@ class HLSProxyExtractorHandlerMixin:
             if isinstance(e, asyncio.CancelledError):
                 logger.info("Extractor request cancelled (client disconnected) [%s]", error_context)
                 raise
-            if is_expected_error:
+            if isinstance(e, RateLimitError):
+                logger.warning(
+                    "⏳ Extractor rate limited: %s [%s]",
+                    error_desc,
+                    error_context,
+                )
+            elif is_expected_error:
                 logger.error(
                     "❌ Extractor request failed: %s [%s]",
                     error_desc,
@@ -539,12 +546,20 @@ class HLSProxyExtractorHandlerMixin:
                 traceback.print_exc()
 
             status_code = 500
-            if type(e).__name__ == "ExtractorError" or "not found" in error_message or "pick failed" in error_message:
+            response_headers = {}
+            if isinstance(e, RateLimitError):
+                # Tell the caller to back off instead of retrying immediately.
+                status_code = 429
+                response_headers["Retry-After"] = str(
+                    max(1, int(getattr(e, "retry_after", 0) or 0))
+                )
+            elif isinstance(e, ExtractorError) or "not found" in error_message or "pick failed" in error_message:
                 status_code = 404
 
             return web.json_response(
                 {"error": error_desc, "status": "error"},
-                status=status_code
+                status=status_code,
+                headers=response_headers,
             )
         finally:
             BYPASS_WARP_CONTEXT.reset(token)

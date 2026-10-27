@@ -9,6 +9,7 @@ import asyncio
 import json
 import os
 import shutil
+import sys
 
 from extractors.base import ExtractorError
 

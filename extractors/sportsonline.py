@@ -14,15 +14,10 @@ from aiohttp import ClientSession, ClientTimeout, TCPConnector
 from aiohttp.client_exceptions import ClientOSError
 from config import get_connector_for_proxy, get_preferred_proxy_for_url
 import config as _cfg
-from extractors.base import BaseExtractor, ExtractorError
+from extractors.base import BaseExtractor, ExtractorError, RateLimitError
 
 
 logger = logging.getLogger(__name__)
-
-
-class RateLimitError(ExtractorError):
-    """Upstream returned HTTP 429; use cached data/backoff when available."""
-    pass
 
 
 def unpack(p, a, c, k, e=None, d=None):
