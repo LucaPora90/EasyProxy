@@ -72,6 +72,51 @@ PREMIUM_TOKEN_RENEW_FRACTION = 0.5
 # caller's address, so the egress route is part of the key.
 _premium_tokens: Dict[tuple, tuple] = {}
 _premium_token_locks: Dict[tuple, asyncio.Lock] = {}
+# The edge lists each segment as base64url(AES-128-CTR(url)): key = base64url
+# "k" returned with the token, counter = the segment's media sequence number
+# (big-endian, 16 bytes). token -> key, so a playlist is decrypted with the key
+# of the token it was fetched with even if the cache was renewed meanwhile.
+_premium_segment_keys: Dict[str, bytes] = {}
+_PREMIUM_SEGMENT_KEYS_MAX = 512
+
+
+def _b64url_decode(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def decrypt_premium_playlist(body: str, playlist_url: str) -> str:
+    """Replace encrypted premium segment URIs with the real (TikTok CDN) URLs."""
+    if not body or premium_playlist_parts(playlist_url) is None:
+        return body
+    token = dict(urllib.parse.parse_qsl(urlparse(playlist_url).query)).get("t", "")
+    key = _premium_segment_keys.get(token)
+    if not key:
+        return body
+    from Crypto.Cipher import AES
+
+    seq = 0
+    out = []
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#EXT-X-MEDIA-SEQUENCE:"):
+            try:
+                seq = int(stripped.split(":", 1)[1])
+            except ValueError:
+                pass
+        elif stripped and not stripped.startswith("#"):
+            if not stripped.lower().startswith("http") and "." not in stripped:
+                try:
+                    cipher = AES.new(
+                        key, AES.MODE_CTR, nonce=b"", initial_value=seq.to_bytes(16, "big")
+                    )
+                    plain = cipher.decrypt(_b64url_decode(stripped)).decode("utf-8")
+                    if plain.startswith("http"):
+                        line = plain
+                except Exception:
+                    pass
+            seq += 1
+        out.append(line)
+    return "\n".join(out) + ("\n" if body.endswith("\n") else "")
 
 
 def premium_playlist_parts(url: str) -> tuple | None:
@@ -163,6 +208,14 @@ async def premium_playlist_token(
         token = str((data or {}).get("token") or "").strip()
         if not token:
             return None
+        seg_key = str((data or {}).get("k") or "").strip()
+        if seg_key:
+            try:
+                if len(_premium_segment_keys) >= _PREMIUM_SEGMENT_KEYS_MAX:
+                    _premium_segment_keys.pop(next(iter(_premium_segment_keys)))
+                _premium_segment_keys[token] = _b64url_decode(seg_key)
+            except Exception:
+                logger.debug("DLStreams: invalid premium segment key for %s", slug)
         ttl = float((data or {}).get("ttl") or 0) or PREMIUM_TOKEN_DEFAULT_TTL
         ttl = max(PREMIUM_TOKEN_MIN_TTL, ttl)
         _premium_tokens[key] = (token, now + ttl * PREMIUM_TOKEN_RENEW_FRACTION)
@@ -242,8 +295,15 @@ class DLStreamsExtractor(BaseExtractor):
     _player_preference: dict = {}
     # A re-extraction inside this window keeps the pinned player even when it
     # is not ideal (no mid-playback switch); every accepted extraction renews
-    # it, so an ongoing playback stays put while new viewers get a fresh ranking.
-    PIN_STICKY_SECONDS = 300.0
+    # it. Playback through the stable proxy URL does not re-extract, so the
+    # window must outlast a whole match/film: a stall after it would otherwise
+    # re-rank and jump to a player with a different delay.
+    PIN_STICKY_SECONDS = 4 * 3600.0
+    # A sticky player that fails once is probed again before switching: a stall
+    # of a few seconds (WARP/CDN hiccup) must not move playback to another player.
+    PIN_RETRIES = 2
+    PIN_RETRY_DELAY = 2.0
+    PIN_ATTEMPT_BUDGET = 6.0
 
     def __init__(self, request_headers: dict = None, proxies: list = None, bypass_warp: bool = False):
         super().__init__(request_headers or {}, proxies, extractor_name="dlstreams", bypass_warp=bypass_warp)
@@ -572,8 +632,11 @@ class DLStreamsExtractor(BaseExtractor):
                     and unwrapped[188] == 0x47
                     and self._ts_video_payload(unwrapped) is not False
                 ):
+                    self._content_broken = True  # placeholder image, no TS inside
                     return False
-                return await self._ts_video_decodes(unwrapped)
+                decodes = await self._ts_video_decodes(unwrapped)
+                self._content_broken = not decodes
+                return decodes
             if head[0] != 0x47:
                 # fMP4 and other containers retain the existing HTTP probe.
                 return True
@@ -605,9 +668,12 @@ class DLStreamsExtractor(BaseExtractor):
                 and self._ts_video_payload(bytes(body)) is False
             ):
                 logger.info("DLStreams: segment contains audio PES but no video payload")
+                self._content_broken = True
                 return False
             if video_found:
-                return await self._ts_video_decodes(bytes(body))
+                decodes = await self._ts_video_decodes(bytes(body))
+                self._content_broken = not decodes
+                return decodes
             return True
 
     async def _with_premium_token(self, session, stream_url: str, headers: dict) -> str:
@@ -641,6 +707,9 @@ class DLStreamsExtractor(BaseExtractor):
         than only announcing a video PID in its program map.
         """
         deadline = time.monotonic() + (budget if budget is not None else self.EXTRACT_BUDGET_SECONDS)
+        # Set when the player answers with content that cannot play (placeholder
+        # image, no or undecodable video): unlike a timeout, a retry won't fix it.
+        self._content_broken = False
 
         def _timeout(default: float) -> float:
             remaining = deadline - time.monotonic()
@@ -675,6 +744,7 @@ class DLStreamsExtractor(BaseExtractor):
                 current_url = variant
                 if "#EXTM3U" not in current_body[:8000]:
                     return False
+            current_body = decrypt_premium_playlist(current_body, current_url)
             # Variant -> segment. Do not use Range for a TS video probe: an
             # audio-only prefix cannot establish whether video exists later.
             segment = self._first_media_uri(current_body, current_url, want_playlist=False)
@@ -743,8 +813,14 @@ class DLStreamsExtractor(BaseExtractor):
         session = await self._get_session(url)
         seen_iframes: set[str] = set()
         
+        pin = self._player_preference.get((channel_id, self._route_key()))
+        sticky = (
+            pin[0] if pin and time.monotonic() - pin[1] <= self.PIN_STICKY_SECONDS else None
+        )
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + self.EXTRACT_BUDGET_SECONDS
+        deadline = loop.time() + self.EXTRACT_BUDGET_SECONDS + (
+            self.PIN_RETRIES * (self.PIN_ATTEMPT_BUDGET + self.PIN_RETRY_DELAY) if sticky else 0.0
+        )
 
         def _remaining() -> float:
             return deadline - loop.time()
@@ -760,12 +836,26 @@ class DLStreamsExtractor(BaseExtractor):
         # Alive but delayed or stuttering players: kept to fall back on the best.
         fallback = None
         slow_players = 0
-        pin = self._player_preference.get((channel_id, self._route_key()))
-        sticky = (
-            pin[0] if pin and time.monotonic() - pin[1] <= self.PIN_STICKY_SECONDS else None
-        )
+        pin_attempts = 0
+        pin_tries = 1
+        pin_broken = False
+        if sticky and player_urls and player_urls[0] == sticky:
+            player_urls[1:1] = [sticky] * self.PIN_RETRIES
+            pin_tries += self.PIN_RETRIES
 
         for candidate_index, candidate in enumerate(player_urls):
+            is_pin = candidate == sticky
+            if is_pin and pin_broken:
+                continue
+            if is_pin:
+                pin_attempts += 1
+                if pin_attempts > 1:
+                    logger.info(
+                        "DLStreams: pinned player %s failed, retry %d/%d before switching",
+                        candidate, pin_attempts - 1, self.PIN_RETRIES,
+                    )
+                    await asyncio.sleep(self.PIN_RETRY_DELAY)
+            last_pin_try = is_pin and pin_attempts >= pin_tries
             if _remaining() <= 2.0:
                 logger.warning(
                     "DLStreams: extraction budget of %.0fs exhausted after %d/%d players",
@@ -817,7 +907,7 @@ class DLStreamsExtractor(BaseExtractor):
                     iframe_src = urljoin(candidate + "/", iframe_src)
                 
                 logger.debug("DLStreams: found player iframe: %s", iframe_src)
-                if iframe_src in seen_iframes:
+                if iframe_src in seen_iframes and not is_pin:
                     logger.debug("DLStreams: iframe %s already attempted, skipping", iframe_src)
                     continue
                 seen_iframes.add(iframe_src)
@@ -832,7 +922,21 @@ class DLStreamsExtractor(BaseExtractor):
                         logger.debug("DLStreams: iframe %s returned status %s", iframe_src, resp.status)
                         continue
                     iframe_html = await resp.text()
-                
+
+                # wideiptv.top wraps the real player in one more iframe.
+                if ".m3u8" not in iframe_html and "_econfig" not in iframe_html and "atob(" not in iframe_html:
+                    nested = re.search(r'<iframe\s+[^>]*src=["\']([^"\']+)["\']', iframe_html, re.I)
+                    if nested:
+                        nested_src = urljoin(iframe_src, nested.group(1).strip())
+                        iframe_headers["Referer"] = iframe_src
+                        async with session.get(nested_src, headers=iframe_headers, timeout=_timeout(self.CANDIDATE_TIMEOUT_SECONDS)) as resp:
+                            if resp.status == 200:
+                                logger.debug("DLStreams: following nested iframe %s", nested_src)
+                                iframe_src = nested_src
+                                iframe_html = await resp.text()
+                # JSON-escaped URLs ("https:\/\/...") in inline player configs.
+                iframe_html = iframe_html.replace("\\/", "/")
+
                 # Extract stream URL from iframe HTML.
                 # Supported formats:
                 #  1) barecrop.net Player 2: window._econfig='...' (Clappr, scrambled base64)
@@ -902,10 +1006,14 @@ class DLStreamsExtractor(BaseExtractor):
                 # The premium edge needs a per-viewer token on the playlist URL,
                 # so hand over the tokenized URL (validation bundles it too).
                 stream_url = await self._with_premium_token(session, stream_url, playback_headers)
+                budget = _remaining()
+                if is_pin and not last_pin_try:
+                    budget = min(budget, self.PIN_ATTEMPT_BUDGET)
                 if not await self._is_stream_alive(
-                    session, stream_url, playback_headers, budget=_remaining()
+                    session, stream_url, playback_headers, budget=budget
                 ):
                     logger.info("DLStreams: stream from %s is dead, trying next player", candidate)
+                    pin_broken = is_pin and getattr(self, "_content_broken", False)
                     continue
                 lag, load_ratio = self._last_health
                 rank = self._player_rank(lag, load_ratio)
@@ -934,7 +1042,7 @@ class DLStreamsExtractor(BaseExtractor):
                 
             except Exception as e:
                 logger.debug("DLStreams: direct extraction candidate %s failed: %s", candidate, e)
-                if candidate_index == 0 and isinstance(e, asyncio.TimeoutError):
+                if candidate_index == 0 and not is_pin and isinstance(e, asyncio.TimeoutError):
                     # Every candidate shares the dlive.sx origin: when the first
                     # page does not answer, the others will not either.
                     logger.warning("DLStreams: site page timed out, aborting candidate loop")
