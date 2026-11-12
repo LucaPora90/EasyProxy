@@ -1,3 +1,4 @@
+
 name: Build Docker and Release Windows Binary
 
 on:
@@ -17,7 +18,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: realbestia1/easyproxy
+  IMAGE_NAME: lucapora90/easyproxy
 
 jobs:
   check-version:
@@ -139,7 +140,7 @@ jobs:
 
   publish-release:
     name: Publish GitHub Release
-    needs: [build-and-push-docker, build-windows]
+    needs: [check-version, build-windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
