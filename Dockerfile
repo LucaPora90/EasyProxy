@@ -2,6 +2,8 @@
 # Optimized EasyProxy runtime
 # Compatible with AMD64 and ARM64 (Oracle VPS)
 
+FROM node:26-bookworm-slim AS nodebin
+
 FROM python:3.12-slim-bookworm
 
 # 1. Environment Settings
@@ -17,6 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tor-geoipdb \
     tar \
     nodejs \
+    npm \
     node-undici \
     netcat-openbsd \
     procps \
@@ -29,7 +32,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xauth \
     dumb-init \
     ca-certificates \
+    libatomic1 \
     && rm -rf /var/lib/apt/lists/*
+
+# Debian bookworm ships Node 18; happy-dom requires >= 20 and the runners
+# rely on modern ESM behaviour. Use the official Node 26 binary (Node 22 is
+# also blocked by some providers' TLS fingerprint checks).
+COPY --from=nodebin /usr/local/bin/node /usr/local/bin/node
+COPY --from=nodebin /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+ && node --version
 
 # FlareSolverr is part of this image, but EasyProxy starts it only on-demand
 # when VixSrc returns a Cloudflare challenge.
@@ -83,6 +95,8 @@ RUN sed -i 's/\r$//' entrypoint.sh scripts/wireproxy_ctl.sh
 # Node's ESM resolver does not search Debian's global module directory for a
 # bare import. Expose the apt-installed undici package from the app module
 # tree so the VidFast runner can use HTTP ProxyAgent when WARP is selected.
+RUN npm install --no-cache --no-save --prefix /app happy-dom@20.10.6
+
 RUN mkdir -p /app/node_modules \
     && ln -s /usr/share/nodejs/undici /app/node_modules/undici
 

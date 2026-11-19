@@ -216,6 +216,39 @@ async function encryptedRequest(path, payload) {
   return openResponse(responseBytes, request);
 }
 
+// Video-source subtitles come from the same gateway entry, separate from the
+// HLS master: [{type:"vtt", id:"en", url, language}]. Keep the ones we can serve.
+function sanitizeSubtitles(entry) {
+  const captions = Array.isArray(entry?.captions) ? entry.captions : [];
+  const entries = [];
+  const seenUrls = new Set();
+  const seenLanguages = new Set();
+  for (const caption of captions) {
+    if (!caption || typeof caption !== "object") continue;
+    const url = typeof caption.url === "string" ? caption.url.trim() : "";
+    if (!/^https?:\/\//i.test(url)) continue;
+    const type = String(caption.type || "").trim().toLowerCase();
+    let path = "";
+    try {
+      path = new URL(url).pathname.toLowerCase();
+    } catch {
+      continue;
+    }
+    if (type !== "vtt" && !path.endsWith(".vtt")) continue;
+    const language = String(caption.language || caption.id || "").slice(0, 16);
+    if (seenUrls.has(url) || (language && seenLanguages.has(language))) continue;
+    seenUrls.add(url);
+    if (language) seenLanguages.add(language);
+    entries.push({
+      display: String(caption.id || caption.language || "subtitle").slice(0, 80),
+      language,
+      url,
+    });
+    if (entries.length >= 80) break;
+  }
+  return entries;
+}
+
 async function getServers() {
   const res = await fetchImpl(`${API_URL}/servers`, fetchOptions({
     headers: { "User-Agent": UA, Referer: `${BASE_URL}/`, Origin: BASE_URL },
@@ -229,18 +262,19 @@ async function getServers() {
 
 async function resolve() {
   const target = parseTarget(input);
-  const require4k = process.env.CINEJOY_REQUIRE_4K === "1";
   log("Target:", target);
 
   const servers = await getServers();
   const with4k = servers.filter((s) => s["4k"] === true);
   const nebula = servers.filter((s) => s.name === "Nebula");
   const others = servers.filter((s) => !s["4k"] && s.name !== "Nebula");
-  // Always seek 4K (highest resolution) first, fallback to 1080p unless require4k is set
-  const candidateServers = require4k ? with4k : [...with4k, ...nebula, ...others];
+  // Il 4K si prova per primo, ma senza restringere la lista: se nessun server
+  // 4K ha una playlist valida si scende a Nebula/1080p. La qualita' finale la
+  // sceglie il DUAL manifest (_pick_video), che degrada alla variante migliore.
+  const candidateServers = [...with4k, ...nebula, ...others];
 
   if (candidateServers.length === 0) {
-    throw new Error(require4k ? "No active 4K Cinejoy server found" : "No active Cinejoy server found");
+    throw new Error("No active Cinejoy server found");
   }
 
   const isMovie = target.type === "movie";
@@ -257,17 +291,26 @@ async function resolve() {
       const entries = Array.isArray(data?.stream) ? data.stream : [];
       const primaryEntry = entries.find((e) => e?.playlist) || entries[0];
       const playlistUrl = primaryEntry?.playlist;
-      if (!playlistUrl) continue;
+      // Same rule as the addon: some servers (e.g. Comet) hand out a raw .mkv
+      // that is not HLS and is refused by the CDN, so only an m3u8 counts.
+      if (!/^https?:\/\/[^\s]+\.m3u8(?:[?#].*)?$/i.test(String(playlistUrl || "").trim())) {
+        log(`Server ${server.name} returned no HLS playlist, skipping...`);
+        continue;
+      }
 
-      if (playlistUrl.includes("cheaptruckrepairs.cc")) {
-        const check = await fetchImpl(playlistUrl, fetchOptions({
-          headers: { "User-Agent": UA, Referer: `${BASE_URL}/`, Origin: BASE_URL },
-          signal: AbortSignal.timeout(3000),
-        })).catch(() => null);
-        if (!check || !check.ok) {
-          log(`Server ${server.name} playlist unreachable (${check?.status}), skipping...`);
-          continue;
-        }
+      const strictHost = playlistUrl.includes("cheaptruckrepairs.cc");
+      const check = await fetchImpl(playlistUrl, fetchOptions({
+        headers: { "User-Agent": UA, Referer: `${BASE_URL}/`, Origin: BASE_URL },
+        signal: AbortSignal.timeout(3000),
+      })).catch(() => null);
+      // Any host: a master answering 404/410 is a removed file, try the next
+      // server. A timeout only disqualifies the host known to need the probe.
+      if (check ? [404, 410].includes(check.status) || (strictHost && !check.ok) : strictHost) {
+        log(`Server ${server.name} playlist unreachable (${check?.status}), skipping...`);
+        lastError = new Error(`Cinejoy: ${server.name} playlist HTTP ${check?.status || "timeout"}`);
+        continue;
+      }
+      if (strictHost) {
         const text = await check.text();
         const allSubs = [...text.matchAll(/https?:\/\/[^\s"']+/g)].map(m => m[0]);
         const videoSub = allSubs.find(u => u.includes("/video/")) || allSubs[0];
@@ -317,6 +360,7 @@ async function resolve() {
         },
         server: server.name,
         target,
+        subtitles: sanitizeSubtitles(primaryEntry),
       };
     } catch (err) {
       log(`Server ${server.name} error:`, err.message);

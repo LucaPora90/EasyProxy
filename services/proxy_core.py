@@ -378,6 +378,18 @@ class HLSProxyCoreMixin:
         except Exception as exc:
             return "unknown", f"status check error={type(exc).__name__}"
 
+    @staticmethod
+    def _wireproxy_log_tail(limit: int = 8) -> str:
+        """Flatten the last wireproxy log lines into one short reason suffix."""
+        path = os.getenv("WG_LOG_FILE") or "/var/log/wireproxy.log"
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                lines = fh.readlines()[-limit:]
+        except OSError:
+            return ""
+        text = " | ".join(" ".join(line.split()) for line in lines if line.strip())
+        return text[:400]
+
     async def _probe_warp(self, timeout_sec: float = 8.0) -> tuple[bool, str]:
         """Check wireproxy process, SOCKS listener, and real WARP HTTP path."""
         _ENABLE_WARP = _shared.ENABLE_WARP
@@ -389,6 +401,11 @@ class HLSProxyCoreMixin:
         self._warp_ip = ""
 
         process_state, process_detail = await self._wireproxy_process_state()
+        down_log = ""
+        if process_state == "down":
+            tail = self._wireproxy_log_tail()
+            if tail:
+                down_log = f" log={tail}"
         socket_error = None
         try:
             _reader, writer = await asyncio.wait_for(
@@ -404,7 +421,7 @@ class HLSProxyCoreMixin:
             component = "wireproxy_process" if process_state == "down" else "wireproxy_socket"
             return False, (
                 f"component={component} process={process_state}({process_detail}) "
-                f"socks=down error={socket_error}"
+                f"socks=down error={socket_error}{down_log}"
             )
 
         try:
@@ -425,12 +442,12 @@ class HLSProxyCoreMixin:
             if resp.status != 200:
                 return False, (
                     f"component=warp_tunnel process={process_state} socks=up "
-                    f"http_status={resp.status}"
+                    f"http_status={resp.status}{down_log}"
                 )
             if warp_state not in {"on", "plus"}:
                 return False, (
                     f"component=warp_tunnel process={process_state} socks=up "
-                    f"warp={warp_state or 'unknown'}"
+                    f"warp={warp_state or 'unknown'}{down_log}"
                 )
 
             self._warp_ip = trace.get("ip", "")
@@ -443,7 +460,7 @@ class HLSProxyCoreMixin:
             suffix = f" detail={detail}" if detail else ""
             return False, (
                 f"component=warp_tunnel process={process_state} socks=up "
-                f"error={type(exc).__name__}{suffix}"
+                f"error={type(exc).__name__}{suffix}{down_log}"
             )
 
     async def _warp_keepalive(self):
@@ -747,6 +764,63 @@ class HLSProxyCoreMixin:
         return None
 
     @staticmethod
+    def _png_itxt_ts(content: bytes) -> bytes | None:
+        """TS packets wrapped in PNG iTXt chunks (Matchora / CanvasLoader steganography)."""
+        off = 8
+        parts = []
+        c_len = len(content)
+        while off + 12 <= c_len:
+            length = int.from_bytes(content[off:off + 4], "big")
+            kind = content[off + 4:off + 8]
+            s = off + 8
+            e = s + length
+            if e + 4 > c_len:
+                break
+            if kind == b"iTXt":
+                chunk = content[s:e]
+                z = chunk.find(b"\x00")
+                if z != -1 and chunk.startswith(b"payload-"):
+                    try:
+                        idx = int(chunk[8:z].decode("latin1"))
+                        c = chunk[z + 1]
+                        z2 = chunk.find(b"\x00", z + 3)
+                        z3 = chunk.find(b"\x00", z2 + 1)
+                        if z3 != -1:
+                            payload_data = chunk[z3 + 1:]
+                            parts.append((idx, c, payload_data))
+                    except Exception:
+                        pass
+            off = e + 4
+
+        if not parts:
+            return None
+
+        parts.sort(key=lambda x: x[0])
+        import zlib
+        import base64
+        bufs = []
+        for idx, c, d in parts:
+            if c == 1:
+                try:
+                    bufs.append(zlib.decompress(d))
+                except Exception:
+                    try:
+                        bufs.append(zlib.decompress(d, -15))
+                    except Exception:
+                        return None
+            else:
+                bufs.append(d)
+
+        try:
+            full_b64 = b"".join(bufs)
+            video_bytes = base64.b64decode(full_b64)
+            if len(video_bytes) > 188 and video_bytes[0] == 0x47 and video_bytes[188] == 0x47:
+                return video_bytes
+        except Exception:
+            return None
+        return None
+
+    @staticmethod
     def _webp_exif_ts(content: bytes) -> bytes | None:
         """TS packet(s) stored in the WebP EXIF chunk (daddyliveplayer.st)."""
         off = 12
@@ -782,6 +856,10 @@ class HLSProxyCoreMixin:
         is_png = content.startswith(b"\x89PNG\r\n\x1a\n")
 
         if is_png:
+            itxt = HLSProxyCoreMixin._png_itxt_ts(content)
+            if itxt is not None:
+                return itxt
+
             trailing = HLSProxyCoreMixin._png_trailing_ts(content)
             if trailing is not None:
                 return trailing

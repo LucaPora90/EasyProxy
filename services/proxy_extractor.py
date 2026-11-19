@@ -20,6 +20,7 @@ import config as _config
 from yarl import URL
 from extractors.base import ExtractorError, RateLimitError
 from services.proxy_shared import seal_clearkey
+import services.extractor_subtitles as extractor_subtitles
 
 
 def _protected_extractor_params(result: dict) -> dict[str, str]:
@@ -114,6 +115,7 @@ class HLSProxyExtractorHandlerMixin:
                         "vixcloud (alias of vixsrc)",
                         "ads",
                         "sportsonline",
+                        "tvizle",
                         "mixdrop",
                         "voe",
                         "streamtape",
@@ -144,6 +146,14 @@ class HLSProxyExtractorHandlerMixin:
                         "raiplay",
                         "cinejoy",
                         "fctv33",
+                        "scorezone",
+                        "matchora",
+                        "htsport",
+                        "timstreams",
+                        "streamfree",
+                        "ppv",
+                        "ntv",
+                        "streamcorner",
                     ],
                     "examples": [
                         f"{get_public_base_url(request)}/extractor/video?d=https://vavoo.to/channel/123",
@@ -151,6 +161,15 @@ class HLSProxyExtractorHandlerMixin:
                         f"{get_public_base_url(request)}/extractor/video.m3u8?host=vavoo&d=https://custom-link.com",
                         f"{get_public_base_url(request)}/extractor/video.mp4?host=mixdrop&d=https://mixdrop.co/e/ABC123XYZ",
                         f"{get_public_base_url(request)}/extractor/video?host=fctv33&d=https://fctv33.stream/match/123/stream/456",
+                        f"{get_public_base_url(request)}/extractor/video.m3u8?host=scorezone&d=https://scorezonetv.live/iptv/CHANNEL_ID",
+                        f"{get_public_base_url(request)}/extractor/video.m3u8?host=htsport&d=https://htsport.info/calciohd.htm",
+                        f"{get_public_base_url(request)}/extractor/video.m3u8?host=matchora&d=https://matchora.pro/embed/channel/692391",
+                        f"{get_public_base_url(request)}/extractor/video?host=tvizle&d=https://tvizle.tr/izle/trt-1",
+                        f"{get_public_base_url(request)}/extractor/video.m3u8?host=timstreams&d=https://tim-streams.com/channel/abc",
+                        f"{get_public_base_url(request)}/extractor/video?host=streamfree&d=https://streamfree.top/player/football/new-england-patriots-vs-detroit-lions",
+                        f"{get_public_base_url(request)}/extractor/video?host=ppv&d=https://ppv.st/live/nfl-network",
+                        f"{get_public_base_url(request)}/extractor/video?host=ntv&d=https://ntv.cx/watch/raptor/ppv-31956",
+                        f"{get_public_base_url(request)}/extractor/video.m3u8?host=streamcorner&d=https://streamcorner.foo/stream/channels/cnn",
                         f"{get_public_base_url(request)}/extractor/video?d=BASE64_STRING",
                     ],
                 }
@@ -309,6 +328,17 @@ class HLSProxyExtractorHandlerMixin:
                 )
                 selected_proxy = None
             SELECTED_PROXY_CONTEXT.set(selected_proxy)
+
+            if result.get("subtitles"):
+                extractor_subtitles.remember(
+                    stream_key,
+                    result.get("subtitles"),
+                    stream_headers,
+                    bypass_warp,
+                    BYPASS_PROXIES_CONTEXT.get() or bypass_proxies,
+                    selected_proxy,
+                    extractor_key or "",
+                )
 
             logger.debug(f"Extractor Debug: Extractor result selected_proxy: {selected_proxy}")
 

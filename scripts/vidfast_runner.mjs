@@ -35,7 +35,8 @@ if (!inputUrl) {
 
 const pageUrl = new URL(inputUrl).href;
 const pageOrigin = new URL(pageUrl).origin;
-const STREAM_PROBE_TIMEOUT_MS = 10000;
+const STREAM_PROBE_TIMEOUT_MS = 25000;
+const SUBTITLE_FETCH_TIMEOUT_MS = 15000;
 const minimumStreamHeight = Number(process.env.VIDFAST_MIN_HEIGHT || 0);
 const userAgent =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
@@ -316,25 +317,91 @@ async function playerFetch(input, init = {}) {
 context.fetch = playerFetch;
 
 async function probeStreamManifest(url) {
+  for (let attempt = 1; ; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), STREAM_PROBE_TIMEOUT_MS);
+    try {
+      const response = await nativeFetch(url, fetchOptions({
+        headers: mergedHeaders({
+          accept: "application/vnd.apple.mpegurl,*/*",
+          "accept-encoding": "gzip, identity;q=1, *;q=0",
+          range: "bytes=0-",
+        }, `${pageOrigin}/`),
+        signal: controller.signal,
+      }));
+      storeCookies(response);
+      if (!response.ok) throw new Error(`stream HTTP ${response.status}`);
+      const body = await response.text();
+      if (!body.includes("#EXTM3U")) throw new Error("stream response is not an HLS manifest");
+      return body;
+    } catch (error) {
+      if (error?.name === "AbortError") {
+        if (attempt === 1) {
+          log("stream manifest probe timed out, retrying once");
+          continue;
+        }
+        throw new Error("stream manifest probe timed out");
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+}
+
+// The player fetches subtitles separately from the HLS master: the movie/TV
+// page id goes to the same-origin /wyzie endpoint, which answers with a JSON
+// list of {display, language, url, encoding}. The bundle patches host globals
+// (URLSearchParams stops stringifying), so the query is built by hand.
+function subtitleRequestUrl(url) {
+  const parsed = new URL(url);
+  const match = parsed.pathname.match(/^\/(movie|tv)\/(\d+|tt\d+)(?:\/(\d+)\/(\d+))?\/?$/i);
+  if (!match) return "";
+  let query = `id=${encodeURIComponent(match[2])}`;
+  if (match[1].toLowerCase() === "tv") {
+    if (!match[3] || !match[4]) return "";
+    query += `&season=${encodeURIComponent(match[3])}&episode=${encodeURIComponent(match[4])}`;
+  }
+  return `${parsed.origin}/wyzie?${query}`;
+}
+
+function sanitizeSubtitle(item) {
+  if (!item || typeof item !== "object") return null;
+  const url = typeof item.url === "string" ? item.url.trim() : "";
+  if (!/^https?:\/\//i.test(url)) return null;
+  const text = (value, limit) => typeof value === "string" ? value.trim().slice(0, limit) : "";
+  return {
+    display: text(item.display, 80),
+    language: text(item.language, 16),
+    url,
+    encoding: text(item.encoding, 16),
+  };
+}
+
+async function fetchSubtitles() {
+  const target = subtitleRequestUrl(pageUrl);
+  if (!target) return [];
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), STREAM_PROBE_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), SUBTITLE_FETCH_TIMEOUT_MS);
   try {
-    const response = await nativeFetch(url, fetchOptions({
-      headers: mergedHeaders({
-        accept: "application/vnd.apple.mpegurl,*/*",
-        "accept-encoding": "gzip, identity;q=1, *;q=0",
-        range: "bytes=0-",
-      }, `${pageOrigin}/`),
+    const response = await nativeFetch(target, fetchOptions({
+      headers: mergedHeaders({ accept: "application/json, text/plain, */*" }, pageUrl),
       signal: controller.signal,
     }));
-    storeCookies(response);
-    if (!response.ok) throw new Error(`stream HTTP ${response.status}`);
-    const body = await response.text();
-    if (!body.includes("#EXTM3U")) throw new Error("stream response is not an HLS manifest");
-    return body;
+    if (!response.ok) throw new Error(`subtitles HTTP ${response.status}`);
+    const list = await response.json();
+    if (!Array.isArray(list)) throw new Error("subtitle list is not an array");
+    const entries = [];
+    for (const item of list) {
+      const entry = sanitizeSubtitle(item);
+      if (!entry) continue;
+      entries.push(entry);
+      if (entries.length >= 80) break;
+    }
+    return entries;
   } catch (error) {
-    if (error?.name === "AbortError") throw new Error("stream manifest probe timed out");
-    throw error;
+    fs.writeSync(2, "[vidfast] subtitles unavailable: " + describeError(error) + "\n");
+    return [];
   } finally {
     clearTimeout(timeout);
   }
@@ -588,7 +655,10 @@ function currentStreamUrl() {
 }
 
 async function finish(streamUrl) {
-  const manifest = await probeStreamManifest(streamUrl);
+  const [manifest, subtitles] = await Promise.all([
+    probeStreamManifest(streamUrl),
+    fetchSubtitles(),
+  ]);
   const resolutions = [...manifest.matchAll(/RESOLUTION=(\d+)x(\d+)/gi)]
     .map(match => ({ w: Number(match[1]), h: Number(match[2]) }))
     .filter(item => Number.isFinite(item.w) && Number.isFinite(item.h));
@@ -598,12 +668,17 @@ async function finish(streamUrl) {
   if (minimumStreamHeight > 0) {
     const is4k = minimumStreamHeight >= 2160;
     const hasTarget = resolutions.some(item => is4k ? (item.w >= 3800 || item.h >= 2140) : (item.h >= minimumStreamHeight - 16));
-    if (!hasTarget) throw new Error(`no HLS variant near ${minimumStreamHeight}p (highest is ${maxResolution}p)`);
+    if (!hasTarget) {
+      const msg = `no HLS variant near ${minimumStreamHeight}p (highest is ${maxResolution}p)`;
+      if (process.env.VIDFAST_STRICT_RES === "1") throw new Error(msg);
+      console.warn(`[vidfast] ${msg}, continuing with the master playlist`);
+    }
   }
   return {
     url: streamUrl,
     headers: { "User-Agent": userAgent, Referer: pageUrl, Origin: pageOrigin },
     server: "VidFast",
+    subtitles,
   };
 }
 
