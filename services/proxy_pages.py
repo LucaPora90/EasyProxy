@@ -9,6 +9,7 @@ import threading
 import services.proxy_shared as _shared
 from services import wg_tunnels
 from services import tor_proxy
+from services import ram
 from services.updater import check_update_info, apply_self_update, can_self_update, is_newer_version
 from services.proxy_shared import (
     logger, web, APP_VERSION, admin_guard, api_guard,
@@ -664,6 +665,8 @@ class HLSProxyPagesMixin:
         config["available_extractors"] = self._get_available_extractors()
         config["system_stats"] = get_system_stats()
         config["active_streams"] = _shared.get_active_streams()
+        from services.proxy_extractor import extractor_activity
+        config["extractor_activity"] = extractor_activity()
         return web.json_response(config)
 
     def _get_available_extractors(self):
@@ -926,9 +929,10 @@ class HLSProxyPagesMixin:
     def _extractor_test_limits(cls, configured: dict) -> tuple[int, list[str]]:
         """Concurrency and skipped extractors for the bulk test (RAM aware)."""
         try:
-            import psutil
-            total_gb = psutil.virtual_memory().total / (1024 ** 3)
+            total_gb = ram.total_bytes() / (1024 ** 3)
         except Exception:
+            total_gb = 4.0
+        if not total_gb:
             total_gb = 4.0
         if total_gb < 2.0:
             skipped = sorted(name for name in configured if name in cls._BROWSER_TEST_EXTRACTORS)

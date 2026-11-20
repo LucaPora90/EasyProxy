@@ -989,6 +989,7 @@ class HLSProxyStreamingMixin:
                 raise ValueError()
         except ValueError:
             return web.Response(status=400, text="Invalid DUAL video track")
+        prefetch_stream = stream_key or request.query.get("stream_key", "")
         is_dual_prefetch = request.headers.get(dual_prefetch.PREFETCH_HEADER) == "1"
         if dual_video_track and is_hls_segment_request and not is_dual_prefetch:
             segment_key = request.query.get("d", "")
@@ -1007,7 +1008,7 @@ class HLSProxyStreamingMixin:
                 }
                 if content_range:
                     cached_headers["Content-Range"] = content_range
-                dual_prefetch.schedule_after(segment_key, dual_video_track, self._loopback_base(request))
+                dual_prefetch.schedule_after(segment_key, dual_video_track, self._loopback_base(request), stream=prefetch_stream)
                 return web.Response(body=body, status=status, headers=cached_headers)
         if bypass_warp is None:
             bypass_warp = request.query.get("warp", "").lower() == "off"
@@ -2082,9 +2083,9 @@ class HLSProxyStreamingMixin:
                         return web.Response(status=502, text="Invalid DUAL fMP4 segment", headers={"Access-Control-Allow-Origin": "*"})
                     if is_hls_segment_request and response_status == 200:
                         segment_key = request.query.get("d", "")
-                        dual_prefetch.store(segment_key, dual_video_track, content_bytes)
+                        dual_prefetch.store(segment_key, dual_video_track, content_bytes, stream=prefetch_stream)
                         if not is_dual_prefetch:
-                            dual_prefetch.schedule_after(segment_key, dual_video_track, self._loopback_base(request))
+                            dual_prefetch.schedule_after(segment_key, dual_video_track, self._loopback_base(request), stream=prefetch_stream)
 
                 response_headers = {}
 
@@ -2885,8 +2886,8 @@ class HLSProxyStreamingMixin:
             fetch_elapsed = time.monotonic() - fetch_started_at
 
             if init_content and init_cache_key and cached_init is None:
-                if len(init_cache) > 50:
-                    init_cache.clear()
+                if len(init_cache) >= 12:
+                    init_cache.pop(next(iter(init_cache)), None)
                 init_cache[init_cache_key] = init_content
 
             if init_content is None and init_url and not skip_init:
@@ -2937,15 +2938,19 @@ class HLSProxyStreamingMixin:
                 # Decrypt in thread pool to avoid blocking event loop
                 loop = asyncio.get_event_loop()
                 decrypt_started_at = time.monotonic()
-                combined_content = await loop.run_in_executor(
-                    _CLEARKEY_EXECUTOR,
-                    decrypt_segment,
-                    init_content,
-                    segment_content,
-                    key_id,
-                    key,
-                    skip_init,
-                )
+                # Weight the budget by the real size: 4K chunks queue while
+                # 1080p ones still run in parallel.
+                size = len(segment_content) + (len(init_content) if init_content else 0)
+                async with self._drm_slot(size):
+                    combined_content = await loop.run_in_executor(
+                        _CLEARKEY_EXECUTOR,
+                        decrypt_segment,
+                        init_content,
+                        segment_content,
+                        key_id,
+                        key,
+                        skip_init,
+                    )
                 decrypt_elapsed = time.monotonic() - decrypt_started_at
 
             # Serve raw decrypted fMP4.  DASH uses `.m4s` for both tracks, so
