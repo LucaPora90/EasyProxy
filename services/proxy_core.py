@@ -691,19 +691,26 @@ class HLSProxyCoreMixin:
                 "/bin/sh",
                 WARP_CTL_SCRIPT,
                 action,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
-            return await asyncio.wait_for(proc.wait(), timeout=20)
-        except asyncio.TimeoutError:
-            if proc and proc.returncode is None:
-                try:
-                    proc.kill()
-                    await proc.wait()
-                except Exception:
-                    pass
-            logger.warning("WARP control %s timed out", action)
-            return 124
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=20)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                logger.warning("WARP control %s timed out", action)
+                return 124
+            rc = proc.returncode
+            if rc != 0:
+                detail = (stderr or stdout or b"").decode("utf-8", "replace").strip()
+                logger.warning(
+                    "WARP control %s failed (rc=%s): %s",
+                    action,
+                    rc,
+                    detail[-500:] or "no output",
+                )
+            return rc
         except asyncio.CancelledError:
             if proc and proc.returncode is None:
                 try:
@@ -910,6 +917,37 @@ class HLSProxyCoreMixin:
         return None
 
     @staticmethod
+    def _ts_payload_offset(data: bytes | None, packets: int = 5) -> int | None:
+        """First offset whose 0x47 sync repeats for `packets` 188-byte packets."""
+        if not data or len(data) < 188 * packets:
+            return None
+        limit = len(data) - 188 * (packets - 1)
+        pos = data.find(b"\x47")
+        while pos != -1 and pos < limit:
+            if all(data[pos + 188 * k] == 0x47 for k in range(1, packets)):
+                return pos
+            pos = data.find(b"\x47", pos + 1)
+        return None
+
+    @classmethod
+    def _extract_ts_blocks(cls, data: bytes, start: int) -> bytes:
+        """Concatenate 188-byte packets, skipping provider block separators."""
+        out = bytearray()
+        pos = start
+        size = len(data)
+        while pos is not None and pos + 188 <= size:
+            while pos + 188 <= size and data[pos] == 0x47:
+                out += data[pos:pos + 188]
+                pos += 188
+            if pos + 188 > size:
+                break
+            nxt = cls._ts_payload_offset(data[pos:], packets=5)
+            if nxt is None:
+                break
+            pos += nxt
+        return bytes(out)
+
+    @staticmethod
     def _unwrap_image_ts_payload(content: bytes) -> bytes | None:
         """Recover raw MPEG-TS wrapped in an image container.
 
@@ -938,24 +976,67 @@ class HLSProxyCoreMixin:
             try:
                 import io
                 from PIL import Image
-                raw = Image.open(io.BytesIO(content)).convert("RGB").tobytes()
+                img = Image.open(io.BytesIO(content))
+                raw = img.tobytes() if img.mode == "RGB" else img.convert("RGB").tobytes()
             except Exception:
                 raw = None
             if raw is not None:
-                if raw[:8] == b"TIKTIKPX":
-                    length = int.from_bytes(raw[8:12], "big")
-                    if 2 <= length <= len(raw) - 12:
-                        gz = raw[12:12 + length]
-                        if gz[:2] == b"\x1f\x8b":
+                # 1. Look for TIKTIKPX or TIKTIKTSGZ in decompressed image pixels
+                for magic in (b"TIKTIKPX", b"TIKTIKTSGZ"):
+                    m_idx = raw.find(magic)
+                    if m_idx != -1:
+                        pay = raw[m_idx + len(magic):]
+                        gz = None
+                        if len(pay) >= 6 and pay[4:6] == b"\x1f\x8b":
+                            length = int.from_bytes(pay[:4], "big")
+                            gz = pay[4:4 + length] if 2 <= length <= len(pay) - 4 else pay[4:]
+                        elif len(pay) >= 2 and pay[:2] == b"\x1f\x8b":
+                            gz = pay
+                        if gz:
                             try:
                                 ts = gzip.decompress(gz)
                             except Exception:
                                 ts = None
                             if ts is not None and len(ts) > 188 and ts[0] == 0x47 and ts[188] == 0x47:
                                 return ts
+
+                raw_idx = raw.find(b"TIKTIKRAW")
+                if raw_idx != -1:
+                    ts = raw[raw_idx + len(b"TIKTIKRAW"):]
+                    if len(ts) > 188 and ts[0] == 0x47 and ts[188] == 0x47:
+                        return bytes(ts)
+
+                offset = HLSProxyCoreMixin._ts_payload_offset(raw)
+                if offset is not None:
+                    ts = HLSProxyCoreMixin._extract_ts_blocks(raw, offset)
+                    if len(ts) > 188 * 4:
+                        logger.debug(
+                            "Unwrapped %d TS bytes from PNG pixels at offset %d (%d -> %d bytes)",
+                            len(ts), offset, len(content), len(ts),
+                        )
+                        return ts
             # PNG without a recognized payload: fall through to the raw
             # magic / generic sync scan below (mirrors the JS unwrapper,
             # which keeps searching TRAW/TSGZ/0x47 on the raw file bytes).
+
+        # Search TIKTIKPX or TIKTIKTSGZ directly on content bytes
+        for magic in (b"TIKTIKPX", b"TIKTIKTSGZ"):
+            m_idx = content.find(magic)
+            if m_idx != -1:
+                pay = content[m_idx + len(magic):]
+                gz = None
+                if len(pay) >= 6 and pay[4:6] == b"\x1f\x8b":
+                    length = int.from_bytes(pay[:4], "big")
+                    gz = pay[4:4 + length] if 2 <= length <= len(pay) - 4 else pay[4:]
+                elif len(pay) >= 2 and pay[:2] == b"\x1f\x8b":
+                    gz = pay
+                if gz:
+                    try:
+                        ts = gzip.decompress(gz)
+                    except Exception:
+                        ts = None
+                    if ts is not None and len(ts) > 188 and ts[0] == 0x47 and ts[188] == 0x47:
+                        return ts
 
         # Raw TS behind the "TIKTIKRAW" magic (JS: TRAW, first byte 0x47).
         # Require the +188 sync as well to avoid false positives.
@@ -975,17 +1056,12 @@ class HLSProxyCoreMixin:
             if ts is not None and len(ts) > 188 and ts[0] == 0x47 and ts[188] == 0x47:
                 return ts
 
-        # Generic fallback (JS: first 0x47 with another 0x47 at +188).
-        # Use find() iteration (C speed) and require a third sync at +376
-        # when available to avoid false positives inside PNG bytes.
-        pos = content.find(b"\x47")
-        end = len(content) - 188
-        while pos != -1 and pos <= end:
-            if content[pos + 188] == 0x47 and (
-                len(content) <= pos + 376 or content[pos + 376] == 0x47
-            ):
-                return bytes(content[pos:])
-            pos = content.find(b"\x47", pos + 1, end + 1)
+        # Generic fallback (JS: first 0x47 with more sync bytes at +188).
+        offset = HLSProxyCoreMixin._ts_payload_offset(content)
+        if offset is not None:
+            ts = HLSProxyCoreMixin._extract_ts_blocks(content, offset)
+            if len(ts) > 188 * 4:
+                return ts
         return None
 
     @staticmethod
@@ -1281,7 +1357,7 @@ class HLSProxyCoreMixin:
                         proxy,
                         limit=0,
                         limit_per_host=0,
-                        keepalive_timeout=15,
+                        keepalive_timeout=60,
                         enable_cleanup_closed=True,
                     )
                     timeout = ClientTimeout(
@@ -1293,6 +1369,7 @@ class HLSProxyCoreMixin:
                     stream_session = ClientSession(
                         timeout=timeout,
                         connector=connector,
+                        read_bufsize=1024 * 1024,
                     )
                     self._stream_proxy_sessions[stream_key] = stream_session
                 self._stream_proxy_session_atimes[stream_key] = time.time()
@@ -1355,7 +1432,7 @@ class HLSProxyCoreMixin:
                 connector_kwargs = {
                     "limit": 0,
                     "limit_per_host": 0,
-                    "keepalive_timeout": 15,
+                    "keepalive_timeout": 60,
                     "enable_cleanup_closed": True,
                     "use_dns_cache": True,
                 }
@@ -1370,6 +1447,7 @@ class HLSProxyCoreMixin:
                         sock_read=30,
                     ),
                     connector=connector,
+                    read_bufsize=1024 * 1024,
                 )
                 self._stream_proxy_sessions[stream_key] = stream_session
             self._stream_proxy_session_atimes[stream_key] = time.time()
